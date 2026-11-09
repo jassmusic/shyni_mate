@@ -175,9 +175,10 @@ class ShyniBackend:
             }
             if scan_mode == 'add':
                 body.update(ShyniBackend.gather_probe_payload(db_item, shyni_path))
-                # 리셋된 항목과 아직 확인되지 않은 새 항목은 이전 결과를 모르므로,
-                # 보내기 전에 shyni에 직접 물어봐서 이미 라이브러리에 있는 항목인지 확인해 둔다
-                if getattr(db_item, 'reset_done', None) or getattr(db_item, 'in_library', None) is None:
+                # 반영 여부 확인은 리셋된 항목만 한다 — 이전 결과를 모르므로, 보내기 전에
+                # shyni에 직접 물어봐서 이미 라이브러리에 있는 항목인지 확인해 둔다.
+                # 일반 항목은 확인 없이 바로 보낸다 (확인이 느려 전체 처리가 늦어지는 것을 막기 위함)
+                if getattr(db_item, 'reset_done', None):
                     try:
                         # 이 조회는 실제로 수십 초 걸릴 수 있어 제한 시간을 설정으로 받는다
                         probe_timeout = max(P.ModelSetting.get_int('scan_probe_timeout_sec'), 10)

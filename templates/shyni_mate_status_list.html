@@ -293,8 +293,12 @@ function render(data, logFiles, periodicCurrent) {
 
 
 function dbStatsHtml(st) {
-  return '<span>앨범 <strong>' + fmtNum(st.albums) + '</strong></span>'
-    + '<span>트랙 <strong>' + fmtNum(st.tracks) + '</strong></span>'
+  var mainLabel = st.main_label || '앨범';
+  var subLabel = st.sub_label || '트랙';
+  var mainCount = (st.main_count != null) ? st.main_count : st.albums;
+  var subCount = (st.sub_count != null) ? st.sub_count : st.tracks;
+  return '<span>' + mainLabel + ' <strong>' + fmtNum(mainCount) + '</strong></span>'
+    + '<span>' + subLabel + ' <strong>' + fmtNum(subCount) + '</strong></span>'
     + '<span>메타 없음 <strong>' + fmtNum(st.no_code) + '</strong></span>';
 }
 
@@ -370,7 +374,7 @@ function startDbPoll() {
               if (el.length) el.replaceWith(dbStatsHtml(r.libs[k]));
             }
           }
-          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 앨범수·트랙수·메타 없음은 데이터베이스에서 읽어 보여 드립니다.');
+          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
           finishProgress();
           progressActive = false;
         } else if (r.db_off) {
@@ -490,7 +494,7 @@ function load_list(force, quiet) {
         hasData = true;
         $('#server_head_div, #lib_head_div, #status_foot_comment').show();
         window.__dbLoading = !!ret.db_loading;
-        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 앨범수·트랙수·메타 없음은 데이터베이스에서 읽어 보여 드립니다.');
+        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
         render(ret.data, ret.log_files, ret.periodic_current);
         scheduleStatePoll(ret.data);
         if (quiet) {

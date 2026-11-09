@@ -16,7 +16,7 @@
     {{ macros.m_tab_content_start('basic', true) }}
       {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝난 뒤에 다음 항목을 시작합니다.', '서버 부하가 걱정되시면 1로 두시는 것을 권장합니다.']) }}
       {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.']) }}
-      {{ macros.setting_input_int('scan_probe_timeout_sec', '반영 여부 확인 제한 시간', value=arg['scan_probe_timeout_sec'], desc=['단위: 초', '리셋된 항목을 다시 처리할 때, 이미 라이브러리에 반영돼 있는지 shyni에 확인하는 조회가 끝날 때까지 기다리는 최대 시간입니다.', '이 조회는 환경에 따라 수십 초 이상 걸릴 수 있습니다.']) }}
+      {{ macros.setting_input_int('scan_probe_timeout_sec', '반영 여부 확인 제한 시간', value=arg['scan_probe_timeout_sec'], desc=['단위: 초', '반영 여부 확인은 리셋한 항목을 다시 처리할 때만 전송 전에 합니다. 일반 항목은 확인 없이 바로 전송합니다.', '이미 라이브러리에 반영돼 있는지 shyni에 확인하는 조회가 끝날 때까지 기다리는 최대 시간입니다. 이 조회는 환경에 따라 수십 초 이상 걸릴 수 있습니다.']) }}
       {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['단위: 초', '새로 들어온 항목이 있는지 확인하는 간격입니다.']) }}
       {{ macros.m_hr() }}
 
@@ -32,6 +32,7 @@
       </div>
       {{ macros.m_hr() }}
 
+      {{ macros.setting_checkbox('scan_shyni_use', 'Shyni 연동 사용', value=arg['scan_shyni_use'], desc=['켜 두시면 목록에 올라온 항목을 shyni로 전송해 처리합니다.', '꺼 두시면 항목이 올라와도 shyni로 전송하지 않습니다. rclone vfs/refresh 사용이 켜져 있으면 VFS 새로고침까지는 진행합니다.', '단, 리셋한 항목은 꺼져 있어도 전송합니다. 이미 전송된 항목의 완료 확인은 계속됩니다.']) }}
       {{ macros.setting_input_textarea('scan_shyni_path_rule', '샤이니 경로 매핑', col='12', row='3', value=arg['scan_shyni_path_rule'], desc=['이 플러그인이 보는 경로와 shyni 서버가 보는 경로가 다를 때만 적어 주세요. 한 줄에 하나씩, 플러그인 경로|shyni 경로 형식입니다.', '두 서버가 같은 경로를 본다면 비워 두시면 됩니다. 비워 두면 경로가 그대로 전달됩니다.', '예: /mnt/ff쪽경로|/mnt/shyni쪽경로']) }}
       {{ macros.m_hr() }}
 

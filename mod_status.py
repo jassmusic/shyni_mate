@@ -731,7 +731,7 @@ class ModuleStatus(PluginModuleBase):
                 from .db_support import dashboard_stats, library_stats
                 libs = library_stats()
                 cls._db_stats_progress = 55
-                dash = dashboard_stats()
+                dash = dashboard_stats(libs)
                 data = {'libs': libs, 'dash': dash,
                         'elapsed': round(time.time() - t0, 2)}
                 cls._db_stats_cache = {'at': time.time(), 'data': data}
@@ -769,13 +769,15 @@ class ModuleStatus(PluginModuleBase):
             card = dict(st)
             card['key'] = sec['key']
             card['title'] = sec.get('title')
-            card['ok'] = st['albums'] - st['no_code']
-            card['check_pct'] = round(st['no_code'] * 100.0 / st['albums'], 1) if st['albums'] else 0
-            card['avg_tracks'] = round(st['tracks'] * 1.0 / st['albums'], 1) if st['albums'] else 0
+            card['ok'] = st['main_count'] - st['no_code']
+            card['check_pct'] = round(st['no_code'] * 100.0 / st['main_count'], 1) if st['main_count'] else 0
+            card['avg_sub'] = round(st['sub_count'] * 1.0 / st['main_count'], 1) if st['main_count'] else 0
+            card['avg_tracks'] = card['avg_sub']
             lib_cards.append(card)
             if st.get('no_code'):
                 lib_no_code.append({'key': sec['key'], 'title': sec.get('title'),
-                                    'albums': st['albums'], 'no_code': st['no_code']})
+                                    'works': st['main_count'], 'main_label': st['main_label'],
+                                    'albums': st['main_count'], 'no_code': st['no_code']})
         lib_no_code.sort(key=lambda x: -x['no_code'])
         scan = {'periodic_running': bool(periodic_current),
                 'running': 0, 'done': 0, 'failed': 0}
