@@ -102,18 +102,20 @@ def connect(params=None, timeout=5):
     return psycopg2.connect(connect_timeout=timeout, **params)
 
 
-# 라이브러리 종류별 항목 구성 (shyni domain/library.py의 MT_ 상수와 동일)
+# 라이브러리 종류별 항목 구성 (종류 문자열과 MT_ 상수는 shyni 소스 기준)
 # main=작품 단위, sub=하위 단위, group=묶음 단위. movie의 sub는 media_parts 파일 수로 센다.
+# 주의: 쇼 라이브러리의 종류 문자열은 'show'가 아니라 'tv'다.
 TYPE_INFO = {
     'music': {'main': 9, 'main_label': '앨범', 'sub': 10, 'sub_label': '트랙',
               'group': 8, 'group_label': '아티스트'},
     'movie': {'main': 1, 'main_label': '영화', 'sub': None, 'sub_label': '파일',
               'group': None, 'group_label': ''},
-    'show': {'main': 2, 'main_label': '쇼', 'sub': 4, 'sub_label': '에피소드',
-             'group': 3, 'group_label': '시즌'},
+    'tv': {'main': 2, 'main_label': '쇼', 'sub': 4, 'sub_label': '에피소드',
+           'group': 3, 'group_label': '시즌'},
     'book': {'main': 100, 'main_label': '시리즈', 'sub': 102, 'sub_label': '책',
              'group': None, 'group_label': ''},
 }
+TYPE_INFO['show'] = TYPE_INFO['tv']
 
 
 def library_stats():
@@ -134,16 +136,20 @@ def library_stats():
                    count(*) FILTER (WHERE metadata_code IS NULL AND yaml_code IS NULL),
                    count(*) FILTER (WHERE summary IS NULL OR summary = ''),
                    count(*) FILTER (WHERE year IS NULL),
-                   count(*) FILTER (WHERE thumb_url IS NULL OR thumb_url = '')
+                   count(*) FILTER (WHERE thumb_url IS NULL OR thumb_url = ''),
+                   count(*) FILTER (WHERE (metadata_code IS NULL AND yaml_code IS NULL)
+                                      OR (summary IS NULL OR summary = '')
+                                      OR year IS NULL
+                                      OR (thumb_url IS NULL OR thumb_url = ''))
             FROM metadata_items
             GROUP BY library_id, metadata_type
         """)
         per = {}
-        for lib_id, mtype, cnt, nc, ns, ny, nt in cur.fetchall():
+        for lib_id, mtype, cnt, nc, ns, ny, nt, ma in cur.fetchall():
             per.setdefault(int(lib_id), {})[int(mtype)] = {
                 'count': int(cnt or 0), 'no_code': int(nc or 0),
                 'no_summary': int(ns or 0), 'no_year': int(ny or 0),
-                'no_thumb': int(nt or 0)}
+                'no_thumb': int(nt or 0), 'missing_any': int(ma or 0)}
         cur.execute("""
             SELECT mi.library_id, count(*)
             FROM media_parts mp
@@ -162,7 +168,8 @@ def library_stats():
                     'lib_type': lib_type, 'main_label': '항목', 'main_count': total,
                     'sub_label': '', 'sub_count': 0, 'group_label': '', 'group_count': 0,
                     'no_code': 0, 'no_summary': 0, 'no_year': 0, 'no_thumb': 0,
-                    'ok_pct': 0, 'albums': 0, 'tracks': 0, 'artists': 0}
+                    'missing_any': 0, 'ok_pct': 100.0,
+                    'albums': 0, 'tracks': 0, 'artists': 0}
                 continue
             main_row = rows.get(info['main'], {})
             main = main_row.get('count', 0)
@@ -172,6 +179,7 @@ def library_stats():
                 sub = movie_files.get(lib_id, 0)
             group = rows.get(info['group'], {}).get('count', 0) if info['group'] else 0
             no_code = main_row.get('no_code', 0)
+            missing_any = main_row.get('missing_any', 0)
             stats[lib_id] = {
                 'lib_type': lib_type,
                 'main_label': info['main_label'], 'main_count': main,
@@ -181,7 +189,8 @@ def library_stats():
                 'no_summary': main_row.get('no_summary', 0),
                 'no_year': main_row.get('no_year', 0),
                 'no_thumb': main_row.get('no_thumb', 0),
-                'ok_pct': round((main - no_code) * 100.0 / main, 1) if main else 0,
+                'missing_any': missing_any,
+                'ok_pct': round((main - missing_any) * 100.0 / main, 1) if main else 100.0,
                 'albums': main if lib_type == 'music' else 0,
                 'tracks': sub if lib_type == 'music' else 0,
                 'artists': group if lib_type == 'music' else 0}
@@ -200,7 +209,8 @@ def dashboard_stats(libs=None):
         libs = library_stats()
     main = sum(v['main_count'] for v in libs.values())
     no_code = sum(v['no_code'] for v in libs.values())
-    ok = main - no_code
+    missing_any = sum(v.get('missing_any', v['no_code']) for v in libs.values())
+    ok = main - missing_any
     all_music = bool(libs) and all(v['lib_type'] == 'music' for v in libs.values())
     return {'works': main,
             'subs': sum(v['sub_count'] for v in libs.values()),
@@ -208,9 +218,9 @@ def dashboard_stats(libs=None):
             'albums': sum(v['albums'] for v in libs.values()),
             'tracks': sum(v['tracks'] for v in libs.values()),
             'artists': sum(v['artists'] for v in libs.values()),
-            'ok': ok, 'no_code': no_code,
-            'ok_pct': round(ok * 100.0 / main, 1) if main else 0,
-            'check_pct': round(no_code * 100.0 / main, 1) if main else 0,
+            'ok': ok, 'no_code': no_code, 'missing_any': missing_any,
+            'ok_pct': round(ok * 100.0 / main, 1) if main else 100.0,
+            'check_pct': round(missing_any * 100.0 / main, 1) if main else 0,
             'no_summary': sum(v['no_summary'] for v in libs.values()),
             'no_year': sum(v['no_year'] for v in libs.values()),
             'no_thumb': sum(v['no_thumb'] for v in libs.values()),

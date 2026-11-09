@@ -24,7 +24,7 @@ class ModuleScan(PluginModuleBase):
             f"{self.name}_db_version": "1",
             f"{self.name}_max_scan_count": "1",
             #f"{self.name}_incompleted_rescan": "False",
-            f"{self.name}_max_wait_time": "10",
+            f"{self.name}_max_wait_time": "5",
             f"{self.name}_probe_timeout_sec": "60",
             f"{self.name}_manual_target": "",
             f"{self.name}_filecheck_thread_interval": "60",

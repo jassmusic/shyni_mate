@@ -769,15 +769,19 @@ class ModuleStatus(PluginModuleBase):
             card = dict(st)
             card['key'] = sec['key']
             card['title'] = sec.get('title')
-            card['ok'] = st['main_count'] - st['no_code']
-            card['check_pct'] = round(st['no_code'] * 100.0 / st['main_count'], 1) if st['main_count'] else 0
+            missing_any = st.get('missing_any', st['no_code'])
+            card['missing_any'] = missing_any
+            card['ok'] = st['main_count'] - missing_any
+            card['check_pct'] = round(missing_any * 100.0 / st['main_count'], 1) if st['main_count'] else 0
+            card['code_pct'] = round(st['no_code'] * 100.0 / st['main_count'], 1) if st['main_count'] else 0
             card['avg_sub'] = round(st['sub_count'] * 1.0 / st['main_count'], 1) if st['main_count'] else 0
             card['avg_tracks'] = card['avg_sub']
             lib_cards.append(card)
-            if st.get('no_code'):
+            if missing_any:
                 lib_no_code.append({'key': sec['key'], 'title': sec.get('title'),
                                     'works': st['main_count'], 'main_label': st['main_label'],
-                                    'albums': st['main_count'], 'no_code': st['no_code']})
+                                    'albums': st['main_count'], 'no_code': st['no_code'],
+                                    'missing_any': missing_any})
         lib_no_code.sort(key=lambda x: -x['no_code'])
         scan = {'periodic_running': bool(periodic_current),
                 'running': 0, 'done': 0, 'failed': 0}
