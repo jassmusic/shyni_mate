@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+
+{{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장']])}}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
+
+<nav>
+  {{ macros.m_tab_head_start() }}
+    {{ macros.m_tab_head('basic', '기본', true) }}
+    {{ macros.m_tab_head('db', 'DB', false) }}
+  {{ macros.m_tab_head_end() }}
+</nav>
+<form id='setting'>
+  <div class="tab-content" id="nav-tabContent">
+    {{ macros.m_tab_content_start('basic', true) }}
+      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['한 번에 shyni로 전송해 실행 중인 스캔 수. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝나야 다음 항목을 시작합니다.', '서버 부하가 걱정되면 1 권장']) }}
+      {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['단위: 분', '파일이 아직 마운트에 보이지 않을 때 shyni 서버가 대기하는 시간으로 전달됩니다.']) }}
+      {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['단위 : 초']) }}
+      {{ macros.m_hr() }}
+
+      {{ macros.setting_checkbox('scan_use_vfs_refresh', 'rclone vfs/refresh 사용', value=arg['scan_use_vfs_refresh'], desc=['rclone 플러그인 설치 필요', '스캔 전송 전에 항목 경로를 VFS 새로고침합니다.']) }}
+      <div id="scan_use_vfs_refresh_div" class="collapse">
+      {{ macros.setting_input_textarea('scan_vfs_change_rule', 'vfs/refresh 규칙', col='12', row='3', value=arg['scan_vfs_change_rule'], desc=['A|B|C|D(옵션)|E(옵션) 가 하나의 규칙. 규칙 구분자 엔터', '{local_path}|{remote_path}|{address}#{remote_name}|{user_name}|{password}', '/mnt/gds/GDRIVE|/GDRIVE|172.17.0.1:5275#gds2|admin|nimda', '/mnt/gds||http://admin:nimda@localhost:5572']) }}
+      {{ macros.info_text('', '', "A: 로컬 경로, B: 리모트 경로, C: rc addr, D(옵션): rc user, E(옵션): rc pass") }}
+      {{ macros.info_text('', '', "스캔경로가 A로 시작하면 A값을 B값으로 바꾼 리모트 경로를 rcaddr에 해당하는 C에 전달") }}
+      {{ macros.info_text('', '', "rclone 인증 설정이 없을 경우 :") }}
+      {{ macros.info_text('', '', "/mnt/gds2/GDRIVE|/GDRIVE|172.17.0.1:5275") }}
+      {{ macros.info_text('', '', "rclone 인증 설정이 있을 경우 :") }}
+      {{ macros.info_text('', '', "/mnt/gds2/GDRIVE|/GDRIVE|172.17.0.1:5275|userid|userpw") }}
+      </div>
+      {{ macros.m_hr() }}
+
+      {{ macros.setting_input_textarea('scan_shyni_path_rule', '샤이니 경로 매핑', col='12', row='3', value=arg['scan_shyni_path_rule'], desc=['이 플러그인이 보는 경로|샤이니 서버가 보는 경로 — 줄 단위', '예: /mnt/gds2|GDRIVE', '빈칸이면 경로 그대로 전달']) }}
+      {{ macros.m_hr() }}
+
+      {{ macros.m_hr_head_bottom() }}
+      {{ macros.info_text_big('', '<테스트>', '')}}
+      {{ macros.setting_input_textarea('scan_manual_target', '스캔 타겟 파일 또는 폴더',  col=12, value=arg['scan_manual_target']) }}
+      {{ macros.setting_buttons([['add_btn', '추가'], ['remove_file_btn', '파일 삭제'], ['remove_folder_btn', '폴더 삭제'], ['refresh_btn', '메타새로고침 모드']]) }}
+    {{ macros.m_tab_content_end() }}
+
+    {{ macros.m_tab_content_start('db', false) }}
+      {{ macros.setting_input_text_and_buttons('scan_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','scan_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['scan_db_delete_day'], col='6') }}
+      {{ macros.setting_checkbox('scan_db_auto_delete', 'DB 자동 삭제', value=arg['scan_db_auto_delete'], desc=['On : 기간 적용하여 DB를 자동 삭제합니다.']) }}
+    {{ macros.m_tab_content_end() }}
+</form>
+
+<script type="text/javascript">
+
+$(document).ready(function(){
+  use_collapse("scan_use_vfs_refresh");
+});
+
+$('#scan_use_vfs_refresh').change(function() {use_collapse('scan_use_vfs_refresh');});
+
+$("body").on('click', '#add_btn', function(e){
+  e.preventDefault();
+  globalSendCommand('manual', 'ADD', $('#scan_manual_target').val().trim());
+});
+
+$("body").on('click', '#remove_file_btn', function(e){
+  e.preventDefault();
+  globalSendCommand('manual', 'REMOVE_FILE', $('#scan_manual_target').val().trim());
+});
+
+$("body").on('click', '#remove_folder_btn', function(e){
+  e.preventDefault();
+  globalSendCommand('manual', 'REMOVE_FOLDER', $('#scan_manual_target').val().trim());
+});
+
+$("body").on('click', '#refresh_btn', function(e){
+  e.preventDefault();
+  globalSendCommand('manual', 'REFRESH', $('#scan_manual_target').val().trim());
+});
+
+</script>
+{% endblock %}

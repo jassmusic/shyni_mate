@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+{{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장']])}}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
+
+<nav>
+  {{ macros.m_tab_head_start() }}
+    {{ macros.m_tab_head('normal', 'shyni 연결', true) }}
+  {{ macros.m_tab_head_end() }}
+</nav>
+<form id='setting'>
+<div class="tab-content" id="nav-tabContent">
+
+{{ macros.m_tab_content_start('normal', true) }}
+  {{ macros.setting_input_text('base_shyni_url', 'shyni 주소', value=arg['base_shyni_url'], desc=['shyni 서버 주소. 예: http://localhost:7182']) }}
+  {{ macros.setting_input_text('base_shyni_token', 'shyni 토큰', value=arg['base_shyni_token'], desc=['shyni의 X-Plex-Token 값']) }}
+  {{ macros.setting_buttons([['shyni_test_btn', '연결 테스트']], left='연결 테스트', desc=['현재 입력한 주소/토큰으로 라이브러리 목록을 조회합니다. 저장 전에 확인할 수 있습니다.'] ) }}
+{{ macros.m_tab_content_end() }}
+
+</div>
+</form>
+
+<script type="text/javascript">
+$("body").on('click', '#shyni_test_btn', function(e){
+  e.preventDefault();
+  globalSendCommand('shyni_test', $('#base_shyni_url').val().trim(), $('#base_shyni_token').val().trim());
+});
+</script>
+{% endblock %}

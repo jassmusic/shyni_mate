@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block content %}
+
+<form id="form_search" class="form-inline" style="text-align:left">
+  <div class="container-fluid">
+    <div class="row show-grid">
+      <span class="col-md-6">
+        <div class="input-group">
+          <select id="order" name="order" class="form-control form-control-sm">
+            <option value="desc">최근순</option>
+            <option value="asc">오래된순</option>
+          </select>
+          <select id="option1" name="option1" class="form-control form-control-sm">
+            <option value="all" selected>전체</option>
+            <option value="fp_ktv" selected>국내TV 파일처리</option>
+            <option value="gds_tool" selected>구드공 툴</option>
+          </select>
+          <select id="option3" name="option3" class="form-control form-control-sm">
+            <option value="all" selected>전체</option>
+            <option value="ADD">ADD</option>
+            <option value="REFRESH">REFRESH</option>
+            <option value="REMOVE_FILE">REMOVE_FILE</option>
+            <option value="REMOVE_FOLDER">REMOVE_FOLDER</option>
+          </select>
+          <select id="option2" name="option2" class="form-control form-control-sm">
+            <option value="all" selected>전체</option>
+            <option value="READY">READY</option>
+            <option value="ENQUEUE_ADD_FIND">ENQUEUE_ADD_FIND</option>
+            <option value="SCANNING">SCANNING</option>
+            <option value="FINISH_ADD">FINISH_ADD</option>
+            <option value="FINISH_ADD_ALREADY_IN_DB">FINISH_ADD_ALREADY_IN_DB</option>
+            <option value="FINISH_ALREADY_IN_QUEUE">FINISH_ALREADY_IN_QUEUE</option>
+            <option value="FINISH_NOT_FIND_LIBRARY">FINISH_NOT_FIND_LIBRARY</option>
+            <option value="FINISH_TIMEOVER">FINISH_TIMEOVER</option>
+            <option value="FINISH_SCANNING">FINISH_SCANNING</option>
+          </select>
+        </div>
+      </span>
+      <span class="col-md-6">
+        <div class="input-group">
+          <input id="keyword" name="keyword" class="form-control form-control-sm" placeholder="" aria-label="Search">
+          {{ macros.m_button_group([['globalSearchSearchBtn', '검색'], ['searchResetBtn', '리셋']])}}
+        </div>
+      </span>
+    </div>
+  </div>
+</form>
+<div id='page1'></div>
+{{ macros.m_hr_head_top() }}
+{{ macros.m_row_start('0') }}
+{{ macros.m_col(1,  macros.m_strong('ID'), 'center') }}
+{{ macros.m_col(10,  macros.m_strong('Info')) }}
+{{ macros.m_row_end() }}
+{{ macros.m_hr_head_bottom() }}
+<div id="list_div"></div>
+<div id='page2'></div>
+
+<script type="text/javascript">
+var last_list_option = "{{arg['scan_item_last_list_option']}}";
+var shyni_url = "{{arg['base_shyni_url']}}";
+
+$(document).ready(function(){
+  tmp = last_list_option.split('|');
+  if (tmp.length == 6) {
+    $("#order").val(tmp[0]);
+    $("#keyword").val(tmp[2]);
+    $("#option1").val(tmp[3]);
+    $("#option2").val(tmp[4]);
+    $("#option3").val(tmp[5]);
+    //document.getElementById("option2").value = tmp[4];
+    globalRequestSearch(tmp[1]);
+  } else {
+    globalRequestSearch('1');
+  }
+});
+
+
+
+$("body").on('change', '#order', function(e){
+  globalRequestSearch(1);
+});
+
+$("body").on('change', '#option1', function(e){
+  globalRequestSearch(1);
+});
+
+$("body").on('change', '#option2', function(e){
+  globalRequestSearch(1);
+});
+
+$("body").on('change', '#option3', function(e){
+  globalRequestSearch(1);
+});
+
+
+function make_list(data) {
+  str = '';
+  for (i in data) {
+    console.log(data[i])
+    str += j_row_start();
+    tmp = '모드 : ';
+    str += j_col(1, data[i].id, 'center');
+    //tmp += (data[i].mode  == 'ADD') ? "추가" : "삭제";
+    tmp += data[i].mode;
+    tmp += '<br>상태 : ';
+    if (data[i].status == 'READY') tmp += "준비";
+    else if (data[i].status == 'FINISH_ADD') tmp += text_color("정상 추가", 'blue');
+    else if (data[i].status == 'FINISH_ADD_FOLDER') tmp += text_color("정상 추가 폴더", 'blue');
+    else if (data[i].status == 'FINISH_ADD_ALREADY_IN_DB') tmp += text_color("DB에 이미 있음", 'blue');
+    else if (data[i].status == 'FINISH_ALREADY_IN_QUEUE') tmp += text_color("큐에 이미 있음", 'blue');
+    else if (data[i].status == 'FINISH_NOT_FIND_LIBRARY') tmp += text_color("라이브러리 폴더 ✖️", 'red');
+    else if (data[i].status == 'FINISH_TIMEOVER') tmp += "대기시간 오버";
+    else if (data[i].status == 'FINISH_SHYNI') tmp += text_color("샤이니 완료", 'blue');
+    else if (data[i].status == 'FINISH_SHYNI_FAILED') tmp += text_color("샤이니 실패", 'red');
+    else tmp += data[i].status;
+    if (data[i].shyni_status != null && data[i].shyni_status != '') {
+      if (data[i].shyni_status == 'NOT_FIND_LIBRARY') {
+        tmp += '<br><span style="white-space:nowrap; font-size:13px">'
+            + '샤이니 : '
+            + text_color("라이브러리 폴더 ✖️", 'red')
+            + '</span>';
+      } else {
+        tmp += '<br>샤이니 : ';
+        if (data[i].shyni_status == 'FINISH')
+          tmp += text_color("완료", 'blue');
+        else if (data[i].shyni_status == 'RUNNING' || data[i].shyni_status == 'REQUESTED')
+          tmp += "진행 중";
+        else if (data[i].shyni_status == 'FAILED' || data[i].shyni_status == 'ERROR')
+          tmp += text_color("실패", 'red');
+        else if (data[i].shyni_status == 'NOT_FIND_IN_LIBRARY')
+          tmp += text_color("항목 없음", 'red');
+        else if (data[i].shyni_status == 'SKIP')
+          tmp += "설정 미완료";
+        else
+          tmp += data[i].shyni_status;
+      }
+    }
+
+
+    //str += j_col(1, data[i].mode);
+    str += j_col(2, tmp);
+
+    right = j_row_start();
+    tmp = '';
+    tmp += j_info_text_left("경로", data[i].target, 2, 10);
+    tmp += j_info_text_left("파일체크", data[i].filecheck_count, 2, 10);
+    if (data[i].meta_info != null && data[i].meta_info.length > 0) {
+      tmp += j_info_text_left("섹션", data[i].meta_info[0].name, 2, 10);
+
+
+      tmp += '<pre>' + data[i].meta_info[0].summary + '</pre>';
+    }
+
+
+    right += j_col(9, tmp);
+
+    tmp = data[i].created_time + ' (생성)'
+    if (data[i].filecheck_time != null) tmp += '<br>' + data[i].filecheck_time + ' (파일체크)';
+    if (data[i].process_start_time != null) tmp += '<br>' + data[i].process_start_time + ' (스캔시작)';
+    if (data[i].process_finish_time != null) tmp += '<br>' + data[i].process_finish_time + ' (스캔종료)';
+    if (data[i].process_duration != null) tmp += '<br>' + data[i].process_duration + ' (스캔시간)';
+    if (data[i].completed_time != null) tmp += '<br>' + data[i].completed_time + ' (완료)'
+    right += j_col(3, tmp);
+    right += j_row_end();
+
+    right += j_row_start(0);
+    tmp = ''
+    tmp += j_button('globalDbDeleteItemBtn', 'DB 삭제', {'id':data[i].id}, 'danger', true, true);
+    tmp += j_button('globalJsonBtn', 'JSON', {'idx':i}, 'info', true, true);
+    if (data[i].meta_info != null && data[i].meta_info.length > 0 && data[i].meta_info[0].metadata_item_id != null) {
+      tmp += j_button('globalOpenBtn', 'SHYNI', {'url':shyni_url}, 'info', true, true);
+    }
+    if (data[i].status.startsWith('FINISH')) {
+      tmp += j_button('retryScanBtn', '재시도', {'id': data[i].id}, 'warning', true, true);
+    }
+    tmp = j_button_group(tmp)
+    right += j_col(12, tmp)
+    right += j_row_end();
+    str += j_col(9, right)
+    str += j_row_end();
+    if (i != data.length -1) str += j_hr();
+  }
+  $("#list_div").html(str);
+}
+
+
+
+$("body").on('click', '#all_append_files_show_btn', function(e){
+  e.preventDefault();
+  $('.collapse').collapse('show');
+
+});
+
+$("body").on('click', '#all_append_files_hide_btn', function(e){
+  e.preventDefault();
+  $('.collapse').collapse('hide');
+});
+
+$("body").on('click', '#kill_btn', function(e){
+  e.preventDefault();
+  id = $(this).data('id');
+  global_send_command2('kill', id);
+
+  // 확장, 축소 방지
+  return false;
+});
+
+$("body").on('click', '#remove_no_append_data_btn', function(e){
+  e.preventDefault();
+  global_send_command2('remove_no_append_data', null, null, null, null, function(ret){
+    $('#reset_btn').click();
+  });
+});
+
+$("body").on('click', '#retryScanBtn', function(e){
+  e.preventDefault();
+  globalSendCommand('retry_scan', $(this).data('id'), null, null, null);
+});
+
+$("body").on('click', '#searchResetBtn', function(e){
+  e.preventDefault();
+  $("#order").val('desc');
+  $("#option1").val('all');
+  $("#option2").val('all');
+  $("#option3").val('all');
+  $("#keyword").val('');
+  globalRequestSearch(1, false);
+});
+
+</script>
+
+{% endblock %}
