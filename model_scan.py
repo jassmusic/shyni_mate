@@ -55,32 +55,11 @@ class ModelScanItem(ModelBase):
     section_id = db.Column(db.String)
     section_type = db.Column(db.String)
 
-    # 파일 체크 대상
-
-    # 스캔 대상
-    # run_add_find : 추가모드. 파일 찾음
-    # run_remove_removed : 삭제모드 파일 없어짐
-
-    # enqueue_remove_removed : 삭제모드 파일 없어짐
-    # 완료
-    #
-    # 있지 않음.
-    # finish_wrong_section_id : 잘못된 섹션 ID로 요청
-
-    # finish_remove_already_not_in_db : 삭제모드. 이미 DB에 파일이 없음. 완료
-    # finish_already_scan_folder_exist : 추가나 삭제모드. 이미 스캔 대상 폴더가 DB에 있음
-
-    # finish_remove : 삭제모드 끝
-
-    # READY : 준비
-    # ENQUEUE_ADD_FIND : 추가모드. 파일 찾음
-    # SCANNING : 스캔중
-    # FINISH_ADD : 정상추가
-    # FINISH_ADD_ALREADY_IN_DB : 추가모드. 이미 DB에 파일이 있음
-    # FINISH_ALREADY_IN_QUEUE : 이미 QUEUE에 scan_folder가 있음
-    # FINISH_NOT_FIND_LIBRARY  : section_location에 없음.
-    # FINISH_TIMEOVER : 추가모드. 대기시간 지남
-    # FINISH_SCANNING : 스캔 완료했으나 media_part에 없음 (등록할 수 없는 파일 형식 혹은 REMOVE 모드)
+    # 상태 (status)
+    # READY : 대기·처리 중 (파일 체크, VFS 새로고침, 스캔 전송·진행 중 모두 포함.
+    #         세부 진행은 shyni_status(None/RUNNING/FINISH 등)가 따로 표시한다)
+    # FINISH_SHYNI : shyni 스캔까지 마치고 완료
+    # FINISH_SHYNI_FAILED : 처리 실패 (경로·섹션을 찾지 못했거나 shyni 작업이 실패)
 
     def __init__(self, target, mode="ADD", target_section_id='0', callback_id=None, callback_url=None):
         self.mode = mode
@@ -103,22 +82,6 @@ class ModelScanItem(ModelBase):
         self.reset_done = False
         self.in_library = None
 
-
-
-    @classmethod
-    def make_query(cls, req, order='desc', search='', option1='all', option2='all'):
-        with F.app.app_context():
-            query = F.db.session.query(cls)
-            query = cls.make_query_search(query, search, cls.target)
-            if option1 == 'completed':
-                query = query.filter_by(completed=True)
-            elif option1 == 'incompleted':
-                query = query.filter_by(completed=False)
-            if order == 'desc':
-                query = query.order_by(desc(cls.id))
-            else:
-                query = query.order_by(cls.id)
-            return query
 
 
     @classmethod
@@ -189,9 +152,7 @@ class ModelScanItem(ModelBase):
     def set_status_incompleted_to_ready(cls):
         with F.app.app_context():
             ret = db.session.query(cls).filter(
-                ((not_(cls.status.like('FINISH_%'))) & (cls.mode == 'ADD')) | \
-                ((cls.status == 'FINISH_SCANNING') & (cls.mode == 'ADD')) | \
-                (cls.status.like('ENQUEUE_%'))
+                (not_(cls.status.like('FINISH_%'))) & (cls.mode == 'ADD')
             ).update({'status':'READY'}, synchronize_session="fetch")
             db.session.commit()
             return ret

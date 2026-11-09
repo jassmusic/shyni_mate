@@ -12,8 +12,8 @@
           </select>
           <select id="option1" name="option1" class="form-control form-control-sm">
             <option value="all" selected>전체</option>
-            <option value="fp_ktv" selected>국내TV 파일처리</option>
-            <option value="gds_tool" selected>구드공 툴</option>
+            <option value="fp_ktv">국내TV 파일처리</option>
+            <option value="gds_tool">구드공 툴</option>
           </select>
           <select id="option3" name="option3" class="form-control form-control-sm">
             <option value="all" selected>전체</option>
@@ -25,14 +25,8 @@
           <select id="option2" name="option2" class="form-control form-control-sm">
             <option value="all" selected>전체</option>
             <option value="READY">READY</option>
-            <option value="ENQUEUE_ADD_FIND">ENQUEUE_ADD_FIND</option>
-            <option value="SCANNING">SCANNING</option>
-            <option value="FINISH_ADD">FINISH_ADD</option>
-            <option value="FINISH_ADD_ALREADY_IN_DB">FINISH_ADD_ALREADY_IN_DB</option>
-            <option value="FINISH_ALREADY_IN_QUEUE">FINISH_ALREADY_IN_QUEUE</option>
-            <option value="FINISH_NOT_FIND_LIBRARY">FINISH_NOT_FIND_LIBRARY</option>
-            <option value="FINISH_TIMEOVER">FINISH_TIMEOVER</option>
-            <option value="FINISH_SCANNING">FINISH_SCANNING</option>
+            <option value="FINISH_SHYNI">FINISH_SHYNI</option>
+            <option value="FINISH_SHYNI_FAILED">FINISH_SHYNI_FAILED</option>
           </select>
         </div>
       </span>
@@ -137,12 +131,6 @@ function make_list(data) {
       else
         tmp += "준비";
     }
-    else if (data[i].status == 'FINISH_ADD') tmp += text_color("정상 추가", 'blue');
-    else if (data[i].status == 'FINISH_ADD_FOLDER') tmp += text_color("정상 추가 폴더", 'blue');
-    else if (data[i].status == 'FINISH_ADD_ALREADY_IN_DB') tmp += text_color("DB에 이미 있음", 'blue');
-    else if (data[i].status == 'FINISH_ALREADY_IN_QUEUE') tmp += text_color("큐에 이미 있음", 'blue');
-    else if (data[i].status == 'FINISH_NOT_FIND_LIBRARY') tmp += text_color("라이브러리 폴더 ✖️", 'red');
-    else if (data[i].status == 'FINISH_TIMEOVER') tmp += "대기시간 오버";
     else if (data[i].status == 'FINISH_SHYNI') tmp += text_color("완료", 'blue');
     else if (data[i].status == 'FINISH_SHYNI_FAILED') tmp += text_color("실패", 'red');
     else tmp += data[i].status;
