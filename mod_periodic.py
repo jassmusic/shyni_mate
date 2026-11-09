@@ -1,0 +1,171 @@
+import json
+
+from .model_periodic import ModelPeriodicItem
+from .mod_status import ModuleStatus
+from .setup import *
+from .task_periodic import TaskPeriodic, get_current, get_jobs, request_cancel
+
+name = 'periodic'
+logger = P.logger
+
+
+class ModulePeriodic(PluginModuleBase):
+    """주기적 스캔 — 라이브러리를 골라 cron으로 등록하면 정해진 시각에
+    (옵션) VFS 새로고침 → 스캔을 하나씩 순차로 실행한다."""
+
+    def __init__(self, P):
+        super(ModulePeriodic, self).__init__(P, name=name, first_menu='setting')
+        self.db_default = {
+            f'{self.name}_db_version': '1',
+            f'{self.name}_jobs': '[]',
+        }
+
+    def plugin_load(self):
+        ModelPeriodicItem.set_terminated()
+        P.ModelSetting.set('periodic_current', '')
+        P.ModelSetting.set('periodic_cancel', '')
+        self.start()
+
+    # ---------- 스케줄러 ----------
+    def start(self):
+        for idx, item in enumerate(get_jobs()):
+            if item.get('use'):
+                self.sched_add(idx, item=item)
+
+    def sched_add(self, idx, item=None):
+        try:
+            if item is None:
+                item = get_jobs()[idx]
+            if F.scheduler.is_include(item['job_id']):
+                return True
+            job = Job(self.P.package_name, item['job_id'], item['cron'],
+                      self.job_function, item.get('name') or f"작업 {idx + 1}", args=(idx,))
+            F.scheduler.add_job_instance(job)
+            return True
+        except Exception as e:
+            logger.error(f'스케줄 등록 실패: {e}')
+            logger.error(traceback.format_exc())
+        return False
+
+    def sched_remove_all(self):
+        for item in get_jobs():
+            try:
+                if F.scheduler.is_include(item['job_id']):
+                    F.scheduler.remove_job(item['job_id'])
+            except Exception:
+                pass
+        # 인덱스가 바뀐 예전 작업까지 확실히 제거
+        try:
+            for job in list(F.scheduler.get_jobs()):
+                jid = getattr(job, 'id', '') or ''
+                if jid.startswith(f'{self.P.package_name}_periodic_'):
+                    F.scheduler.remove_job(jid)
+        except Exception:
+            pass
+
+    def job_function(self, idx):
+        self.start_celery(TaskPeriodic.start, None, *(idx, 'scheduler'))
+
+    def one_execute(self, idx):
+        jobs = get_jobs()
+        if idx < 0 or idx >= len(jobs):
+            return 'fail'
+        job_id = jobs[idx]['job_id']
+        try:
+            if F.scheduler.is_include(job_id):
+                if F.scheduler.is_running(job_id):
+                    return 'is_running'
+                F.scheduler.execute_job(job_id)
+                return 'scheduler'
+        except Exception:
+            pass
+        def func():
+            time.sleep(1)
+            self.job_function(idx)
+        t = threading.Thread(target=func, args=())
+        t.daemon = True
+        t.start()
+        return 'thread'
+
+    # ---------- 화면 ----------
+    def process_menu(self, sub, req):
+        arg = P.ModelSetting.to_dict()
+        try:
+            sections, _ = ModuleStatus._sections()
+            arg['library_list'] = sections or []
+            arg['periodic_jobs_json'] = P.ModelSetting.get('periodic_jobs') or '[]'
+            return render_template(f'{P.package_name}_{self.name}_{sub}.html', arg=arg)
+        except Exception as e:
+            logger.error(f'Exception:{str(e)}')
+            logger.error(traceback.format_exc())
+            return render_template('sample.html', title=f'{P.package_name}/{self.name}/{sub}')
+
+    def process_command(self, command, arg1, arg2, arg3, req):
+        ret = {'ret': 'success'}
+        if command == 'save_jobs':
+            try:
+                jobs = json.loads(arg1 or '[]')
+                if not isinstance(jobs, list):
+                    raise ValueError('형식이 올바르지 않습니다.')
+            except Exception as e:
+                return jsonify({'ret': 'warning', 'msg': f'작업 목록을 읽지 못했습니다: {e}'})
+            from apscheduler.triggers.cron import CronTrigger
+            cleaned = []
+            for i, job in enumerate(jobs):
+                cron = (job.get('cron') or '').strip()
+                try:
+                    CronTrigger.from_crontab(cron)
+                except Exception:
+                    return jsonify({'ret': 'warning',
+                                    'msg': f"{i + 1}번째 작업의 cron 표현식이 올바르지 않습니다: {cron}"})
+                sections = [str(s) for s in (job.get('sections') or [])]
+                if not sections:
+                    return jsonify({'ret': 'warning',
+                                    'msg': f"{i + 1}번째 작업에 라이브러리를 하나 이상 선택해 주세요."})
+                cleaned.append({
+                    'name': (job.get('name') or f'작업 {i + 1}').strip(),
+                    'sections': sections,
+                    'cron': cron,
+                    'kind': 'vfs' if job.get('kind') == 'vfs' else 'scan',
+                    'use_vfs': bool(job.get('use_vfs')),
+                    'use': bool(job.get('use')),
+                })
+            self.sched_remove_all()
+            P.ModelSetting.set('periodic_jobs', json.dumps(cleaned, ensure_ascii=False))
+            self.start()
+            logger.info(f"[Periodic] 작업 저장: {len(cleaned)}개 — "
+                        f"{[(j['name'], j['kind'], j['cron'], j['use']) for j in cleaned]}")
+            ret['msg'] = f'작업 {len(cleaned)}개를 저장했습니다. 사용으로 켜진 작업은 스케줄러에 반영됐습니다.'
+        elif command == 'task_execute':
+            try:
+                idx = int(arg1)
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
+            if get_current() is not None:
+                return jsonify({'ret': 'warning', 'msg': '이미 진행 중인 주기적 스캔이 있습니다.'})
+            result = self.one_execute(idx)
+            logger.info(f'[Periodic] 지금 실행 요청: idx={idx} 결과={result}')
+            if result == 'is_running':
+                ret['msg'] = '이미 실행 중입니다.'
+            elif result == 'fail':
+                return jsonify({'ret': 'warning', 'msg': '실행하지 못했습니다.'})
+            else:
+                ret['msg'] = '실행을 시작했습니다. 위쪽 요약에서 진행 상태를 볼 수 있습니다.'
+        elif command == 'cancel_current':
+            if get_current() is None:
+                return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 주기적 스캔이 없습니다.'})
+            request_cancel()
+            logger.info('[Periodic] 취소 요청')
+            ret['msg'] = '취소를 요청했습니다. 진행 중인 단계가 정리되면 멈춥니다.'
+        return jsonify(ret)
+
+    # ---------- 화면 AJAX ----------
+    def process_ajax(self, sub, req):
+        if sub == 'current':
+            return jsonify({'ret': 'success', 'data': get_current()})
+        if sub == 'history':
+            return jsonify({'ret': 'success', 'data': ModelPeriodicItem.get_recent(10)})
+        return jsonify({'ret': 'fail', 'msg': '알 수 없는 요청입니다.'})
+
+    def process_api(self, sub, req):
+        return self.process_ajax(sub, req)

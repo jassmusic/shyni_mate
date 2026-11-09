@@ -1,0 +1,581 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12">
+      <strong>현황</strong>
+      <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
+        <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
+        <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
+          <label style="font-weight:normal; font-size:12.5px; margin:0">주기
+            <input type="number" id="refreshMinInput" min="1" max="120" value="{{ '30' if (arg['status_auto_refresh_min'] or '30') == '0' else arg['status_auto_refresh_min'] }}" style="width:52px; height:26px; display:inline-block; padding:2px 6px; font-size:12.5px" class="form-control"> 분
+          </label>
+        </span>
+        <button type="button" class="btn btn-primary" id="refreshSaveBtn" style="padding:2px 10px; font-size:12.5px">저장</button>
+        <button type="button" class="btn btn-info" id="statusRefreshBtn" style="padding:2px 10px; font-size:12.5px">새로고침</button>
+      </span>
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:12px; color:#aaa; text-align:right">
+      주기는 1~120분으로 저장할 수 있습니다.
+    </span>
+  </div>
+</div>
+<style>
+.status-act { padding:1px 8px !important; font-size:11.5px !important; line-height:1.5 !important; }
+@media (max-width: 860px) {
+  .stats-grid { grid-template-columns: 1fr 1fr !important; }
+}
+</style>
+<div id="load_progress_wrap" style="display:none; margin:2px 0 10px 0">
+  <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden"><div id="load_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .4s ease"></div></div>
+  <div id="load_progress_text" style="font-size:12px; color:#888; margin-top:3px">불러오는 중… 0%</div>
+</div>
+<div id="server_head_div" style="margin-bottom:6px"><strong>서버 정보</strong></div>
+<div id="server_card_div" style="margin-bottom:16px">
+  <div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; color:#888">서버 정보를 불러오는 중입니다.</div>
+</div>
+<div id="lib_head_div" style="margin-bottom:6px"><strong>라이브러리 정보</strong></div>
+<div id="type_counts_div" style="font-size:13px; color:#555; margin-bottom:8px"></div>
+<div id="status_list_div">
+  <div style="padding:24px 4px; color:#888">현황을 불러오는 중입니다. 잠시만 기다려 주세요.</div>
+</div>
+<div id="logwarn_div" style="display:none; margin-top:8px; font-size:13px; color:#c0392b">
+  로그를 찾지 못했습니다. 폴더를 다시 확인해주세요.
+</div>
+<div id="status_foot_comment" style="font-size:13px; color:#888; margin-top:10px">
+  파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 아직 로그에 기록이 없는 라이브러리는 스캔이 끝난 뒤에 내용이 채워집니다. 앨범수는 로그에 기록되지 않아 표시하지 않습니다.
+</div>
+<div id="meta_choice_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
+  <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
+    <div style="font-size:15px; font-weight:bold; margin-bottom:6px">메타 새로고침</div>
+    <div style="font-size:13px; color:#666; margin-bottom:14px">어느 범위로 진행할까요? 앨범이 많으면 오래 걸릴 수 있습니다.</div>
+    <div style="display:flex; flex-direction:column; gap:8px">
+      <button type="button" class="btn btn-outline-info" id="meta_all_btn" style="padding:6px 10px; font-size:13px"><span id="meta_all_label">전체 앨범</span></button>
+      <button type="button" class="btn btn-outline-primary" id="meta_nocode_btn" style="padding:6px 10px; font-size:13px"><span id="meta_nocode_label">메타 없는 앨범만</span></button>
+      <button type="button" class="btn btn-outline-secondary" id="meta_cancel_btn" style="padding:6px 10px; font-size:13px">취소</button>
+    </div>
+  </div>
+</div>
+<div id="scan_confirm_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
+  <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
+    <div id="scan_confirm_title" style="font-size:15px; font-weight:bold; margin-bottom:6px">스캔</div>
+    <div id="scan_confirm_body" style="font-size:13px; color:#666; margin-bottom:14px">취소는 웹에서 해야 합니다.</div>
+    <div style="display:flex; flex-direction:column; gap:8px">
+      <button type="button" class="btn btn-outline-success" id="scan_start_btn" style="padding:6px 10px; font-size:13px">시작</button>
+      <button type="button" class="btn btn-outline-secondary" id="scan_back_btn" style="padding:6px 10px; font-size:13px">취소</button>
+    </div>
+  </div>
+</div>
+
+<script type="text/javascript">
+var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/status/';
+var hasData = false;
+var refreshTimer = null;
+var currentRefreshMin = null;
+
+function setupTimer(min) {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  currentRefreshMin = min;
+  if (min > 0) refreshTimer = setInterval(load_list, min * 60000);
+}
+
+function applyRefreshUI(min) {
+  if (min == 0) {
+    $('#refreshUseCheck').prop('checked', false);
+    $('#refreshMinWrap').hide();
+  } else {
+    $('#refreshUseCheck').prop('checked', true);
+    $('#refreshMinWrap').show();
+    $('#refreshMinInput').val(min);
+  }
+}
+
+function fmt(t) {
+  if (!t) return '-';
+  return t.substring(5, 19);
+}
+
+function jobText(job, label, jobLabel) {
+  if (!job) return '';
+  var hasJob = job.job !== null && job.job !== undefined && job.job !== '';
+  var jp = hasJob ? ' · ' + jobLabel + ' ' + job.job : '';
+  if (job.status == 'running') return label + ' 중 (' + fmt(job.started_at) + ' 시작' + jp + ')';
+  if (job.status == 'requested') return label + ' 전송됨 (' + fmt(job.started_at) + jp + ')';
+  if (job.status == 'done') return label + ' 완료 (' + fmt(job.finished_at) + jp + ')';
+  if (job.status == 'failed') return label + ' 실패' + (hasJob ? ' (' + jobLabel + ' ' + job.job + ')' : '') + (job.error ? ': ' + job.error : '');
+  if (job.status == 'cancelled') return label + ' 취소됨 (' + fmt(job.finished_at) + jp + ')';
+  if (job.status == 'interrupted') return label + ' 중단됨 (' + fmt(job.finished_at) + jp + ')';
+  return label + ' ' + job.status;
+}
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return '-';
+  return Number(n).toLocaleString();
+}
+
+var TYPE_LABELS = {movie: '영화', show: '쇼', artist: '앨범', book: '도서', photo: '사진'};
+var TYPE_ORDER = ['movie', 'show', 'artist', 'book', 'photo'];
+
+function renderTypeCounts(counts) {
+  if (!counts) { $('#type_counts_div').html(''); return; }
+  var parts = [];
+  var seen = {};
+  for (var i = 0; i < TYPE_ORDER.length; i++) {
+    var t = TYPE_ORDER[i];
+    if (counts[t]) { parts.push(TYPE_LABELS[t] + ' ' + counts[t]); seen[t] = 1; }
+  }
+  for (var k in counts) if (!seen[k]) parts.push(k + ' ' + counts[k]);
+  $('#type_counts_div').html(parts.length ? '<strong style="color:#333">항목 수</strong> ' + parts.join(' / ') : '');
+}
+
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '-';
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var v = Number(n), i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (i == 0 ? v : v.toFixed(1)) + ' ' + units[i];
+}
+
+function renderServer(server, storage) {
+  var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; background:#fff">';
+  str += '<div style="font-size:14px; margin-bottom:8px"><strong>shyni 서버</strong>';
+  if (!server) {
+    str += ' <span style="float:right; color:#c0392b; font-size:12px">응답 없음</span></div>';
+    str += '<div style="font-size:12px; color:#888">서버 상태를 확인하지 못했습니다. shyni가 실행 중인지, 기본 설정의 주소가 맞는지 확인해 주세요.</div>';
+  } else {
+    var checks = server.checks || {};
+    var bad = Object.keys(checks).filter(function (k) { return !checks[k] || checks[k].status != 'ok'; });
+    var okAll = server.status == 'ready' && bad.length == 0;
+    str += ' <span style="float:right; color:' + (okAll ? '#2f855a' : '#b7791f') + '; font-size:12px">' + (okAll ? '정상' : '확인 필요') + '</span></div>';
+    str += '<div style="font-size:13px; line-height:1.9">';
+    str += '<div>버전 <strong>' + (server.version || '-') + '</strong>' + (server.channel ? ' <span style="color:#888">(' + server.channel + ')</span>' : '') + '</div>';
+    if (server.build_date) str += '<div>빌드 <strong>' + String(server.build_date).substring(0, 10) + '</strong></div>';
+    var compDefs = [['postgres', 'DB'], ['redis', '캐시'], ['meilisearch', '검색']];
+    var chips = [];
+    for (var ci = 0; ci < compDefs.length; ci++) {
+      var ck = checks[compDefs[ci][0]];
+      if (!ck) continue;
+      var cok = ck.status == 'ok';
+      var lampColor = cok ? '#48bb78' : '#f56565';
+      chips.push('<span style="display:inline-block; width:9px; height:9px; border-radius:50%; background:' + lampColor + '; box-shadow:0 0 5px ' + lampColor + '; margin-right:5px; vertical-align:middle"></span>' + compDefs[ci][1] + ' ' + (cok ? '정상' : ck.status));
+    }
+    if (chips.length) {
+      str += '<div style="color:#666">Health 체크 결과</div>';
+      str += '<div style="color:#666">' + chips.join(' <span style="color:#ccc">·</span> ') + '</div>';
+    }
+    str += '</div>';
+  }
+  if (storage && storage.disk_total) {
+    var pct = Math.round(storage.disk_used / storage.disk_total * 100);
+    str += '<div style="font-size:13px; line-height:1.9; margin-top:6px; border-top:1px solid #eee; padding-top:8px">';
+    str += '<div>데이터 용량 <strong>' + (storage.data_size ? fmtBytes(storage.data_size) : '계산 중') + '</strong></div>';
+    if (storage.breakdown && storage.breakdown.length && storage.data_size) {
+      var BAR_COLORS = {'데이터베이스': '#2b6cb0', '검색 인덱스': '#38a169', '캐시': '#dd6b20', '기타': '#a0aec0'};
+      str += '<div style="display:flex; height:10px; border-radius:3px; overflow:hidden; margin:4px 0 6px">';
+      for (var bi = 0; bi < storage.breakdown.length; bi++) {
+        var seg = storage.breakdown[bi];
+        var wpct = Math.max(seg.bytes / storage.data_size * 100, 0.4);
+        str += '<div style="background:' + (BAR_COLORS[seg.label] || '#718096') + '; width:' + wpct + '%" title="' + seg.label + ' ' + fmtBytes(seg.bytes) + '"></div>';
+      }
+      str += '</div>';
+      for (var bj = 0; bj < storage.breakdown.length; bj++) {
+        var it = storage.breakdown[bj];
+        var ipct = (it.bytes / storage.data_size * 100).toFixed(1);
+        str += '<div style="font-size:12px; color:#666"><span style="display:inline-block; width:9px; height:9px; border-radius:2px; background:' + (BAR_COLORS[it.label] || '#718096') + '; margin-right:6px"></span>' + it.label + ' <strong>' + fmtBytes(it.bytes) + '</strong> (' + ipct + '%)</div>';
+      }
+    }
+    str += '<div>디스크 <strong>' + fmtBytes(storage.disk_used) + ' / ' + fmtBytes(storage.disk_total) + '</strong> <span style="color:#888">(여유 ' + fmtBytes(storage.disk_free) + ')</span></div>';
+    str += '<div style="background:#eee; border-radius:3px; height:6px; margin-top:4px"><div style="background:' + (pct >= 90 ? '#c0392b' : '#2b6cb0') + '; height:6px; border-radius:3px; width:' + pct + '%"></div></div>';
+    str += '</div>';
+  } else if (storage) {
+    str += '<div style="font-size:12px; color:#888; margin-top:6px; border-top:1px solid #eee; padding-top:8px">데이터 폴더를 찾지 못했습니다. 기본 설정에서 shyni 데이터 폴더를 확인해 주세요.</div>';
+  }
+  str += '</div>';
+  $('#server_card_div').html(str);
+}
+
+function render(data, logFiles, periodicCurrent) {
+  $('#logwarn_div').toggle(logFiles === 0);
+  var str = '';
+  for (var i in data) {
+    var s = data[i];
+    var st = s.state || {};
+    var hl = periodicCurrent && String(periodicCurrent.section_key) === String(s.key);
+    var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || hl;
+    // 작업 상태: 시간 순서(오른쪽이 최신)로 정렬하고, 최신 항목만 상태 색으로·나머지는 회색으로
+    var statusEntries = [];
+    var vt = jobText(st.vfs, '새로고침', 'rclone job id');
+    if (vt) statusEntries.push({t: (st.vfs.finished_at || st.vfs.started_at || ''), status: st.vfs.status, txt: vt});
+    var ct = jobText(st.scan, '스캔', '샤이니 job id');
+    if (ct) statusEntries.push({t: (st.scan.finished_at || st.scan.started_at || ''), status: st.scan.status, txt: ct});
+    if (st.meta) {
+      var mt = st.meta;
+      var mtTxt = '';
+      if (mt.status == 'running') mtTxt = '메타 새로고침 중 ' + fmtNum(mt.done || 0) + '/' + fmtNum(mt.total || 0);
+      else if (mt.status == 'done') mtTxt = '메타 새로고침 완료 (' + fmt(mt.finished_at) + ')';
+      else if (mt.status == 'cancelled') mtTxt = '메타 새로고침 취소됨 (' + fmt(mt.finished_at) + ')';
+      else if (mt.status == 'interrupted') mtTxt = '메타 새로고침 중단됨 (' + fmt(mt.finished_at) + ')';
+      if (mtTxt) statusEntries.push({t: (mt.finished_at || mt.started_at || ''), status: mt.status, txt: mtTxt});
+    }
+    statusEntries.sort(function (a, b) { return a.t < b.t ? -1 : (a.t > b.t ? 1 : 0); });
+    var statusLines = statusEntries.map(function (e, idx) {
+      var latest = idx == statusEntries.length - 1;
+      var color = '#999';
+      if (latest) {
+        if (e.status == 'running' || e.status == 'requested' || e.status == 'done') color = '#2b6cb0';
+        else if (e.status == 'failed') color = '#c53030';
+        else if (e.status == 'cancelled' || e.status == 'interrupted') color = '#b7791f';
+        else color = '#555';
+      }
+      var weight = (latest && (e.status == 'running' || e.status == 'requested')) ? 'bold' : 'normal';
+      return '<span style="color:' + color + '; font-weight:' + weight + '">' + e.txt + '</span>';
+    });
+    var ls = s.last_scan;
+    var lastScan = '-';
+    if (ls) lastScan = ls.time_text + (ls.result == 'failed' ? ' (실패)' : '');
+    else if (st.scan) lastScan = fmt(st.scan.finished_at || st.scan.started_at);
+
+    str += '<div style="border:' + (hl ? '2px solid #2b6cb0' : '1px solid #ddd') + '; border-radius:6px; padding:10px 14px; margin-bottom:10px; background:' + (hl ? '#ebf4ff' : '#fff') + '; display:flex; flex-wrap:wrap; gap:10px 14px">';
+    // 왼쪽 컬럼: 이름·상태 / 경로 / 수치 — 오른쪽 컬럼: 버튼 (좁으면 아래로 감싼다)
+    str += '<div style="flex:1 1 500px; min-width:0">';
+    // 1줄: 이름 + 상태
+    var CARD_TYPE_LABELS = {'movie': '영화', 'show': '쇼', 'artist': '앨범', 'book': '도서', 'photo': '사진'};
+    str += '<div>' + (CARD_TYPE_LABELS[s.type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + CARD_TYPE_LABELS[s.type] + '</span>' : '') + '<strong style="font-size:16px">' + s.title + '</strong>';
+    if (hl) {
+      var stageTxt = periodicCurrent.stage == 'vfs' ? '새로고침 중' : '스캔 중';
+      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">주기적 스캔 진행 중 · ' + stageTxt + '</span>';
+    }
+    if (statusLines.length) {
+      str += ' <span style="font-size:12px">' + statusLines.join(' <span style="color:#ccc">·</span> ') + '</span>';
+    }
+    str += '</div>';
+    // 2줄: 경로 (한 줄 전체 폭)
+    str += '<div style="font-size:12px; color:#666; word-break:break-all; margin-top:3px">' + s.path + '</div>';
+    // 3줄: 스캔 기록(파일수·신규·missing) — 기록이 없으면 안내 문구만 한 줄
+    str += '<div style="font-size:13px; margin-top:7px; display:flex; flex-wrap:wrap; gap:6px 22px">';
+    if (ls && ls.result == 'done') {
+      str += '<span>파일수 <strong>' + fmtNum(ls.total) + '</strong></span>';
+      str += '<span>신규 <strong>' + fmtNum(ls.new) + '</strong></span>';
+      str += '<span>missing <strong>' + fmtNum(ls.missing) + '</strong></span>';
+    } else {
+      str += '<span style="font-size:12px; color:#888">스캔 후 내용이 반영됩니다</span>';
+    }
+    str += '</div>';
+    // 4줄: 앨범·트랙·메타 없음·마지막 스캔 — 모든 카드에서 같은 열 위치, 좁은 화면에서는 2x2
+    str += '<div class="stats-grid" style="font-size:13px; margin-top:5px; display:grid; grid-template-columns:112px 118px 112px 1fr; column-gap:12px; row-gap:6px; align-items:center">';
+    if (s.db_stats) {
+      str += '<span id="dbstats-' + s.key + '" style="display:contents">' + dbStatsHtml(s.db_stats) + '</span>';
+    } else if (window.__dbLoading) {
+      str += '<span id="dbstats-' + s.key + '" class="dbstats-ph" style="color:#888; grid-column:span 3">앨범·트랙·메타 없음 로딩중…</span>';
+    } else {
+      str += '<span style="grid-column:span 3"></span>';
+    }
+    str += '<span style="white-space:nowrap">마지막 스캔 <strong>' + lastScan + '</strong></span>';
+    str += '</div>';
+    str += '</div>';
+    // 오른쪽 컬럼: 왼쪽 2열(새로고침·메타 새로고침 / 스캔·새로고침 후 스캔), 오른쪽 취소(세로로 길게)
+    str += '<div style="display:flex; gap:4px; align-self:center; flex-shrink:0; max-width:100%">';
+    str += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:4px">';
+    str += '<button type="button" class="btn btn-outline-primary status-act" data-key="' + s.key + '" data-act="vfs_refresh"' + (running ? ' disabled' : '') + '>새로고침</button>';
+    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? s.db_stats.albums : '') + '" data-nocode="' + (s.db_stats ? s.db_stats.no_code : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
+    str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="scan"' + (running ? ' disabled' : '') + '>스캔</button>';
+    str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="vfs_scan" style="white-space:nowrap"' + (running ? ' disabled' : '') + '>새로고침 후 스캔</button>';
+    str += '</div>';
+    str += '<button type="button" class="btn btn-outline-danger status-act" data-key="' + s.key + '" data-act="cancel" style="display:flex; align-items:center; justify-content:center"' + (running ? '' : ' disabled') + '>취소</button>';
+    str += '</div>';
+    str += '</div>';
+  }
+  $('#status_list_div').html(str);
+}
+
+
+function dbStatsHtml(st) {
+  return '<span>앨범 <strong>' + fmtNum(st.albums) + '</strong></span>'
+    + '<span>트랙 <strong>' + fmtNum(st.tracks) + '</strong></span>'
+    + '<span>메타 없음 <strong>' + fmtNum(st.no_code) + '</strong></span>';
+}
+
+var progressActive = true;
+var dbPollTimer = null;
+var dbPollCount = 0;
+var loadStartAt = null;
+
+function fmtElapsed(ms) {
+  var s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + '초';
+  return Math.floor(s / 60) + '분 ' + Math.round(s % 60) + '초';
+}
+
+var progressValue = 0;
+var progressTimer = null;
+var progressDoneOnce = false;
+function paintProgress() {
+  $('#load_progress_wrap').show();
+  $('#load_progress_bar').css('width', progressValue + '%');
+  $('#load_progress_text').text('불러오는 중… ' + progressValue + '%');
+}
+function startProgressCreep(cap) {
+  if (progressTimer) clearInterval(progressTimer);
+  progressTimer = setInterval(function () {
+    if (progressValue < cap) {
+      progressValue = Math.min(cap, progressValue + Math.max(1, Math.round((cap - progressValue) * 0.07)));
+      paintProgress();
+    }
+  }, 250);
+}
+function stopProgressCreep() {
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+}
+function setProgress(p) {
+  if (p === null || p === undefined) return;
+  if (p > progressValue) { progressValue = p; paintProgress(); }
+}
+function finishProgress(ret) {
+  stopProgressCreep();
+  progressValue = 100;
+  $('#load_progress_wrap').show();
+  $('#load_progress_bar').css('width', '100%');
+  var el = loadStartAt ? fmtElapsed(Date.now() - loadStartAt) : '';
+  var txt = '불러오기 완료 · 100%' + (el ? ' · 소요시간 ' + el : '');
+  if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + '에 불러온 정보';
+  $('#load_progress_text').text(txt);
+  progressDoneOnce = true;
+}
+var dbPollFail = 0;
+function stopDbPoll() {
+  if (dbPollTimer) { clearInterval(dbPollTimer); dbPollTimer = null; }
+  finishProgress();
+  progressActive = false;
+}
+function startDbPoll() {
+  if (dbPollTimer) return;
+  dbPollCount = 0;
+  dbPollFail = 0;
+  dbPollTimer = setInterval(function () {
+    dbPollCount++;
+    if (dbPollCount > 60) { stopDbPoll(); return; }
+    $.ajax({
+      type: 'POST', url: API_BASE + 'db_stats', data: {}, timeout: 30000,
+      success: function (r) {
+        if (!r || r.ret != 'success') return;
+        setProgress(r.progress);
+        if (r.ready) {
+          clearInterval(dbPollTimer); dbPollTimer = null;
+          if (r.libs) {
+            for (var k in r.libs) {
+              var el = $('#dbstats-' + k);
+              if (el.length) el.replaceWith(dbStatsHtml(r.libs[k]));
+            }
+          }
+          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 앨범수·트랙수·메타 없음은 데이터베이스에서 읽어 보여 드립니다.');
+          finishProgress();
+          progressActive = false;
+        } else if (r.db_off) {
+          clearInterval(dbPollTimer); dbPollTimer = null;
+          $('.dbstats-ph').text('');
+          finishProgress();
+          progressActive = false;
+        }
+      },
+      error: function () {
+        // 요청이 계속 실패하면 막대가 멈춘 채로 남지 않게 스스로 끝낸다
+        dbPollFail++;
+        if (dbPollFail >= 5) stopDbPoll();
+      }
+    });
+  }, 3000);
+}
+
+var metaChoiceKey = null;
+function openMetaChoice(btn) {
+  metaChoiceKey = btn.data('key');
+  var total = btn.attr('data-albums');
+  var nocode = btn.attr('data-nocode');
+  $('#meta_all_label').text(total ? '전체 앨범 ' + Number(total).toLocaleString() + '개' : '전체 앨범');
+  $('#meta_nocode_label').text(nocode ? '메타 없는 앨범만 ' + Number(nocode).toLocaleString() + '개' : '메타 없는 앨범만');
+  $('#meta_nocode_btn').prop('disabled', nocode === '0');
+  $('#meta_choice_modal').show();
+}
+function closeMetaChoice() {
+  $('#meta_choice_modal').hide();
+  metaChoiceKey = null;
+}
+var scanConfirmKey = null;
+var scanConfirmAct = null;
+function openScanConfirm(btn) {
+  scanConfirmKey = btn.data('key');
+  scanConfirmAct = btn.data('act');
+  $('#scan_confirm_title').text(btn.text());
+  $('#scan_confirm_body').text(scanConfirmAct == 'vfs_scan'
+    ? '새로고침 후 스캔을 누르면, 새로고침은 취소가 가능하나 스캔으로 넘어가면 취소는 웹에서 해야합니다.'
+    : '취소는 웹에서 해야 합니다.');
+  $('#scan_confirm_modal').show();
+}
+function closeScanConfirm() {
+  $('#scan_confirm_modal').hide();
+  scanConfirmKey = null;
+  scanConfirmAct = null;
+}
+function runScanConfirm() {
+  var key = scanConfirmKey;
+  var act = scanConfirmAct;
+  closeScanConfirm();
+  if (key === null || key === undefined || !act) return;
+  $.ajax({
+    type: 'POST',
+    url: API_BASE + act,
+    data: {key: key},
+    success: function (ret) { showMsg(ret); load_list(true); },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+  });
+}
+
+function runMetaChoice(scope) {
+  var key = metaChoiceKey;
+  closeMetaChoice();
+  if (key === null || key === undefined) return;
+  $.ajax({
+    type: 'POST',
+    url: API_BASE + 'meta_refresh',
+    data: {key: key, scope: scope},
+    success: function (ret) { showMsg(ret); load_list(true); },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+  });
+}
+
+var statePollTimer = null;
+function scheduleStatePoll(data) {
+  // 진행 중인 작업이 있으면 20초마다 조용히 상태를 다시 확인한다 (끝나면 자동으로 멈춘다)
+  if (statePollTimer) { clearTimeout(statePollTimer); statePollTimer = null; }
+  var active = false;
+  (data || []).forEach(function (s) {
+    var st = s.state || {};
+    if ((st.vfs && st.vfs.status == 'running') ||
+        (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) ||
+        (st.meta && st.meta.status == 'running')) active = true;
+  });
+  if (active) statePollTimer = setTimeout(function () { load_list(false, true); }, 20000);
+}
+
+function load_list(force, quiet) {
+  if (!dbPollTimer) loadStartAt = Date.now();
+  if (!quiet) {
+    $('#load_progress_wrap').show();
+    if ((force || !progressDoneOnce) && !progressTimer) { progressValue = 0; paintProgress(); startProgressCreep(40); }
+  }
+  $.ajax({
+    type: 'POST',
+    url: API_BASE + 'list',
+    data: force ? {force: '1'} : {},
+    timeout: 120000,
+    success: function (ret) {
+      if (ret.ret == 'success') {
+        if (ret.need_config) {
+          hasData = true;
+          stopProgressCreep();
+          $('#load_progress_wrap').hide();
+          $('#server_head_div, #lib_head_div, #status_foot_comment, #logwarn_div').hide();
+          $('#server_card_div').html('');
+          $('#type_counts_div').html('');
+          $('#status_list_div').html('<div style="padding:24px 4px; color:#888">현황을 보기 위해 설정에서 정보를 입력해 주세요.</div>');
+          if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
+            applyRefreshUI(ret.refresh_min);
+            setupTimer(ret.refresh_min);
+          }
+          return;
+        }
+        hasData = true;
+        $('#server_head_div, #lib_head_div, #status_foot_comment').show();
+        window.__dbLoading = !!ret.db_loading;
+        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 앨범수·트랙수·메타 없음은 데이터베이스에서 읽어 보여 드립니다.');
+        render(ret.data, ret.log_files, ret.periodic_current);
+        scheduleStatePoll(ret.data);
+        if (quiet) {
+          // 상태 확인용 조용한 폴링: 진척 바는 건드리지 않는다
+        } else if (ret.db_loading) {
+          progressActive = true;
+          setProgress(ret.progress);
+          startProgressCreep(95);
+          startDbPoll();
+        } else if (!dbPollTimer) {
+          finishProgress(ret);
+          progressActive = false;
+        }
+        renderTypeCounts(ret.type_counts);
+        renderServer(ret.server, ret.storage);
+        if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
+          applyRefreshUI(ret.refresh_min);
+          setupTimer(ret.refresh_min);
+        }
+      }
+      else if (!hasData) $('#status_list_div').html('<div style="color:red">' + ret.msg + '</div>');
+    },
+    error: function () {
+      if (!hasData) $('#status_list_div').html('<div style="color:red">현황을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</div>');
+    }
+  });
+}
+
+function showMsg(ret) {
+  var m = (ret && ret.msg) ? ret.msg : '처리되었습니다.';
+  if (window.notify) notify(m, ret && ret.ret == 'success' ? 'success' : 'error');
+  else alert(m);
+}
+
+$(document).ready(function () {
+  load_list();
+  $('#statusRefreshBtn').off('click').on('click', function () { load_list(true); });
+  $('#refreshUseCheck').off('change').on('change', function () {
+    $('#refreshMinWrap').toggle($(this).is(':checked'));
+  });
+  $('#refreshSaveBtn').off('click').on('click', function () {
+    var v;
+    if (!$('#refreshUseCheck').is(':checked')) {
+      v = 0;
+    } else {
+      v = parseInt($('#refreshMinInput').val(), 10);
+      if (isNaN(v) || v < 1 || v > 120) { showMsg({ret: 'fail', msg: '1~120 사이의 분 값을 입력해 주세요.'}); return; }
+    }
+    $.ajax({
+      type: 'POST',
+      url: API_BASE + 'set_refresh',
+      data: {min: v},
+      success: function (ret) {
+        showMsg(ret);
+        if (ret.ret == 'success') { applyRefreshUI(v); setupTimer(v); }
+      },
+      error: function () { showMsg({ret: 'fail', msg: '저장에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); }
+    });
+  });
+  $(document).off('click', '.status-act').on('click', '.status-act', function () {
+    var btn = $(this);
+    if (btn.data('act') == 'meta_refresh') {
+      openMetaChoice(btn);
+      return;
+    }
+    if (btn.data('act') == 'vfs_scan' || btn.data('act') == 'scan') {
+      openScanConfirm(btn);
+      return;
+    }
+    btn.prop('disabled', true);
+    $.ajax({
+      type: 'POST',
+      url: API_BASE + btn.data('act'),
+      data: {key: btn.data('key')},
+      success: function (ret) { showMsg(ret); load_list(true); },
+      error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+    });
+  });
+  $('#meta_all_btn').on('click', function () { runMetaChoice('all'); });
+  $('#meta_nocode_btn').on('click', function () { runMetaChoice('nocode'); });
+  $('#meta_cancel_btn').on('click', function () { closeMetaChoice(); });
+  $('#meta_choice_modal').on('click', function (e) { if (e.target === this) closeMetaChoice(); });
+  $('#scan_start_btn').on('click', function () { runScanConfirm(); });
+  $('#scan_back_btn').on('click', function () { closeScanConfirm(); });
+  $('#scan_confirm_modal').on('click', function (e) { if (e.target === this) closeScanConfirm(); });
+});
+</script>
+{% endblock %}

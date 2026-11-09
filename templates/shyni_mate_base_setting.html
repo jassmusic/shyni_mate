@@ -13,9 +13,11 @@
 <div class="tab-content" id="nav-tabContent">
 
 {{ macros.m_tab_content_start('normal', true) }}
-  {{ macros.setting_input_text('base_shyni_url', 'shyni 주소', value=arg['base_shyni_url'], desc=['shyni 서버 주소. 예: http://localhost:7182']) }}
-  {{ macros.setting_input_text('base_shyni_token', 'shyni 토큰', value=arg['base_shyni_token'], desc=['shyni의 X-Plex-Token 값']) }}
-  {{ macros.setting_buttons([['shyni_test_btn', '연결 테스트']], left='연결 테스트', desc=['현재 입력한 주소/토큰으로 라이브러리 목록을 조회합니다. 저장 전에 확인할 수 있습니다.'] ) }}
+  {{ macros.setting_input_text('base_shyni_url', 'shyni 주소', value=arg['base_shyni_url'], desc=['shyni 서버 주소를 입력해 주세요. 예: http://localhost:7182']) }}
+  {{ macros.setting_input_text('base_shyni_token', 'shyni 토큰', value=arg['base_shyni_token'], desc=['shyni의 X-Plex-Token 값을 입력해 주세요.']) }}
+  {{ macros.setting_input_text('base_shyni_log_path', 'shyni 로그 폴더', value=arg['base_shyni_log_path'], desc=['현황의 마지막 스캔·파일수·신규·missing은 shyni 로그를 읽어서 log 기반으로 확인합니다.', 'docker container log가 들어있는 상위 폴더를 지정하세요. 폴더 아래에 컨테이너ID/컨테이너ID-json.log 파일이 있으면 됩니다. 이 서버에서는 기본값 그대로 두시면 됩니다.', '경로는 이 플러그인이 실행되는 컨테이너 안에서 본 경로입니다. CoreELEC은 기본값과 같고, 일반 docker 환경에서는 /var/lib/docker/containers 입니다.', '로그 파일 경로를 직접 지정하셔도 됩니다. 다만 컨테이너를 다시 만들면 ID가 바뀌니 폴더로 지정하시는 것을 권장합니다.']) }}
+  {{ macros.setting_input_text('base_shyni_data_path', 'shyni 데이터 폴더', value=arg['base_shyni_data_path'], desc=['현황의 shyni 서버 정보 카드에서 데이터 용량을 계산할 때 씁니다.', '경로는 이 플러그인이 실행되는 컨테이너 안에서 본 shyni data 폴더입니다. 이 서버에서는 기본값 그대로 두시면 됩니다.']) }}
+  {{ macros.setting_buttons([['shyni_test_btn', '연결 테스트']], left='연결 테스트', desc=['입력하신 주소와 토큰으로 라이브러리 목록이 잘 조회되는지, 저장하시기 전에 미리 확인해 보실 수 있습니다.'] ) }}
 {{ macros.m_tab_content_end() }}
 
 </div>

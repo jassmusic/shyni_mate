@@ -42,6 +42,11 @@ class ModelScanItem(ModelBase):
     # 샤이니 대상 실행 상태(F-4: 대상별 독립) — RUNNING/FINISH/FAILED/ERROR/SKIP/NOT_FIND_LIBRARY
     shyni_status = db.Column(db.String)
     shyni_job_id = db.Column(db.String)
+    vfs_done = db.Column(db.Boolean)  # VFS 새로고침 완료 여부 (체크완료 표시용)
+    vfs_done_time = db.Column(db.DateTime)  # VFS 새로고침 완료 시각
+    reset_done = db.Column(db.Boolean)  # 선택 항목 리셋으로 초기화된 항목인지 표시
+    reset_time = db.Column(db.DateTime)  # 리셋된 시각
+    in_library = db.Column(db.Boolean)  # shyni 라이브러리에 이미 반영된 항목인지 표시
     #metadata_title = db.Column(db.String)
     #metadata_type = db.Column(db.String)
     #metadata_item_id = db.Column(db.String)
@@ -95,6 +100,8 @@ class ModelScanItem(ModelBase):
         self.flag_cancel = False
         self.flag_finish = False
         self.filecheck_count = 0
+        self.reset_done = False
+        self.in_library = None
 
 
 
@@ -145,6 +152,7 @@ class ModelScanItem(ModelBase):
 
     def set_status(self, status, save=False):
         self.status = status
+        # 리셋 표시는 재처리가 끝나도 지우지 않는다 (리셋한 항목임을 목록에서 계속 보여 준다)
         if status == 'ENQUEUE_ADD_FIND':
             self.filecheck_time = datetime.now()
             self.flag_filecheck = True

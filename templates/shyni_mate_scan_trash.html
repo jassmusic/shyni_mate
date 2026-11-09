@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+{{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장'], ['trashSectionsSaveBtn', '대상 저장']])}}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
+
+<div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13px; color:#888">
+      스캔으로 생긴 missing 항목은 휴지통을 비워야 정리됩니다. 기준 경로가 하나라도 보이지 않으면 안전을 위해 실행하지 않습니다.
+    </span>
+  </div>
+</div>
+
+<form id='setting'>
+  {{ macros.setting_checkbox('scan_trash_schedule_enable', '휴지통 비우기 주기 실행', value=arg['scan_trash_schedule_enable'], desc=['켜 두면 아래 cron 시각에 휴지통 비우기를 자동으로 실행합니다.']) }}
+  {{ macros.setting_input_text('scan_trash_cron', 'cron', value=arg['scan_trash_cron'], desc=['예: 0 5 * * * (매일 새벽 5시)']) }}
+  {{ macros.setting_input_textarea('scan_trash_schedule_anchors', '기준 경로', col='9', row='3', value=arg['scan_trash_schedule_anchors'], desc=['이 경로들이 모두 실제로 보여야 휴지통 비우기를 실행합니다. 마운트가 깨진 상태에서 비우는 사고를 막기 위한 안전장치입니다.', '한 줄에 하나씩 적어 주세요. 비워 두면 경로 확인 없이 실행됩니다.']) }}
+</form>
+
+{{ macros.m_hr() }}
+<div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12">
+      <strong>대상 라이브러리</strong>
+      <span style="font-size:12px; color:#888">하나도 고르지 않으면 전체 라이브러리가 대상입니다.</span>
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" id="trash_sections_div" style="display:flex; flex-wrap:wrap; gap:4px 14px"></span>
+  </div>
+  <div class="row show-grid" style="margin-top:8px">
+    <span class="col-md-12">
+      <button type="button" class="btn btn-sm btn-danger" id="trashExecuteBtn">지금 휴지통 비우기</button>
+    </span>
+  </div>
+</div>
+
+{{ macros.m_hr() }}
+<div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12"><strong>마지막 실행 결과</strong></span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12">
+      <pre id="trash_result_pre" style="font-size:12px; white-space:pre-wrap">{{ arg['scan_trash_last_result'] or '아직 실행 기록이 없습니다.' }}</pre>
+    </span>
+  </div>
+</div>
+
+<script type="text/javascript">
+var LIBS = {{ arg['library_list']|tojson }};
+var SELECTED = {{ arg['scan_trash_sections']|safe }};
+
+function renderSections() {
+  var str = '';
+  for (var i = 0; i < LIBS.length; i++) {
+    var lib = LIBS[i];
+    var checked = (SELECTED || []).map(String).indexOf(String(lib.key)) >= 0;
+    str += '<label style="font-weight:normal"><input type="checkbox" class="trash-sec" value="' + lib.key + '"' + (checked ? ' checked' : '') + '> ' + lib.title + '</label>';
+  }
+  if (!LIBS.length) str = '<span style="color:#c0392b">라이브러리 목록을 가져오지 못했습니다. 기본 설정의 shyni 연결을 확인해 주세요.</span>';
+  $('#trash_sections_div').html(str);
+}
+
+$(document).ready(function () {
+  if (!Array.isArray(SELECTED)) SELECTED = [];
+  renderSections();
+
+  $('#trashSectionsSaveBtn').off('click').on('click', function () {
+    var secs = [];
+    $('.trash-sec:checked').each(function () { secs.push($(this).val()); });
+    globalSendCommand('trash_save_sections', JSON.stringify(secs));
+  });
+
+  $('#trashExecuteBtn').off('click').on('click', function () {
+    if (!confirm('선택한 라이브러리의 휴지통을 비웁니다. missing 항목이 실제로 삭제됩니다. 계속하시겠습니까?')) return;
+    globalSendCommand('trash_execute', null);
+  });
+});
+</script>
+{% endblock %}

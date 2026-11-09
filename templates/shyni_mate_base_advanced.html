@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+{{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장']])}}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
+
+<nav>
+  {{ macros.m_tab_head_start() }}
+    {{ macros.m_tab_head('normal', 'PostgreSQL Relay', true) }}
+  {{ macros.m_tab_head_end() }}
+</nav>
+<form id='setting'>
+<div class="tab-content" id="nav-tabContent">
+
+{{ macros.m_tab_content_start('normal', true) }}
+  <div style="font-size:13px; color:#555; line-height:1.7; margin:4px 0 14px 0">
+    <strong>왜 설정하나요?</strong><br>
+    shyni의 데이터베이스를 읽기 전용으로 직접 조회하기 위한 연결입니다.
+    토큰 연동만으로는 알 수 없는 정보를 데이터베이스에서 바로 읽어 옵니다.<br>
+    <strong>무엇을 확인할 수 있나요?</strong><br>
+    현황 화면에서 라이브러리별 <strong>앨범 수 · 트랙 수 · 메타 없음(코드가 없는 앨범) 수</strong>를 확인할 수 있습니다.<br>
+    <strong>안전하게 쓰려면</strong><br>
+    반드시 <strong>읽기 전용 계정</strong>만 적어 주세요. 조회만 가능해서 데이터를 바꿀 수 없습니다.
+    그리고 아래 <strong>연결 테스트에 성공한 설정만</strong> 활용합니다. 설정을 하나라도 바꾸면 다시 테스트하셔야 합니다.
+  </div>
+  <hr style="margin:2px 0 14px 0; border:0; border-top:1px solid #ddd">
+  {{ macros.setting_checkbox('base_db_use', 'PostgreSQL Relay 사용', value=arg['base_db_use'], desc=['켜 두시면 연결 테스트에 성공한 경우에 데이터베이스 정보를 활용합니다.']) }}
+  {{ macros.setting_input_text('base_db_host', '중계 주소', value=arg['base_db_host'], desc=['shyni 데이터베이스로 연결을 중계하는 주소입니다. pgrelay 같은 중계가 먼저 준비되어 있어야 합니다.', '예: pgrelay_out']) }}
+  {{ macros.setting_input_text('base_db_port', '포트', value=arg['base_db_port'], desc=['중계가 듣고 있는 포트입니다. 보통 15432입니다.']) }}
+  {{ macros.setting_input_text('base_db_name', '데이터베이스 이름', value=arg['base_db_name'], desc=['보통 shyni 입니다.']) }}
+  {{ macros.setting_input_text('base_db_user', '계정', value=arg['base_db_user'], desc=['읽기 전용 계정을 적어 주세요. 예: shyni_ro']) }}
+  {{ macros.setting_input_text('base_db_password', '비밀번호', value=arg['base_db_password'], desc=['읽기 전용 계정의 비밀번호입니다. 이 플러그인의 설정 DB에만 저장됩니다.']) }}
+  {{ macros.setting_buttons([['db_test_btn', '연결 테스트']], left='연결 테스트', desc=['지금 입력하신 정보로 데이터베이스가 잘 조회되는지 확인합니다.', '성공하면 전체 앨범 수가 보이고, 이 설정을 활용하기 시작합니다.'] ) }}
+  <div id="db_state_line" style="font-size:13px; margin-top:6px; {% if arg['db_ok'] %}color:#2f855a{% else %}color:#c05621{% endif %}">
+    {% if arg['db_ok'] %}연결 테스트에 성공하여, 데이터베이스 정보를 활용합니다.{% else %}아직 연결 테스트를 통과하지 못해 데이터베이스 정보를 활용하지 않습니다.{% endif %}
+  </div>
+{{ macros.m_tab_content_end() }}
+
+</div>
+</form>
+
+<script type="text/javascript">
+$("body").on('click', '#db_test_btn', function(e){
+  e.preventDefault();
+  var extra = JSON.stringify({
+    name: $('#base_db_name').val().trim(),
+    user: $('#base_db_user').val().trim(),
+    password: $('#base_db_password').val()
+  });
+  globalSendCommand('db_test', $('#base_db_host').val().trim(), $('#base_db_port').val().trim(), extra, function(ret){
+    // 결과에 맞춰 상태 문구를 그 자리에서 바로 바꾼다 (새로고침 없이)
+    if (ret.ret == 'success') {
+      $('#db_state_line').css('color', '#2f855a').text('연결 테스트에 성공하여, 데이터베이스 정보를 활용합니다.');
+    } else {
+      $('#db_state_line').css('color', '#c05621').text('아직 연결 테스트를 통과하지 못해 데이터베이스 정보를 활용하지 않습니다.');
+    }
+  });
+});
+</script>
+{% endblock %}

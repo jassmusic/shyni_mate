@@ -1,0 +1,302 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12">
+      <strong>건강도</strong>
+      <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
+        <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
+        <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
+          <label style="font-weight:normal; font-size:12.5px; margin:0">주기
+            <input type="number" id="refreshMinInput" min="1" max="120" value="{{ '30' if (arg['status_auto_refresh_min'] or '30') == '0' else arg['status_auto_refresh_min'] }}" style="width:52px; height:26px; display:inline-block; padding:2px 6px; font-size:12.5px" class="form-control"> 분
+          </label>
+        </span>
+        <button type="button" class="btn btn-primary" id="refreshSaveBtn" style="padding:2px 10px; font-size:12.5px">저장</button>
+        <button type="button" class="btn btn-info" id="statusRefreshBtn" style="padding:2px 10px; font-size:12.5px">새로고침</button>
+      </span>
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:12px; color:#aaa; text-align:right">
+      주기는 1~120분으로 저장할 수 있습니다.
+    </span>
+  </div>
+</div>
+<div id="health_progress_wrap" style="display:none; margin:2px 0 10px 0">
+  <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden"><div id="health_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .4s ease"></div></div>
+  <div id="health_progress_text" style="font-size:12px; color:#888; margin-top:3px">불러오는 중… 0%</div>
+</div>
+<style>
+.sm-health-libs { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
+@media (max-width: 1150px) { .sm-health-libs { grid-template-columns:repeat(2, 1fr); } }
+@media (max-width: 720px) { .sm-health-libs { grid-template-columns:1fr; } }
+</style>
+<div id="health_head_div" style="margin-bottom:6px; display:none"><strong>라이브러리 건강도</strong> <span style="font-size:12px; color:#888">데이터베이스 기준</span></div>
+<div id="health_div" style="margin-bottom:16px; display:none"></div>
+<div id="health_msg_div" style="padding:24px 4px; color:#888">건강도 정보를 불러오는 중입니다. 잠시만 기다려 주세요.</div>
+
+<script type="text/javascript">
+var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/status/';
+var refreshTimer = null;
+var currentRefreshMin = null;
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return '-';
+  return Number(n).toLocaleString();
+}
+
+function setupTimer(min) {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  currentRefreshMin = min;
+  if (min > 0) refreshTimer = setInterval(load_health, min * 60000);
+}
+
+function applyRefreshUI(min) {
+  if (min == 0) {
+    $('#refreshUseCheck').prop('checked', false);
+    $('#refreshMinWrap').hide();
+  } else {
+    $('#refreshUseCheck').prop('checked', true);
+    $('#refreshMinWrap').show();
+    $('#refreshMinInput').val(min);
+  }
+}
+
+
+function healthCard(label, valueHtml, sub) {
+  return '<div style="flex:1 1 150px; border:1px solid #ddd; border-radius:6px; padding:10px 14px; background:#fff">'
+    + '<div style="font-size:12px; color:#888">' + label + '</div>'
+    + '<div style="font-size:22px; font-weight:bold; margin:2px 0">' + valueHtml + '</div>'
+    + (sub ? '<div style="font-size:12px; color:#888">' + sub + '</div>' : '')
+    + '</div>';
+}
+
+function libComment(c) {
+  // 수치로 한 줄 설명을 만든다
+  if (c.albums > 0 && c.no_code >= c.albums) return '앨범 전부에 코드가 없습니다. 차트 라이브러리 특성으로 보입니다.';
+  var miss = [['코드 없음', c.no_code], ['소개 없음', c.no_summary], ['연도 없음', c.no_year], ['표지 없음', c.no_thumb]];
+  miss.sort(function(a, b){ return b[1] - a[1]; });
+  if (miss[0][1] == 0) return '누락 항목이 없습니다.';
+  var msg = '누락 중에서는 ' + miss[0][0] + '이 ' + fmtNum(miss[0][1]) + '개로 가장 많습니다.';
+  if (c.no_code > 0) msg += ' 코드 없는 앨범 ' + fmtNum(c.no_code) + '개(' + c.check_pct + '%)는 점검이 필요합니다.';
+  else msg += ' 코드 없는 앨범은 없습니다.';
+  return msg;
+}
+
+function libCard(c) {
+  var card = '<div style="display:flex; justify-content:space-between; align-items:baseline">';
+  card += '<strong style="font-size:15px">' + c.title + '</strong>';
+  card += '<span style="font-size:12px; color:#888">정상 <strong style="color:#38a169">' + c.ok_pct + '%</strong></span></div>';
+  card += '<div style="display:flex; height:8px; border-radius:4px; overflow:hidden; background:#dd6b20; margin:6px 0 8px 0"><div style="width:' + c.ok_pct + '%; background:#38a169"></div></div>';
+  card += '<div style="font-size:13px; line-height:1.9">';
+  card += '앨범 <strong style="float:right">' + fmtNum(c.albums) + '</strong><br>';
+  card += '트랙 <strong style="float:right">' + fmtNum(c.tracks) + '</strong> <span style="color:#aaa; font-size:12px">(앨범당 평균 ' + c.avg_tracks + ')</span><br>';
+  card += '아티스트 <strong style="float:right">' + fmtNum(c.artists) + '</strong></div>';
+  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:13px; line-height:1.9">';
+  card += '정상 앨범 <strong style="float:right; color:#2f855a">' + fmtNum(c.ok) + '</strong><br>';
+  card += '점검 필요 <strong style="float:right; color:#c05621">' + fmtNum(c.no_code) + '</strong></div>';
+  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:13px; line-height:1.9">';
+  card += '코드 없음 <strong style="float:right">' + fmtNum(c.no_code) + '</strong><br>';
+  card += '소개 없음 <strong style="float:right">' + fmtNum(c.no_summary) + '</strong><br>';
+  card += '연도 없음 <strong style="float:right">' + fmtNum(c.no_year) + '</strong><br>';
+  card += '표지 없음 <strong style="float:right">' + fmtNum(c.no_thumb) + '</strong></div>';
+  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#666">' + libComment(c) + '</div>';
+  return '<div style="border:1px solid #ddd; border-radius:6px; padding:10px 14px; background:#fff">' + card + '</div>';
+}
+
+function donutSvg(segs, track) {
+  var svg = '<svg width="132" height="132" viewBox="0 0 140 140">';
+  svg += '<circle cx="70" cy="70" r="58" fill="none" stroke="' + (track || '#f1f1f1') + '" stroke-width="16"></circle>';
+  var start = 0;
+  for (var i = 0; i < segs.length; i++) {
+    var p = segs[i].pct;
+    if (p > 0) {
+      var len = p;
+      if (segs.length > 1 && p > 1.2) len = p - 0.8;
+      svg += '<circle cx="70" cy="70" r="58" fill="none" stroke="' + segs[i].color + '" stroke-width="16" pathLength="100" stroke-dasharray="' + len + ' 100" stroke-dashoffset="' + (-start) + '" transform="rotate(-90 70 70)"></circle>';
+    }
+    start += p;
+  }
+  return svg + '</svg>';
+}
+
+function donutCard(title, segs, track, centerMain, centerSub, legendHtml) {
+  var s = '<div style="flex:1 1 300px; border:1px solid #ddd; border-radius:6px; padding:12px 14px; background:#fff">';
+  s += '<div style="font-size:13px; font-weight:bold; margin-bottom:8px">' + title + '</div>';
+  s += '<div style="display:flex; gap:14px; align-items:center">';
+  s += '<div style="position:relative; width:132px; height:132px; flex:0 0 auto">' + donutSvg(segs, track)
+    + '<div style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center">'
+    + '<div style="font-size:19px; font-weight:bold">' + centerMain + '</div>'
+    + '<div style="font-size:11px; color:#888">' + centerSub + '</div></div></div>';
+  s += '<div style="flex:1; font-size:13px; line-height:2">' + legendHtml + '</div>';
+  s += '</div></div>';
+  return s;
+}
+
+function renderHealth(h) {
+  if (!h || !h.totals) { $('#health_head_div, #health_div').hide(); return; }
+  var t = h.totals;
+  var str = '<div style="display:flex; flex-wrap:wrap; gap:10px">';
+  str += healthCard('전체 앨범', fmtNum(t.albums));
+  str += healthCard('정상 앨범', fmtNum(t.ok), t.ok_pct + '%');
+  str += healthCard('점검 필요', fmtNum(t.no_code), t.check_pct + '% · 메타 없음 기준');
+  str += healthCard('전체 트랙', fmtNum(t.tracks));
+  str += healthCard('아티스트', fmtNum(t.artists));
+  str += '</div>';
+  // 도넛 차트 3개: 건강도 · 누락 구성 · 스캔 상태
+  var sc = h.scan || {};
+  var sDone = sc.done || 0, sFail = sc.failed || 0, sRun = sc.running || 0;
+  var sTot = sDone + sFail + sRun;
+  var missTot = t.no_code + t.no_summary + t.no_year + t.no_thumb;
+  function pctOf(v, tot) { return tot ? Math.round(v * 1000 / tot) / 10 : 0; }
+  str += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px">';
+  str += donutCard('라이브러리 건강도',
+    [{pct: t.ok_pct, color: '#38a169'}], '#fde3cf',
+    t.ok_pct + '%', '건강도',
+    '<span style="color:#38a169">●</span> 정상 앨범 <strong>' + fmtNum(t.ok) + '</strong> (' + t.ok_pct + '%)<br>'
+    + '<span style="color:#dd6b20">●</span> 점검 필요 <strong>' + fmtNum(t.no_code) + '</strong> (' + t.check_pct + '%)<br>'
+    + '<span style="color:#888; font-size:12px">메타 코드 없는 앨범이 점검 필요입니다.</span>');
+  str += donutCard('메타데이터 누락',
+    [{pct: pctOf(t.no_code, missTot), color: '#dd6b20'},
+     {pct: pctOf(t.no_summary, missTot), color: '#3182ce'},
+     {pct: pctOf(t.no_year, missTot), color: '#805ad5'},
+     {pct: pctOf(t.no_thumb, missTot), color: '#d69e2e'}], null,
+    fmtNum(missTot), '누락 합계',
+    '<span style="color:#dd6b20">●</span> 코드 없음 <strong>' + fmtNum(t.no_code) + '</strong> (' + pctOf(t.no_code, missTot) + '%)<br>'
+    + '<span style="color:#3182ce">●</span> 소개 없음 <strong>' + fmtNum(t.no_summary) + '</strong> (' + pctOf(t.no_summary, missTot) + '%)<br>'
+    + '<span style="color:#805ad5">●</span> 연도 없음 <strong>' + fmtNum(t.no_year) + '</strong> (' + pctOf(t.no_year, missTot) + '%)<br>'
+    + '<span style="color:#d69e2e">●</span> 표지 없음 <strong>' + fmtNum(t.no_thumb) + '</strong> (' + pctOf(t.no_thumb, missTot) + '%)');
+  str += donutCard('스캔 상태',
+    sTot ? [{pct: pctOf(sDone, sTot), color: '#38a169'},
+            {pct: pctOf(sRun, sTot), color: '#3182ce'},
+            {pct: pctOf(sFail, sTot), color: '#e53e3e'}] : [], null,
+    sTot ? pctOf(sDone, sTot) + '%' : '-', '완료율',
+    '<span style="color:#38a169">●</span> 완료 <strong>' + fmtNum(sDone) + '</strong><br>'
+    + '<span style="color:#3182ce">●</span> 실행 중 <strong>' + fmtNum(sRun) + '</strong><br>'
+    + '<span style="color:#e53e3e">●</span> 실패 <strong>' + fmtNum(sFail) + '</strong><br>'
+    + '<span style="color:#888; font-size:12px">주기적 스캔: ' + (sc.periodic_running ? '진행 중' : '대기') + '</span>');
+  str += '</div>';
+  // 라이브러리별 상세 카드
+  if (h.libs && h.libs.length) {
+    str += '<div style="font-size:13px; font-weight:bold; margin:14px 0 6px 0">라이브러리별 상세</div>';
+    str += '<div class="sm-health-libs">';
+    for (var j = 0; j < h.libs.length; j++) {
+      str += libCard(h.libs[j]);
+    }
+    str += '</div>';
+  }
+  $('#health_div').html(str);
+  $('#health_head_div, #health_div').show();
+}
+
+var healthPollCount = 0;
+var healthLoadStartAt = null;
+function fmtHealthElapsed(ms) {
+  var s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + '초';
+  return Math.floor(s / 60) + '분 ' + Math.round(s % 60) + '초';
+}
+var healthProgressValue = 0;
+var healthProgressTimer = null;
+var healthDoneOnce = false;
+function paintHealthProgress() {
+  $('#health_progress_wrap').show();
+  $('#health_progress_bar').css('width', healthProgressValue + '%');
+  $('#health_progress_text').text('불러오는 중… ' + healthProgressValue + '%');
+}
+function startHealthCreep(cap) {
+  if (healthProgressTimer) clearInterval(healthProgressTimer);
+  healthProgressTimer = setInterval(function () {
+    if (healthProgressValue < cap) {
+      healthProgressValue = Math.min(cap, healthProgressValue + Math.max(1, Math.round((cap - healthProgressValue) * 0.07)));
+      paintHealthProgress();
+    }
+  }, 250);
+}
+function stopHealthCreep() {
+  if (healthProgressTimer) { clearInterval(healthProgressTimer); healthProgressTimer = null; }
+}
+function setHealthProgress(p) {
+  if (p === null || p === undefined) return;
+  if (p > healthProgressValue) { healthProgressValue = p; paintHealthProgress(); }
+}
+function finishHealthProgress(ret) {
+  stopHealthCreep();
+  healthProgressValue = 100;
+  $('#health_progress_wrap').show();
+  $('#health_progress_bar').css('width', '100%');
+  var el = healthLoadStartAt ? fmtHealthElapsed(Date.now() - healthLoadStartAt) : '';
+  var txt = '불러오기 완료 · 100%' + (el ? ' · 소요시간 ' + el : '');
+  if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + '에 불러온 정보';
+  $('#health_progress_text').text(txt);
+  healthDoneOnce = true;
+}
+
+function load_health(force) {
+  if (!healthPollCount) healthLoadStartAt = Date.now();
+  if ((force || !healthDoneOnce) && !healthProgressTimer) { healthProgressValue = 0; paintHealthProgress(); startHealthCreep(40); }
+  $.ajax({
+    type: 'POST',
+    url: API_BASE + 'list',
+    data: force ? {force: '1'} : {},
+    timeout: 120000,
+    success: function (ret) {
+      if (ret.ret != 'success') { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('건강도 정보를 불러오지 못했습니다.'); return; }
+      if (ret.need_config) { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('현황을 보기 위해 설정에서 정보를 입력해 주세요.'); return; }
+      if (ret.db_loading && !ret.health) {
+        $('#health_msg_div').show().text('건강도 정보를 불러오는 중입니다. 잠시만 기다려 주세요.');
+        setHealthProgress(ret.progress);
+        startHealthCreep(95);
+        if (healthPollCount < 50) { healthPollCount++; setTimeout(load_health, 3000); }
+        return;
+      }
+      healthPollCount = 0;
+      if (!ret.health) { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('고급 설정에서 PostgreSQL Relay 연결 테스트를 통과하면 데이터베이스 기준 건강도를 보여 드립니다.'); return; }
+      finishHealthProgress(ret);
+      $('#health_msg_div').hide();
+      renderHealth(ret.health);
+      if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
+        applyRefreshUI(ret.refresh_min);
+        setupTimer(ret.refresh_min);
+      }
+    },
+    error: function () {
+      $('#health_msg_div').show().text('건강도 정보를 불러오지 못했습니다.');
+    }
+  });
+}
+
+$(document).ready(function() {
+  $('#statusRefreshBtn').on('click', function(){ load_health(true); });
+  $('#refreshUseCheck').on('change', function(){
+    $('#refreshMinWrap').toggle(this.checked);
+  });
+  $('#refreshSaveBtn').on('click', function(){
+    var use = $('#refreshUseCheck').is(':checked');
+    var min = parseInt($('#refreshMinInput').val(), 10);
+    if (use && !(min >= 1 && min <= 120)) { alert('주기는 1~120분으로 입력해 주세요.'); return; }
+    $.ajax({
+      type: 'POST',
+      url: API_BASE + 'set_refresh',
+      data: {min: use ? min : 0},
+      success: function (ret) {
+        if (window.notify) notify(ret.msg, ret.ret == 'success' ? 'success' : 'error');
+        else alert(ret.msg);
+        if (ret.ret == 'success') {
+          currentRefreshMin = use ? min : 0;
+          applyRefreshUI(currentRefreshMin);
+          setupTimer(currentRefreshMin);
+        }
+      },
+      error: function () { alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.'); }
+    });
+  });
+  var initMin = parseInt("{{ arg['status_auto_refresh_min'] or '30' }}", 10);
+  if (isNaN(initMin)) initMin = 1;
+  currentRefreshMin = initMin;
+  load_health();
+  setupTimer(initMin);
+});
+</script>
+{% endblock %}

@@ -47,9 +47,16 @@ class Task:
                             # 동시 스캔 수 제한 — 항목별 직렬 처리.
                             # VFS 새로고침 → 스캔 전송 → 결과 확인이 끝나야 다음 항목을 시작한다.
                             continue
+                        if item.filecheck_time is None:
+                            item.filecheck_time = datetime.now()
                         if item.mode == 'ADD' and P.ModelSetting.get_bool('scan_use_vfs_refresh'):
                             try:
-                                vfs_refresh(item.target, recursive=True)
+                                vfs_ret = vfs_refresh(item.target, recursive=True)
+                                values = (vfs_ret.get('result') or {}).values() if isinstance(vfs_ret, dict) else []
+                                if any(str(v).lower() == 'ok' for v in values):
+                                    item.vfs_done = True
+                                    item.vfs_done_time = datetime.now()
+                                    logger.info(f'[Scan] VFS 새로고침 완료: item={item.id} {item.target}')
                             except Exception as e:
                                 logger.error(f'vfs_refresh 실패: {item.target} {e}')
                         if item.mode == 'REFRESH':

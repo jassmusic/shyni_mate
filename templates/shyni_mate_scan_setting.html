@@ -14,24 +14,25 @@
 <form id='setting'>
   <div class="tab-content" id="nav-tabContent">
     {{ macros.m_tab_content_start('basic', true) }}
-      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['한 번에 shyni로 전송해 실행 중인 스캔 수. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝나야 다음 항목을 시작합니다.', '서버 부하가 걱정되면 1 권장']) }}
-      {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['단위: 분', '파일이 아직 마운트에 보이지 않을 때 shyni 서버가 대기하는 시간으로 전달됩니다.']) }}
-      {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['단위 : 초']) }}
+      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝난 뒤에 다음 항목을 시작합니다.', '서버 부하가 걱정되시면 1로 두시는 것을 권장합니다.']) }}
+      {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.']) }}
+      {{ macros.setting_input_int('scan_probe_timeout_sec', '반영 여부 확인 제한 시간', value=arg['scan_probe_timeout_sec'], desc=['단위: 초', '리셋된 항목을 다시 처리할 때, 이미 라이브러리에 반영돼 있는지 shyni에 확인하는 조회가 끝날 때까지 기다리는 최대 시간입니다.', '이 조회는 환경에 따라 수십 초 이상 걸릴 수 있습니다.']) }}
+      {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['단위: 초', '새로 들어온 항목이 있는지 확인하는 간격입니다.']) }}
       {{ macros.m_hr() }}
 
-      {{ macros.setting_checkbox('scan_use_vfs_refresh', 'rclone vfs/refresh 사용', value=arg['scan_use_vfs_refresh'], desc=['rclone 플러그인 설치 필요', '스캔 전송 전에 항목 경로를 VFS 새로고침합니다.']) }}
+      {{ macros.setting_checkbox('scan_use_vfs_refresh', 'rclone vfs/refresh 사용', value=arg['scan_use_vfs_refresh'], desc=['스캔을 전송하기 전에 항목 경로를 먼저 VFS 새로고침합니다.', 'rclone 플러그인이 설치되어 있어야 합니다.']) }}
       <div id="scan_use_vfs_refresh_div" class="collapse">
-      {{ macros.setting_input_textarea('scan_vfs_change_rule', 'vfs/refresh 규칙', col='12', row='3', value=arg['scan_vfs_change_rule'], desc=['A|B|C|D(옵션)|E(옵션) 가 하나의 규칙. 규칙 구분자 엔터', '{local_path}|{remote_path}|{address}#{remote_name}|{user_name}|{password}', '/mnt/gds/GDRIVE|/GDRIVE|172.17.0.1:5275#gds2|admin|nimda', '/mnt/gds||http://admin:nimda@localhost:5572']) }}
-      {{ macros.info_text('', '', "A: 로컬 경로, B: 리모트 경로, C: rc addr, D(옵션): rc user, E(옵션): rc pass") }}
-      {{ macros.info_text('', '', "스캔경로가 A로 시작하면 A값을 B값으로 바꾼 리모트 경로를 rcaddr에 해당하는 C에 전달") }}
-      {{ macros.info_text('', '', "rclone 인증 설정이 없을 경우 :") }}
+      {{ macros.setting_input_textarea('scan_vfs_change_rule', 'vfs/refresh 규칙', col='12', row='3', value=arg['scan_vfs_change_rule'], desc=['규칙은 한 줄에 하나씩 적어 주세요. 형식은 아래 예시와 같습니다.', '{local_path}|{remote_path}|{address}#{remote_name}|{user_name}|{password}', '/mnt/gds/GDRIVE|/GDRIVE|172.17.0.1:5275#gds2|admin|nimda', '/mnt/gds||http://admin:nimda@localhost:5572']) }}
+      {{ macros.info_text('', '', "A: 로컬 경로, B: 리모트 경로, C: RC 주소, D(옵션): RC 사용자, E(옵션): RC 비밀번호") }}
+      {{ macros.info_text('', '', "스캔 경로가 A로 시작하면, A 부분을 B로 바꾼 리모트 경로를 C 주소로 전달합니다.") }}
+      {{ macros.info_text('', '', "rclone 인증이 없는 경우:") }}
       {{ macros.info_text('', '', "/mnt/gds2/GDRIVE|/GDRIVE|172.17.0.1:5275") }}
-      {{ macros.info_text('', '', "rclone 인증 설정이 있을 경우 :") }}
+      {{ macros.info_text('', '', "rclone 인증이 있는 경우:") }}
       {{ macros.info_text('', '', "/mnt/gds2/GDRIVE|/GDRIVE|172.17.0.1:5275|userid|userpw") }}
       </div>
       {{ macros.m_hr() }}
 
-      {{ macros.setting_input_textarea('scan_shyni_path_rule', '샤이니 경로 매핑', col='12', row='3', value=arg['scan_shyni_path_rule'], desc=['이 플러그인이 보는 경로|샤이니 서버가 보는 경로 — 줄 단위', '예: /mnt/gds2|GDRIVE', '빈칸이면 경로 그대로 전달']) }}
+      {{ macros.setting_input_textarea('scan_shyni_path_rule', '샤이니 경로 매핑', col='12', row='3', value=arg['scan_shyni_path_rule'], desc=['이 플러그인이 보는 경로와 shyni 서버가 보는 경로가 다를 때만 적어 주세요. 한 줄에 하나씩, 플러그인 경로|shyni 경로 형식입니다.', '두 서버가 같은 경로를 본다면 비워 두시면 됩니다. 비워 두면 경로가 그대로 전달됩니다.', '예: /mnt/ff쪽경로|/mnt/shyni쪽경로']) }}
       {{ macros.m_hr() }}
 
       {{ macros.m_hr_head_bottom() }}
@@ -42,7 +43,7 @@
 
     {{ macros.m_tab_content_start('db', false) }}
       {{ macros.setting_input_text_and_buttons('scan_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','scan_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['scan_db_delete_day'], col='6') }}
-      {{ macros.setting_checkbox('scan_db_auto_delete', 'DB 자동 삭제', value=arg['scan_db_auto_delete'], desc=['On : 기간 적용하여 DB를 자동 삭제합니다.']) }}
+      {{ macros.setting_checkbox('scan_db_auto_delete', 'DB 자동 삭제', value=arg['scan_db_auto_delete'], desc=['켜 두시면, 설정한 기간이 지난 DB 기록을 자동으로 삭제합니다.']) }}
     {{ macros.m_tab_content_end() }}
 </form>
 
