@@ -172,6 +172,15 @@ def library_stats():
             GROUP BY mi.library_id, mi.metadata_type
         """)
         sub_files = {(int(r[0]), int(r[1])): int(r[2] or 0) for r in cur.fetchall()}
+        # 휴지통 파일 수 — 삭제 표시(deleted_at)된 media_parts를 라이브러리별로 센다
+        cur.execute("""
+            SELECT mi.library_id, count(*)
+            FROM media_parts mp
+            JOIN metadata_items mi ON mi.id = mp.metadata_item_id
+            WHERE mp.deleted_at IS NOT NULL
+            GROUP BY mi.library_id
+        """)
+        trash_counts = {int(r[0]): int(r[1] or 0) for r in cur.fetchall()}
         stats = {}
         for lib_id, lib_type in lib_types.items():
             rows = per.get(lib_id, {})
@@ -184,6 +193,7 @@ def library_stats():
                     'no_code': 0, 'no_summary': 0, 'no_year': 0, 'no_thumb': 0,
                     'missing_any': 0, 'ok_pct': 100.0,
                     'is_folder': False, 'judge_missing': 0, 'no_meta': 0,
+                    'trash': trash_counts.get(lib_id, 0),
                     'file_count': None,
                     'albums': 0, 'tracks': 0, 'artists': 0}
                 continue
@@ -219,6 +229,7 @@ def library_stats():
                 'missing_any': missing_any,
                 'is_folder': is_folder,
                 'file_count': file_count,
+                'trash': trash_counts.get(lib_id, 0),
                 'judge_missing': judge_missing,
                 # 현황 '메타 없음' 표시용 — 폴더 에이전트는 표지 기준, 아니면 코드 기준
                 'no_meta': judge_missing if is_folder else no_code,

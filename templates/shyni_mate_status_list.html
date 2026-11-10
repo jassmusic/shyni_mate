@@ -52,6 +52,7 @@
   <div>- <strong style="color:#666">스캔</strong> — shyni에 이 라이브러리 전체 스캔을 전송합니다. 취소는 shyni 웹 화면에서 합니다.</div>
   <div>- <strong style="color:#666">새로고침 후 스캔</strong> — 새로고침이 끝나면 스캔이 자동으로 시작됩니다. 새로고침은 취소가 가능하나, 스캔으로 넘어간 뒤 취소는 shyni 웹 화면에서 해야 합니다.</div>
   <div>- <strong style="color:#666">메타 새로고침</strong> — 미디어 메타데이터를 순서대로 새로고침합니다. 전체 또는 메타 없는 것만 고를 수 있고, 고급 설정의 데이터베이스 연결이 필요합니다.</div>
+  <div>- <strong style="color:#666">휴지통 비우기</strong> — 그 라이브러리의 휴지통에 있는 파일을 완전히 삭제합니다. 삭제한 파일은 되돌릴 수 없습니다.</div>
   <div>- <strong style="color:#666">취소</strong> — 진행 중인 새로고침과 메타 새로고침을 멈춥니다. 스캔 취소는 shyni 웹 화면에서 해야 합니다.</div>
   <div style="margin-top:6px">참고로 이 버튼들은 스캔 설정의 'rclone vfs/refresh 사용'과 'Shyni 연동 사용' 설정과 무관하게 동작합니다. 그 설정들은 스캔 목록의 자동 처리 전용입니다.</div>
   </div>
@@ -77,6 +78,16 @@
     <div style="display:flex; flex-direction:column; gap:8px">
       <button type="button" class="btn btn-outline-success" id="scan_start_btn" style="padding:6px 10px; font-size:13px">시작</button>
       <button type="button" class="btn btn-outline-secondary" id="scan_back_btn" style="padding:6px 10px; font-size:13px">취소</button>
+    </div>
+  </div>
+</div>
+<div id="trash_confirm_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
+  <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
+    <div style="font-size:15px; font-weight:bold; margin-bottom:6px">휴지통 비우기</div>
+    <div id="trash_confirm_body" style="font-size:13px; color:#666; margin-bottom:14px"></div>
+    <div style="display:flex; flex-direction:column; gap:8px">
+      <button type="button" class="btn btn-outline-danger" id="trash_empty_btn" style="padding:6px 10px; font-size:13px">비우기</button>
+      <button type="button" class="btn btn-outline-secondary" id="trash_back_btn" style="padding:6px 10px; font-size:13px">돌아가기</button>
     </div>
   </div>
 </div>
@@ -311,7 +322,7 @@ function render(data, logFiles, periodicCurrent) {
     str += '</div>';
     // 2줄: 경로 (한 줄 전체 폭)
     str += '<div style="font-size:12px; color:#666; word-break:break-all; margin-top:3px">' + s.path + '</div>';
-    // 3줄: 스캔 기록(파일수·신규·missing) — 기록이 없으면 안내 문구만 한 줄
+    // 3줄: 스캔 기록(파일수·신규·missing)과 마지막 스캔(missing 바로 옆) — 기록이 없으면 안내 문구만
     str += '<div style="font-size:13px; margin-top:7px; display:flex; flex-wrap:wrap; gap:6px 22px">';
     if (ls && ls.result == 'done') {
       str += '<span>파일수 <strong>' + fmtNum(ls.total) + '</strong></span>';
@@ -320,8 +331,9 @@ function render(data, logFiles, periodicCurrent) {
     } else {
       str += '<span style="font-size:12px; color:#888">스캔 후 내용이 반영됩니다</span>';
     }
+    if (lastScan != '-') str += '<span style="white-space:nowrap">마지막 스캔 <strong>' + lastScan + '</strong></span>';
     str += '</div>';
-    // 4줄: 앨범·트랙·메타 없음·마지막 스캔 — 모든 카드에서 같은 열 위치, 좁은 화면에서는 2x2
+    // 4줄: 앨범·트랙·메타 없음·휴지통 — 모든 카드에서 같은 열 위치, 좁은 화면에서는 2x2
     var statsCols = (s.db_stats && s.db_stats.file_count != null) ? '104px 118px 100px 112px 1fr' : '112px 118px 112px 1fr';
     str += '<div class="stats-grid" style="font-size:13px; margin-top:5px; display:grid; grid-template-columns:' + statsCols + '; column-gap:12px; row-gap:6px; align-items:center">';
     if (s.db_stats) {
@@ -331,7 +343,7 @@ function render(data, logFiles, periodicCurrent) {
     } else {
       str += '<span style="grid-column:span 3"></span>';
     }
-    str += '<span style="white-space:nowrap">마지막 스캔 <strong>' + lastScan + '</strong></span>';
+    str += '<span style="white-space:nowrap">휴지통 <strong>' + (s.db_stats && s.db_stats.trash != null ? fmtNum(s.db_stats.trash) : '-') + '</strong></span>';
     str += '</div>';
     str += '</div>';
     // 오른쪽 컬럼: 왼쪽 2열(새로고침·메타 새로고침 / 스캔·새로고침 후 스캔), 오른쪽 취소(세로로 길게)
@@ -342,6 +354,7 @@ function render(data, logFiles, periodicCurrent) {
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="scan"' + (running ? ' disabled' : '') + '>스캔</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="vfs_scan" style="white-space:nowrap"' + (running ? ' disabled' : '') + '>새로고침 후 스캔</button>';
     str += '</div>';
+    str += '<button type="button" class="btn btn-outline-danger status-act" data-key="' + s.key + '" data-act="trash_empty" data-title="' + s.title + '" data-trash="' + (s.db_stats ? (s.db_stats.trash || 0) : 0) + '" style="display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.35"' + ((running || !(s.db_stats && s.db_stats.trash > 0)) ? ' disabled' : '') + '>휴지통<br>비우기</button>';
     str += '<button type="button" class="btn btn-outline-danger status-act" data-key="' + s.key + '" data-act="cancel" style="display:flex; align-items:center; justify-content:center"' + (running ? '' : ' disabled') + '>취소</button>';
     str += '</div>';
     str += '</div>';
@@ -435,7 +448,7 @@ function startDbPoll() {
             }
           }
           markInfoUpdated();
-          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 미디어·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
+          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
           finishProgress();
           progressActive = false;
         } else if (r.db_off) {
@@ -499,6 +512,30 @@ function runScanConfirm() {
     error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
   });
 }
+var trashConfirmKey = null;
+function openTrashConfirm(btn) {
+  trashConfirmKey = btn.data('key');
+  var title = btn.data('title') || '';
+  var cnt = btn.data('trash') || 0;
+  $('#trash_confirm_body').text(title + ' 휴지통에 있는 파일 ' + fmtNum(cnt) + '개를 완전히 삭제합니다. 되돌릴 수 없습니다.');
+  $('#trash_confirm_modal').show();
+}
+function closeTrashConfirm() {
+  $('#trash_confirm_modal').hide();
+  trashConfirmKey = null;
+}
+function runTrashConfirm() {
+  var key = trashConfirmKey;
+  closeTrashConfirm();
+  if (key === null || key === undefined) return;
+  $.ajax({
+    type: 'POST',
+    url: API_BASE + 'trash_empty',
+    data: {key: key},
+    success: function (ret) { showMsg(ret); load_list(true); },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+  });
+}
 
 function runMetaChoice(scope) {
   var key = metaChoiceKey;
@@ -557,7 +594,7 @@ function load_list(force, quiet) {
         hasData = true;
         $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
-        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 미디어·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
+        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
         render(ret.data, ret.log_files, ret.periodic_current);
         markInfoUpdated();
         scheduleStatePoll(ret.data);
@@ -636,6 +673,10 @@ $(document).ready(function () {
       openScanConfirm(btn);
       return;
     }
+    if (btn.data('act') == 'trash_empty') {
+      openTrashConfirm(btn);
+      return;
+    }
     btn.prop('disabled', true);
     $.ajax({
       type: 'POST',
@@ -652,6 +693,9 @@ $(document).ready(function () {
   $('#scan_start_btn').on('click', function () { runScanConfirm(); });
   $('#scan_back_btn').on('click', function () { closeScanConfirm(); });
   $('#scan_confirm_modal').on('click', function (e) { if (e.target === this) closeScanConfirm(); });
+  $('#trash_empty_btn').on('click', function () { runTrashConfirm(); });
+  $('#trash_back_btn').on('click', function () { closeTrashConfirm(); });
+  $('#trash_confirm_modal').on('click', function (e) { if (e.target === this) closeTrashConfirm(); });
 });
 </script>
 {% endblock %}

@@ -284,6 +284,50 @@ class ModuleStatus(PluginModuleBase):
             return ts_raw[:16].replace('T', ' ')
 
     @classmethod
+    def _db_scan_history(cls):
+        """shyni DB의 compat_jobs에서 라이브러리별 최신 전체 스캔 기록을 읽는다.
+
+        전체 스캔은 payload.path가 없는 scan job이다 (부분 스캔은 제외).
+        반환: {섹션 key(str): rec} — rec 형태는 로그 기록과 같다.
+        DB를 활용하지 않는 설정이면 빈 dict를 돌려준다.
+        """
+        try:
+            from . import db_support
+            if not db_support.db_ready():
+                return {}
+            conn = db_support.connect(timeout=10)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT DISTINCT ON (payload->>'section') payload->>'section', status, finished_at, stats "
+                    "FROM compat_jobs "
+                    "WHERE kind='scan' AND status IN ('completed','failed') "
+                    "AND payload->>'path' IS NULL AND finished_at IS NOT NULL "
+                    "ORDER BY payload->>'section', finished_at DESC")
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f'DB 스캔 이력 읽기 실패: {e}')
+            return {}
+        out = {}
+        for sec, status, finished_at, stats in rows:
+            if sec is None or finished_at is None:
+                continue
+            try:
+                ts = finished_at.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            except Exception:
+                continue
+            stats = stats if isinstance(stats, dict) else {}
+            rec = {'result': 'done' if status == 'completed' else 'failed', 'time': ts}
+            for k in ('total', 'new', 'missing', 'registered'):
+                v = stats.get(k)
+                rec[k] = int(v) if isinstance(v, (int, float)) else None
+            rec['time_text'] = cls._to_kst(ts)
+            out[str(sec)] = rec
+        return out
+
+    @classmethod
     def _scan_history(cls):
         """로그 파일들을 병합해 라이브러리별 최신 스캔 기록을 만든다. (기록, 파일수)"""
         files = cls._log_files()
@@ -311,6 +355,11 @@ class ModuleStatus(PluginModuleBase):
                     merged[lib] = rec
         for rec in merged.values():
             rec['time_text'] = cls._to_kst(rec['time'])
+        # DB 스캔 job 기록: 로그 기록보다 최신이면 그쪽을 쓴다.
+        for lib, drec in cls._db_scan_history().items():
+            prev = merged.get(str(lib))
+            if prev is None or str(drec['time']) >= str(prev.get('time') or ''):
+                merged[str(lib)] = drec
         return merged, len(files)
 
     # ---------- rclone RC ----------
@@ -549,7 +598,7 @@ class ModuleStatus(PluginModuleBase):
                 return jsonify({'ret': 'success', 'msg': '자동 업데이트를 껐습니다.'})
             return jsonify({'ret': 'success', 'msg': f'자동 업데이트 주기를 {minutes}분으로 저장했습니다.'})
 
-        if sub in ('vfs_refresh', 'scan', 'cancel', 'meta_refresh', 'vfs_scan'):
+        if sub in ('vfs_refresh', 'scan', 'cancel', 'meta_refresh', 'vfs_scan', 'trash_empty'):
             try:
                 key = int(req.form.get('key'))
             except Exception:
@@ -703,6 +752,34 @@ class ModuleStatus(PluginModuleBase):
                 logger.info(f"[현황] 스캔 전송: {sec['title']} job {job_id}")
                 return jsonify({'ret': 'success', 'msg': f"{sec['title']} 스캔을 전송했습니다."})
 
+            if sub == 'trash_empty':
+                url, token = ShyniBackend.get_config()
+                if not url or not token:
+                    return jsonify({'ret': 'fail', 'msg': 'Shyni 연결 설정이 비어 있습니다. 기본 설정을 확인해 주세요.'})
+                try:
+                    res = requests.get(f"{url}/library/sections/{key}/emptyTrash",
+                                       headers={'X-Plex-Token': token, 'Accept': 'application/json'},
+                                       timeout=120)
+                    res.raise_for_status()
+                except Exception as e:
+                    return jsonify({'ret': 'fail', 'msg': f'휴지통 비우기에 실패했습니다: {e}'})
+                logger.info(f"[현황] 휴지통 비우기: {sec['title']}")
+                # 휴지통 수가 바뀌므로 DB 통계 재계산을 요청한다
+                try:
+                    st_raw = P.ModelSetting.get('status_db_stats_state')
+                    st = json.loads(st_raw) if st_raw else {}
+                    if not isinstance(st, dict):
+                        st = {}
+                except Exception:
+                    st = {}
+                st.pop('busy', None)
+                st['requested_at'] = time.time()
+                try:
+                    P.ModelSetting.set('status_db_stats_state', json.dumps(st))
+                except Exception:
+                    pass
+                return jsonify({'ret': 'success', 'msg': f"{sec['title']} 휴지통을 비웠습니다."})
+
         return jsonify({'ret': 'fail', 'msg': '알 수 없는 요청입니다.'})
 
     _db_stats_cache = {'at': 0, 'data': None}
@@ -796,13 +873,21 @@ class ModuleStatus(PluginModuleBase):
                                     'missing_any': missing_any})
         lib_no_code.sort(key=lambda x: -x['no_code'])
         scan = {'periodic_running': bool(periodic_current),
-                'running': 0, 'done': 0, 'failed': 0}
+                'running': 0, 'done': 0, 'failed': 0,
+                'queued': 0, 'assembling': 0, 'ready': 0, 'held': 0, 'total': 0}
         try:
             with F.app.app_context():
                 q = F.db.session.query(P.ModelScanItem)
-                scan['running'] = q.filter_by(shyni_status='RUNNING').count()
                 scan['done'] = q.filter_by(status='FINISH_SHYNI').count()
                 scan['failed'] = q.filter_by(status='FINISH_SHYNI_FAILED').count()
+                scan['total'] = q.count()
+            # 진행 단계별 집계는 스캔 목록 표시 상태와 같은 기준(summary_counts)을 쓴다
+            counts = P.ModelScanItem.summary_counts()
+            scan['running'] = len(counts.get('scanning_ids') or [])
+            scan['assembling'] = counts.get('assembling') or 0
+            scan['queued'] = counts.get('queued') or 0
+            scan['ready'] = counts.get('ready') or 0
+            scan['held'] = counts.get('held') or 0
         except Exception:
             pass
         return {'totals': bundle['dash'], 'lib_no_code': lib_no_code,

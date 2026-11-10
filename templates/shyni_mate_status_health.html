@@ -131,6 +131,8 @@ function libCard(c) {
   card += '소개 없음 <strong style="float:right">' + fmtNum(c.no_summary) + '</strong><br>';
   card += '연도 없음 <strong style="float:right">' + fmtNum(c.no_year) + '</strong><br>';
   card += '표지 없음 <strong style="float:right">' + fmtNum(c.no_thumb) + '</strong></div>';
+  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:13px; line-height:1.9">';
+  card += '휴지통 <strong style="float:right">' + (c.trash != null ? fmtNum(c.trash) : '-') + '</strong></div>';
   if (isEmpty) card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#dd6b20; font-weight:bold">라이브러리가 비어있습니다.</div>';
   else card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#666">' + libComment(c) + '</div>';
   return '<div style="border:1px solid #ddd; border-radius:6px; padding:10px 14px; background:#fff">' + card + '</div>';
@@ -180,7 +182,8 @@ function renderHealth(h) {
   // 도넛 차트 3개: 건강도 · 누락 구성 · 스캔 상태
   var sc = h.scan || {};
   var sDone = sc.done || 0, sFail = sc.failed || 0, sRun = sc.running || 0;
-  var sTot = sDone + sFail + sRun;
+  var sQueue = sc.queued || 0, sAsm = sc.assembling || 0, sReady = sc.ready || 0, sHeld = sc.held || 0;
+  var sTot = sc.total || (sDone + sFail + sRun + sQueue + sAsm + sReady + sHeld);
   var missTot = t.no_code + t.no_summary + t.no_year + t.no_thumb;
   function pctOf(v, tot) { return tot ? Math.round(v * 1000 / tot) / 10 : 0; }
   var judgeNote = '코드·소개·연도·표지 중 하나라도 누락된 항목이 점검 필요입니다.';
@@ -217,12 +220,20 @@ function renderHealth(h) {
   str += donutCard('스캔 상태',
     sTot ? [{pct: pctOf(sDone, sTot), color: '#38a169'},
             {pct: pctOf(sRun, sTot), color: '#3182ce'},
-            {pct: pctOf(sFail, sTot), color: '#e53e3e'}] : [], null,
+            {pct: pctOf(sQueue, sTot), color: '#63b3ed'},
+            {pct: pctOf(sAsm, sTot), color: '#805ad5'},
+            {pct: pctOf(sReady, sTot), color: '#a0aec0'},
+            {pct: pctOf(sFail, sTot), color: '#e53e3e'},
+            {pct: pctOf(sHeld, sTot), color: '#dd6b20'}] : [], null,
     sTot ? pctText(sDone, pctOf(sDone, sTot)) : '-', '완료율',
-    '<span style="color:#38a169">●</span> 완료 <strong>' + fmtNum(sDone) + '</strong><br>'
-    + '<span style="color:#3182ce">●</span> 실행 중 <strong>' + fmtNum(sRun) + '</strong><br>'
-    + '<span style="color:#e53e3e">●</span> 실패 <strong>' + fmtNum(sFail) + '</strong><br>'
-    + '<span style="color:#888; font-size:12px">주기적 스캔: ' + (sc.periodic_running ? '진행 중' : '대기') + '</span>');
+    '<span style="color:#38a169">●</span> 완료 <strong>' + fmtNum(sDone) + '</strong> (' + pctText(sDone, pctOf(sDone, sTot)) + ')<br>'
+    + '<span style="color:#3182ce">●</span> 진행중 <strong>' + fmtNum(sRun) + '</strong> (' + pctText(sRun, pctOf(sRun, sTot)) + ')<br>'
+    + '<span style="color:#63b3ed">●</span> 스캔 대기 중 <strong>' + fmtNum(sQueue) + '</strong> (' + pctText(sQueue, pctOf(sQueue, sTot)) + ')<br>'
+    + '<span style="color:#805ad5">●</span> ffprobe 대기 중 <strong>' + fmtNum(sAsm) + '</strong> (' + pctText(sAsm, pctOf(sAsm, sTot)) + ')<br>'
+    + '<span style="color:#a0aec0">●</span> 준비 <strong>' + fmtNum(sReady) + '</strong> (' + pctText(sReady, pctOf(sReady, sTot)) + ')<br>'
+    + '<span style="color:#e53e3e">●</span> 실패 <strong>' + fmtNum(sFail) + '</strong> (' + pctText(sFail, pctOf(sFail, sTot)) + ')<br>'
+    + '<span style="color:#dd6b20">●</span> 보류 <strong>' + fmtNum(sHeld) + '</strong> (' + pctText(sHeld, pctOf(sHeld, sTot)) + ')<br>'
+    + '<span style="color:#888; font-size:12px">전체 항목 ' + fmtNum(sTot) + '개 · 주기적 스캔: ' + (sc.periodic_running ? '진행 중' : '대기') + '</span>');
   str += '</div>';
   // 라이브러리별 상세 카드
   if (h.libs && h.libs.length) {
