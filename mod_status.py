@@ -284,22 +284,6 @@ class ModuleStatus(PluginModuleBase):
             return ts_raw[:16].replace('T', ' ')
 
     @classmethod
-    def _manual_history(cls):
-        """수동으로 넣어 둔 스캔 이력 (설정 status_manual_history, 섹션 key → 기록).
-
-        로그에 [scan complete] 기록이 남아 있지 않은 라이브러리(예: 후처리 중단으로
-        완료 로그가 안 찍힌 경우)의 실제 이력을 현황에 보여 주기 위한 것이다.
-        """
-        try:
-            raw = P.ModelSetting.get('status_manual_history')
-            if not raw:
-                return {}
-            data = json.loads(raw)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    @classmethod
     def _scan_history(cls):
         """로그 파일들을 병합해 라이브러리별 최신 스캔 기록을 만든다. (기록, 파일수)"""
         files = cls._log_files()
@@ -327,19 +311,6 @@ class ModuleStatus(PluginModuleBase):
                     merged[lib] = rec
         for rec in merged.values():
             rec['time_text'] = cls._to_kst(rec['time'])
-        # 수동 이력: 로그 기록이 없거나 수동 이력이 더 최신이면 수동 이력을 쓴다.
-        # 이후 실제 전체 스캔이 완료돼 더 최신 로그가 생기면 그쪽이 자동으로 이긴다.
-        for lib, mrec in cls._manual_history().items():
-            if not isinstance(mrec, dict) or not mrec.get('time'):
-                continue
-            prev = merged.get(str(lib))
-            if prev is not None and str(prev.get('time') or '') > str(mrec['time']):
-                continue
-            rec = {'result': mrec.get('result') or 'done', 'time': mrec['time']}
-            for k in ('total', 'new', 'missing', 'registered'):
-                rec[k] = mrec.get(k)
-            rec['time_text'] = cls._to_kst(rec['time'])
-            merged[str(lib)] = rec
         return merged, len(files)
 
     # ---------- rclone RC ----------
