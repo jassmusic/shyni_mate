@@ -223,8 +223,11 @@ function render(data, logFiles, periodicCurrent) {
     if (st.meta) {
       var mt = st.meta;
       var mtTxt = '';
-      if (mt.status == 'running') mtTxt = '메타 새로고침 중 ' + fmtNum(mt.done || 0) + '/' + fmtNum(mt.total || 0);
-      else if (mt.status == 'done') mtTxt = '메타 새로고침 완료 (' + fmt(mt.finished_at) + ')';
+      if (mt.status == 'running') {
+        var mPct = mt.total ? Math.round((mt.done || 0) * 1000 / mt.total) / 10 : 0;
+        mtTxt = '메타 새로고침 중 ' + fmtNum(mt.done || 0) + '/' + fmtNum(mt.total || 0) + ' (' + mPct + '%)' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '');
+      }
+      else if (mt.status == 'done') mtTxt = '메타 새로고침 완료 (' + fmt(mt.finished_at) + ') · ' + fmtNum(mt.total || 0) + '개 처리' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '');
       else if (mt.status == 'cancelled') mtTxt = '메타 새로고침 취소됨 (' + fmt(mt.finished_at) + ')';
       else if (mt.status == 'interrupted') mtTxt = '메타 새로고침 중단됨 (' + fmt(mt.finished_at) + ')';
       if (mtTxt) statusEntries.push({t: (mt.finished_at || mt.started_at || ''), status: mt.status, txt: mtTxt});
@@ -289,7 +292,7 @@ function render(data, logFiles, periodicCurrent) {
     str += '<div style="display:flex; gap:4px; align-self:center; flex-shrink:0; max-width:100%">';
     str += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:4px">';
     str += '<button type="button" class="btn btn-outline-primary status-act" data-key="' + s.key + '" data-act="vfs_refresh"' + (running ? ' disabled' : '') + '>새로고침</button>';
-    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? s.db_stats.albums : '') + '" data-nocode="' + (s.db_stats ? s.db_stats.no_code : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
+    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? s.db_stats.albums : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="scan"' + (running ? ' disabled' : '') + '>스캔</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="vfs_scan" style="white-space:nowrap"' + (running ? ' disabled' : '') + '>새로고침 후 스캔</button>';
     str += '</div>';
@@ -308,7 +311,7 @@ function dbStatsHtml(st) {
   var subCount = (st.sub_count != null) ? st.sub_count : st.tracks;
   return '<span>' + mainLabel + ' <strong>' + fmtNum(mainCount) + '</strong></span>'
     + '<span>' + subLabel + ' <strong>' + fmtNum(subCount) + '</strong></span>'
-    + '<span>메타 없음 <strong>' + fmtNum(st.no_code) + '</strong></span>';
+    + '<span>메타 없음 <strong>' + fmtNum(st.no_meta != null ? st.no_meta : st.no_code) + '</strong></span>';
 }
 
 var progressActive = true;

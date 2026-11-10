@@ -174,7 +174,7 @@ def library_stats():
                     'sub_label': '', 'sub_count': 0, 'group_label': '', 'group_count': 0,
                     'no_code': 0, 'no_summary': 0, 'no_year': 0, 'no_thumb': 0,
                     'missing_any': 0, 'ok_pct': 100.0,
-                    'is_folder': False, 'judge_missing': 0,
+                    'is_folder': False, 'judge_missing': 0, 'no_meta': 0,
                     'albums': 0, 'tracks': 0, 'artists': 0}
                 continue
             main_row = rows.get(info['main'], {})
@@ -204,6 +204,8 @@ def library_stats():
                 'missing_any': missing_any,
                 'is_folder': is_folder,
                 'judge_missing': judge_missing,
+                # 현황 '메타 없음' 표시용 — 폴더 에이전트는 표지 기준, 아니면 코드 기준
+                'no_meta': judge_missing if is_folder else no_code,
                 'ok_pct': round((main - judge_missing) * 100.0 / main, 1) if main else 100.0,
                 'albums': main if lib_type == 'music' else 0,
                 'tracks': sub if lib_type == 'music' else 0,
@@ -247,7 +249,26 @@ def dashboard_stats(libs=None):
             'lib_count': len(libs)}
 
 
-def album_ids(library_id, only_no_code=False):
+def library_is_folder(library_id):
+    """라이브러리의 적용 에이전트가 폴더 에이전트인지 여부.
+
+    적용 에이전트는 ff_module_name이 있으면 그 값, 없으면 scanner_variant다
+    (library_stats와 같은 규칙)."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT scanner_variant, ff_module_name FROM libraries WHERE id = %s',
+                    (library_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        agent = (row[1] or '').strip() or (row[0] or '')
+        return 'folder' in agent.lower()
+    finally:
+        conn.close()
+
+
+def album_ids(library_id, only_no_code=False, only_no_thumb=False):
     """라이브러리의 앨범 id 목록 (메타 새로고침용). 메타 없는 앨범부터 먼저 온다."""
     conn = connect()
     try:
@@ -255,6 +276,8 @@ def album_ids(library_id, only_no_code=False):
         sql = 'SELECT id FROM metadata_items WHERE library_id = %s AND metadata_type = 9 '
         if only_no_code:
             sql += 'AND metadata_code IS NULL AND yaml_code IS NULL '
+        if only_no_thumb:
+            sql += "AND (thumb_url IS NULL OR thumb_url = '') "
         sql += 'ORDER BY (metadata_code IS NULL AND yaml_code IS NULL) DESC, id'
         cur.execute(sql, (library_id,))
         return [r[0] for r in cur.fetchall()]

@@ -641,7 +641,12 @@ class ModuleStatus(PluginModuleBase):
                 scope = (req.form.get('scope') or 'all').strip()
                 only_no_code = scope == 'nocode'
                 try:
-                    ids = db_support.album_ids(key, only_no_code=only_no_code)
+                    # 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라
+                    # '메타 없는 앨범'을 표지 없는 앨범으로 본다.
+                    if only_no_code and db_support.library_is_folder(key):
+                        ids = db_support.album_ids(key, only_no_thumb=True)
+                    else:
+                        ids = db_support.album_ids(key, only_no_code=only_no_code)
                 except Exception as e:
                     return jsonify({'ret': 'fail', 'msg': f'앨범 목록을 읽지 못했습니다: {e}'})
                 if not ids:
@@ -921,7 +926,7 @@ class ModuleStatus(PluginModuleBase):
                         fail += 1
                 except Exception:
                     fail += 1
-                if (done + fail) % 20 == 0:
+                if (done + fail) % 10 == 0:
                     st = self._get_state(key)
                     if st.get('meta'):
                         st['meta']['done'] = done
