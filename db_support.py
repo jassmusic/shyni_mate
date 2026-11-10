@@ -285,6 +285,27 @@ def album_ids(library_id, only_no_code=False, only_no_thumb=False):
         conn.close()
 
 
+def count_filled(ids, kind):
+    """메타 새로고침 대상 중 지금은 채워져 있는 항목 수.
+    kind='thumb'면 표지가, 'code'면 코드가 생긴 항목을 센다."""
+    if not ids:
+        return 0
+    cond = ("(thumb_url IS NOT NULL AND thumb_url <> '')" if kind == 'thumb'
+            else '(metadata_code IS NOT NULL OR yaml_code IS NOT NULL)')
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        total = 0
+        for i in range(0, len(ids), 500):
+            part = list(ids[i:i + 500])
+            cur.execute('SELECT count(*) FROM metadata_items '
+                        f"WHERE id IN ({','.join(['%s'] * len(part))}) AND {cond}", part)
+            total += cur.fetchone()[0]
+        return total
+    finally:
+        conn.close()
+
+
 def metadata_info(metadata_id):
     """메타데이터 한 건을 유형에 맞게 읽는다. 없으면 None.
 

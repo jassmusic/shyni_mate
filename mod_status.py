@@ -417,6 +417,16 @@ class ModuleStatus(PluginModuleBase):
                             'db_off': bundle is None and not loading,
                             'progress': self._overall_progress(loading),
                             'libs': (bundle or {}).get('libs') or {}})
+        if sub == 'states':
+            # 화면 폴링용: 섹션별 작업 상태만 가볍게 돌려준다 (상태 줄 자동 갱신용)
+            keys = [k.strip() for k in (req.form.get('keys') or '').split(',') if k.strip()]
+            out = {}
+            for k in keys:
+                try:
+                    out[k] = self._refresh_state(k, self._get_state(k))
+                except Exception:
+                    out[k] = self._get_state(k)
+            return jsonify({'ret': 'success', 'states': out})
         if sub == 'list':
             cfg_url, cfg_token = ShyniBackend.get_config()
             if not cfg_url or not cfg_token:
@@ -640,10 +650,11 @@ class ModuleStatus(PluginModuleBase):
                                     'msg': '메타 새로고침은 고급 설정에서 PostgreSQL Relay 연결 테스트를 통과해야 사용할 수 있습니다.'})
                 scope = (req.form.get('scope') or 'all').strip()
                 only_no_code = scope == 'nocode'
+                is_folder = bool(only_no_code and db_support.library_is_folder(key))
                 try:
                     # 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라
                     # '메타 없는 앨범'을 표지 없는 앨범으로 본다.
-                    if only_no_code and db_support.library_is_folder(key):
+                    if is_folder:
                         ids = db_support.album_ids(key, only_no_thumb=True)
                     else:
                         ids = db_support.album_ids(key, only_no_code=only_no_code)
@@ -657,8 +668,9 @@ class ModuleStatus(PluginModuleBase):
                                  'started_at': now, 'finished_at': None}
                 self._set_state(key, state)
                 run_id = int(time.time())
+                filled_kind = 'thumb' if is_folder else ('code' if only_no_code else None)
                 th = threading.Thread(target=self._run_meta_refresh,
-                                      args=(key, sec['title'], ids, run_id), daemon=True)
+                                      args=(key, sec['title'], ids, run_id, filled_kind), daemon=True)
                 _meta_refresh_threads[str(key)] = th
                 th.start()
                 scope_label = '메타 없는 앨범' if only_no_code else '앨범'
@@ -902,12 +914,13 @@ class ModuleStatus(PluginModuleBase):
         finally:
             _vfs_scan_threads.pop(str(key), None)
 
-    def _run_meta_refresh(self, key, title, ids, run_id):
+    def _run_meta_refresh(self, key, title, ids, run_id, filled_kind=None):
         """라이브러리 전체 앨범에 메타 새로고침을 하나씩 건다 (백그라운드 스레드)."""
         url, token = ShyniBackend.get_config()
         done = 0
         fail = 0
         cancelled = False
+        finished_at = None
         try:
             for mid in ids:
                 st = self._get_state(key)
@@ -936,14 +949,43 @@ class ModuleStatus(PluginModuleBase):
         finally:
             st = self._get_state(key)
             if st.get('meta'):
+                finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 st['meta']['done'] = done
                 st['meta']['fail'] = fail
                 st['meta']['status'] = 'cancelled' if cancelled else 'done'
-                st['meta']['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                st['meta']['finished_at'] = finished_at
                 self._set_state(key, st)
             _meta_refresh_threads.pop(str(key), None)
             logger.info(f'[현황] 메타 새로고침 {"취소됨" if cancelled else "완료"}: '
                         f'{title} 처리 {done} · 실패 {fail} / 전체 {len(ids)}')
+        if filled_kind and not cancelled and finished_at:
+            self._check_meta_filled(key, ids, filled_kind, finished_at)
+
+    def _check_meta_filled(self, key, ids, kind, finished_at):
+        """전송이 끝난 뒤 shyni 반영을 두 차례 확인해, 실제로 채워진 수를
+        완료 상태에 남긴다 (전송 완료와 반영 완료가 다르기 때문)."""
+        from . import db_support
+        label = '표지' if kind == 'thumb' else '코드'
+        n = None
+        for delay in (90, 150):
+            time.sleep(delay)
+            try:
+                if not db_support.db_ready():
+                    return
+                n = db_support.count_filled(ids, kind)
+            except Exception as e:
+                logger.warning(f'[현황] 메타 반영 확인 실패: {e}')
+                return
+            st = self._get_state(key)
+            meta = (st or {}).get('meta') or {}
+            # 그 사이 새 작업이 시작됐으면 그 상태는 건드리지 않는다
+            if meta.get('status') != 'done' or meta.get('finished_at') != finished_at:
+                return
+            meta['filled'] = n
+            meta['filled_label'] = label
+            st['meta'] = meta
+            self._set_state(key, st)
+        logger.info(f'[현황] 메타 새로고침 반영 확인: 섹션 {key} {label} {n}개 채워짐')
 
     # 외부 API(/api/<module>/<cmd>)로 들어와도 같은 처리를 한다
     def process_api(self, sub, req):

@@ -76,7 +76,7 @@ function libComment(c) {
   // 수치로 한 줄 설명을 만든다
   var ml = c.main_label || '앨범';
   var mainCount = (c.main_count != null) ? c.main_count : c.albums;
-  if (c.is_folder && mainCount > 0) return '차트 라이브러리 특성상 코드가 없어, 표지 여부로 건강도를 판단합니다. 표지 없는 ' + ml + ' ' + fmtNum(c.no_thumb) + '개(' + (c.check_pct != null ? c.check_pct : 0) + '%)은 점검이 필요합니다.';
+  if (c.is_folder && mainCount > 0) return '라이브러리 특성상 코드가 없어, 표지 여부로 건강도를 판단합니다. 표지 없는 ' + ml + ' ' + fmtNum(c.no_thumb) + '개(' + (c.check_pct != null ? c.check_pct : 0) + '%)은 점검이 필요합니다.';
   if (mainCount > 0 && c.no_code >= mainCount) return ml + ' 전부에 코드가 없습니다.' + (c.lib_type == 'music' ? ' 차트 라이브러리 특성으로 보입니다.' : '');
   var miss = [['코드 없음', c.no_code], ['소개 없음', c.no_summary], ['연도 없음', c.no_year], ['표지 없음', c.no_thumb]];
   miss.sort(function(a, b){ return b[1] - a[1]; });

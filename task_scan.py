@@ -25,7 +25,7 @@ class Task:
     @staticmethod
     def running_shyni_count():
         # 동시 스캔 수 게이트가 세는 실행 중 개수.
-        # 조각 대기 중(probe_assembling)인 job은 shyni가 남은 조각을 기다리며
+        # ffprobe 대기 중(probe_assembling)인 job은 shyni가 남은 데이터를 기다리며
         # 실제로는 스캔하지 않는 상태라 세지 않는다 (예외 — 그래야 그 사이에
         # 다음 스캔이 진행된다).
         with F.app.app_context():
@@ -45,9 +45,9 @@ class Task:
 
     @staticmethod
     def running_probe_groups():
-        """실행 중인 항목들의 probe 그룹별 남은 조각 수 {그룹 id: 남은 수}.
+        """실행 중인 항목들의 probe 그룹별 남은 ffprobe 데이터 수 {그룹 id: 남은 수}.
 
-        이미 전송된 조각 수를 세어, 아직 도착하지 않은 이어지는 조각이 있는
+        이미 전송된 데이터 수를 세어, 아직 도착하지 않은 이어지는 ffprobe 데이터이 있는
         그룹만 양수로 남긴다 — 게이트 예외 판정에 쓴다."""
         pending = {}
         sent = {}
@@ -89,8 +89,8 @@ class Task:
                         if not hold_send and running >= max_scan_count:
                             # 동시 스캔 수 제한 — 항목별 직렬 처리.
                             # VFS 새로고침 → 스캔 전송 → 결과 확인이 끝나야 다음 항목을 시작한다.
-                            # 단, 실행 중인 스캔과 같은 probe 그룹의 이어지는 조각은 예외로 통과시킨다.
-                            # 조각은 shyni에서 하나의 job으로 합쳐져 동시 스캔이 늘어나는 게 아니고,
+                            # 단, 실행 중인 스캔과 같은 probe 그룹의 이어지는 ffprobe 데이터은 예외로 통과시킨다.
+                            # 데이터는 shyni에서 하나의 job으로 합쳐져 동시 스캔이 늘어나는 게 아니고,
                             # 막으면 probe 조립이 마감(30분)까지 멈추는 상호 대기가 된다.
                             if item.mode == 'ADD' and any(v > 0 for v in pending_groups.values()):
                                 group = ShyniBackend.probe_group(item)
@@ -112,7 +112,7 @@ class Task:
                         if hold_send:
                             continue
                         if continuation:
-                            logger.info(f'[Scan] probe 그룹 이어지는 조각 — 게이트 예외 전송: item={item.id} '
+                            logger.info(f'[Scan] probe 그룹 이어지는 ffprobe 데이터 — 게이트 예외 전송: item={item.id} '
                                         f'index={group.get("index")}/{group.get("parts")}')
                         if item.mode == 'REFRESH':
                             ShyniBackend.request_refresh(item)
@@ -126,11 +126,11 @@ class Task:
                                     pending_groups[group['id']] -= 1
                                 else:
                                     pending_groups[group['id']] = max(int(group.get('parts') or 1) - 1, 0)
-                            # 이어지는 조각은 기존 job에 합쳐지므로 동시 스캔 수에 세지 않는다
+                            # 이어지는 ffprobe 데이터은 기존 job에 합쳐지므로 동시 스캔 수에 세지 않는다
                             if not continuation:
                                 running += 1
                                 if assembling:
-                                    logger.info(f'[Scan] 조각 대기 중 예외로 다음 스캔 전송: item={item.id} '
+                                    logger.info(f'[Scan] ffprobe 대기 중 예외로 다음 스캔 전송: item={item.id} '
                                                 f'(조립 대기 {assembling}건은 동시 스캔 수에서 제외)')
                         ShyniBackend.finalize(item)
                     except Exception as e:

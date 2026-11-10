@@ -42,7 +42,7 @@ class ModelScanItem(ModelBase):
     # 샤이니 대상 실행 상태(F-4: 대상별 독립) — RUNNING/FINISH/FAILED/ERROR/SKIP/NOT_FIND_LIBRARY
     shyni_status = db.Column(db.String)
     shyni_job_id = db.Column(db.String)
-    shyni_phase = db.Column(db.String)  # shyni job 단계 (probe_assembling = 조각 대기 중) — 진행중 세부 표시용
+    shyni_phase = db.Column(db.String)  # shyni job 단계 (probe_assembling = ffprobe 대기 중) — 진행중 세부 표시용
     probe_received = db.Column(db.Integer)  # 조립 중 받은 파일 수 (job stats manifest_files)
     probe_expected = db.Column(db.Integer)  # 조립 전체 파일 수 (job stats expected_files)
     vfs_done = db.Column(db.Boolean)  # VFS 새로고침 완료 여부 (체크완료 표시용)
@@ -175,13 +175,13 @@ class ModelScanItem(ModelBase):
 
             if option2 != 'all':
                 if option2 == 'SCANNING':
-                    # 진행중 — 대기(조각/스캔 차례)가 아니라 실제로 스캔이 도는 중
+                    # 진행중 — 대기(ffprobe/스캔 차례)가 아니라 실제로 스캔이 도는 중
                     query = query.filter(cls.status == 'READY',
                                          cls.shyni_status.in_(('RUNNING', 'REQUESTED')),
                                          or_(cls.shyni_phase.is_(None),
                                              not_(cls.shyni_phase.in_(('probe_assembling', 'queued')))))
                 elif option2 == 'ASSEMBLING':
-                    # 조각 대기 중 — 전송은 됐고 shyni가 나머지 조각을 기다리는 중
+                    # ffprobe 대기 중 — 전송은 됐고 shyni가 나머지 데이터를 기다리는 중
                     query = query.filter(cls.status == 'READY',
                                          cls.shyni_status.in_(('RUNNING', 'REQUESTED')),
                                          cls.shyni_phase == 'probe_assembling',
@@ -190,7 +190,7 @@ class ModelScanItem(ModelBase):
                                              cls.probe_received.is_(None),
                                              cls.probe_received < cls.probe_expected))
                 elif option2 == 'QUEUED':
-                    # 스캔 대기 중 — 조각은 다 모였고(또는 일반 job이) 스캐너 차례를 기다리는 중
+                    # 스캔 대기 중 — 데이터는 다 모였고(또는 일반 job이) 스캐너 차례를 기다리는 중
                     query = query.filter(cls.status == 'READY',
                                          cls.shyni_status.in_(('RUNNING', 'REQUESTED')),
                                          or_(cls.shyni_phase == 'queued',
@@ -231,6 +231,19 @@ class ModelScanItem(ModelBase):
 
             return query
 
+
+    @classmethod
+    def summary_counts(cls):
+        """스캔 진행현황 한 줄용 집계 — 목록 필터(표시 상태)와 같은 기준으로 센다."""
+        with F.app.app_context():
+            def _query(option2):
+                return cls.make_query(None, order='asc', search='', option2=option2)
+            scanning_ids = [r[0] for r in
+                            _query('SCANNING').with_entities(cls.id).all()]
+            return {'scanning_ids': scanning_ids,
+                    'assembling': _query('ASSEMBLING').count(),
+                    'queued': _query('QUEUED').count(),
+                    'ready': _query('READY').count()}
 
     @classmethod
     def web_list(cls, req) -> dict:

@@ -37,7 +37,7 @@
 <div id="server_card_div" style="margin-bottom:16px">
   <div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; color:#888">서버 정보를 불러오는 중입니다.</div>
 </div>
-<div id="lib_head_div" style="margin-bottom:6px"><strong>라이브러리 정보</strong></div>
+<div id="lib_head_div" style="margin-bottom:6px"><strong>라이브러리 정보</strong><span id="info_ago" style="color:#aaa; font-size:13px; font-weight:normal; margin-left:6px"></span></div>
 <div id="type_counts_div" style="font-size:13px; color:#555; margin-bottom:8px"></div>
 <div id="status_list_div">
   <div style="padding:24px 4px; color:#888">현황을 불러오는 중입니다. 잠시만 기다려 주세요.</div>
@@ -206,7 +206,82 @@ function renderServer(server, storage) {
   $('#server_card_div').html(str);
 }
 
+// 작업 상태 줄: 시간 순서(오른쪽이 최신)로 정렬하고, 최신 항목만 상태 색으로·나머지는 회색으로
+function stateLineHtml(st) {
+  st = st || {};
+  var statusEntries = [];
+  var vt = jobText(st.vfs, '새로고침', 'rclone job id');
+  if (vt) statusEntries.push({t: (st.vfs.finished_at || st.vfs.started_at || ''), status: st.vfs.status, txt: vt});
+  var ct = jobText(st.scan, '스캔', '샤이니 job id');
+  if (ct) statusEntries.push({t: (st.scan.finished_at || st.scan.started_at || ''), status: st.scan.status, txt: ct});
+  if (st.meta) {
+    var mt = st.meta;
+    var mtTxt = '';
+    if (mt.status == 'running') {
+      var mPct = mt.total ? Math.round((mt.done || 0) * 1000 / mt.total) / 10 : 0;
+      mtTxt = '메타 새로고침 중 ' + fmtNum(mt.done || 0) + '/' + fmtNum(mt.total || 0) + ' (' + mPct + '%)' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '');
+    }
+    else if (mt.status == 'done') mtTxt = '메타 새로고침 완료 (' + fmt(mt.finished_at) + ') · ' + fmtNum(mt.total || 0) + '개 처리' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '') + (mt.filled != null ? ' (' + (mt.filled_label || '표지') + ' ' + fmtNum(mt.filled) + '개 채워짐)' : '');
+    else if (mt.status == 'cancelled') mtTxt = '메타 새로고침 취소됨 (' + fmt(mt.finished_at) + ')';
+    else if (mt.status == 'interrupted') mtTxt = '메타 새로고침 중단됨 (' + fmt(mt.finished_at) + ')';
+    if (mtTxt) statusEntries.push({t: (mt.finished_at || mt.started_at || ''), status: mt.status, txt: mtTxt});
+  }
+  statusEntries.sort(function (a, b) { return a.t < b.t ? -1 : (a.t > b.t ? 1 : 0); });
+  return statusEntries.map(function (e, idx) {
+    var latest = idx == statusEntries.length - 1;
+    var color = '#999';
+    if (latest) {
+      if (e.status == 'running' || e.status == 'requested' || e.status == 'done') color = '#2b6cb0';
+      else if (e.status == 'failed') color = '#c53030';
+      else if (e.status == 'cancelled' || e.status == 'interrupted') color = '#b7791f';
+      else color = '#555';
+    }
+    var weight = (latest && (e.status == 'running' || e.status == 'requested')) ? 'bold' : 'normal';
+    return '<span style="color:' + color + '; font-weight:' + weight + '">' + e.txt + '</span>';
+  }).join(' <span style="color:#ccc">·</span> ');
+}
+
+// 라이브러리 정보 옆 (N초 전) — 정보를 마지막으로 불러온 시각 기준
+var infoUpdatedAt = null;
+function markInfoUpdated() { infoUpdatedAt = Date.now(); paintInfoAgo(); }
+function paintInfoAgo() {
+  if (!infoUpdatedAt) return;
+  var sec = Math.max(0, Math.floor((Date.now() - infoUpdatedAt) / 1000));
+  var txt;
+  if (sec < 60) txt = '(' + sec + '초 전)';
+  else if (sec < 3600) txt = '(' + Math.floor(sec / 60) + '분 전)';
+  else txt = '(' + Math.floor(sec / 3600) + '시간 전)';
+  $('#info_ago').text(txt);
+}
+
+// 상태 줄 자동 갱신 — 화면 밖에서 시작된 작업도 보이도록 30초마다 상태만 가볍게 다시 읽는다
+var stateKnownRunning = false;
+function pollStates() {
+  var keys = window.__stateKeys || [];
+  if (!keys.length) return;
+  $.ajax({
+    type: 'POST', url: API_BASE + 'states', data: {keys: keys.join(',')}, timeout: 20000,
+    success: function (r) {
+      if (!r || r.ret != 'success' || !r.states) return;
+      var anyRunning = false;
+      for (var k in r.states) {
+        var st = r.states[k] || {};
+        var el = $('#state-' + k);
+        if (el.length) el.html(stateLineHtml(st));
+        if ((st.vfs && st.vfs.status == 'running') ||
+            (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) ||
+            (st.meta && st.meta.status == 'running')) anyRunning = true;
+      }
+      // 화면이 모르는 사이에 시작된 작업이 있으면 전체를 한 번 다시 불러 버튼 상태까지 맞춘다
+      if (anyRunning && !stateKnownRunning) { stateKnownRunning = true; load_list(false, true); }
+      if (!anyRunning) stateKnownRunning = false;
+    }
+  });
+}
+
 function render(data, logFiles, periodicCurrent) {
+  window.__stateKeys = (data || []).map(function (x) { return x.key; });
+  stateKnownRunning = (data || []).some(function (x) { var t = x.state || {}; return (t.vfs && t.vfs.status == 'running') || (t.scan && (t.scan.status == 'running' || t.scan.status == 'requested')) || (t.meta && t.meta.status == 'running'); });
   $('#logwarn_div').toggle(logFiles === 0);
   var str = '';
   for (var i in data) {
@@ -214,37 +289,6 @@ function render(data, logFiles, periodicCurrent) {
     var st = s.state || {};
     var hl = periodicCurrent && String(periodicCurrent.section_key) === String(s.key);
     var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || hl;
-    // 작업 상태: 시간 순서(오른쪽이 최신)로 정렬하고, 최신 항목만 상태 색으로·나머지는 회색으로
-    var statusEntries = [];
-    var vt = jobText(st.vfs, '새로고침', 'rclone job id');
-    if (vt) statusEntries.push({t: (st.vfs.finished_at || st.vfs.started_at || ''), status: st.vfs.status, txt: vt});
-    var ct = jobText(st.scan, '스캔', '샤이니 job id');
-    if (ct) statusEntries.push({t: (st.scan.finished_at || st.scan.started_at || ''), status: st.scan.status, txt: ct});
-    if (st.meta) {
-      var mt = st.meta;
-      var mtTxt = '';
-      if (mt.status == 'running') {
-        var mPct = mt.total ? Math.round((mt.done || 0) * 1000 / mt.total) / 10 : 0;
-        mtTxt = '메타 새로고침 중 ' + fmtNum(mt.done || 0) + '/' + fmtNum(mt.total || 0) + ' (' + mPct + '%)' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '');
-      }
-      else if (mt.status == 'done') mtTxt = '메타 새로고침 완료 (' + fmt(mt.finished_at) + ') · ' + fmtNum(mt.total || 0) + '개 처리' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '');
-      else if (mt.status == 'cancelled') mtTxt = '메타 새로고침 취소됨 (' + fmt(mt.finished_at) + ')';
-      else if (mt.status == 'interrupted') mtTxt = '메타 새로고침 중단됨 (' + fmt(mt.finished_at) + ')';
-      if (mtTxt) statusEntries.push({t: (mt.finished_at || mt.started_at || ''), status: mt.status, txt: mtTxt});
-    }
-    statusEntries.sort(function (a, b) { return a.t < b.t ? -1 : (a.t > b.t ? 1 : 0); });
-    var statusLines = statusEntries.map(function (e, idx) {
-      var latest = idx == statusEntries.length - 1;
-      var color = '#999';
-      if (latest) {
-        if (e.status == 'running' || e.status == 'requested' || e.status == 'done') color = '#2b6cb0';
-        else if (e.status == 'failed') color = '#c53030';
-        else if (e.status == 'cancelled' || e.status == 'interrupted') color = '#b7791f';
-        else color = '#555';
-      }
-      var weight = (latest && (e.status == 'running' || e.status == 'requested')) ? 'bold' : 'normal';
-      return '<span style="color:' + color + '; font-weight:' + weight + '">' + e.txt + '</span>';
-    });
     var ls = s.last_scan;
     var lastScan = '-';
     if (ls) lastScan = ls.time_text + (ls.result == 'failed' ? ' (실패)' : '');
@@ -260,9 +304,7 @@ function render(data, logFiles, periodicCurrent) {
       var stageTxt = periodicCurrent.stage == 'vfs' ? '새로고침 중' : '스캔 중';
       str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">주기적 스캔 진행 중 · ' + stageTxt + '</span>';
     }
-    if (statusLines.length) {
-      str += ' <span style="font-size:12px">' + statusLines.join(' <span style="color:#ccc">·</span> ') + '</span>';
-    }
+    str += ' <span id="state-' + s.key + '" style="font-size:12px">' + stateLineHtml(st) + '</span>';
     str += '</div>';
     // 2줄: 경로 (한 줄 전체 폭)
     str += '<div style="font-size:12px; color:#666; word-break:break-all; margin-top:3px">' + s.path + '</div>';
@@ -386,6 +428,7 @@ function startDbPoll() {
               if (el.length) el.replaceWith(dbStatsHtml(r.libs[k]));
             }
           }
+          markInfoUpdated();
           $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
           finishProgress();
           progressActive = false;
@@ -508,6 +551,7 @@ function load_list(force, quiet) {
         window.__dbLoading = !!ret.db_loading;
         if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
         render(ret.data, ret.log_files, ret.periodic_current);
+        markInfoUpdated();
         scheduleStatePoll(ret.data);
         if (quiet) {
           // 상태 확인용 조용한 폴링: 진척 바는 건드리지 않는다
@@ -543,6 +587,8 @@ function showMsg(ret) {
 
 $(document).ready(function () {
   load_list();
+  setInterval(pollStates, 30000);
+  setInterval(paintInfoAgo, 1000);
   $('#statusRefreshBtn').off('click').on('click', function () { load_list(true); });
   $('#refreshUseCheck').off('change').on('change', function () {
     $('#refreshMinWrap').toggle($(this).is(':checked'));

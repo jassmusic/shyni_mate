@@ -118,7 +118,15 @@ class ModuleScan(PluginModuleBase):
 
     def process_command(self, command, arg1, arg2, arg3, req):
         ret = {'ret':'success'}
-        if command == 'trash_execute':
+        if command == 'summary':
+            try:
+                ret['summary'] = ModelScanItem.summary_counts()
+            except Exception as e:
+                # 30초마다 폴링하므로 실패해도 알림을 띄우지 않는다 —
+                # 화면은 마지막 숫자를 유지하고 (N초 전) 표시가 오래됐음을 알린다
+                logger.error(f'[Scan] 진행현황 집계 실패: {e}')
+                ret = {'ret': 'fail'}
+        elif command == 'trash_execute':
             if (P.ModelSetting.get('scan_trash_running') or '') == '1':
                 return jsonify({'ret': 'warning', 'msg': '휴지통 비우기가 이미 실행 중입니다.'})
             logger.info('[휴지통] 수동 실행을 시작합니다.')

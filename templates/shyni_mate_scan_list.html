@@ -25,7 +25,7 @@
           <select id="option2" name="option2" class="form-control form-control-sm">
             <option value="all" selected>전체</option>
             <option value="READY">준비</option>
-            <option value="ASSEMBLING">조각 대기 중</option>
+            <option value="ASSEMBLING">ffprobe 대기 중</option>
             <option value="QUEUED">스캔 대기 중</option>
             <option value="SCANNING">진행중</option>
             <option value="FINISH_SHYNI">완료</option>
@@ -53,6 +53,8 @@
   <button type="button" class="btn btn-sm btn-outline-info" id="metaLoadSelectedBtn" style="margin-left:6px">선택 항목 라이브러리 메타 불러오기</button>
   <button type="button" class="btn btn-sm btn-outline-primary" id="metaRefreshSelectedBtn" style="margin-left:6px">선택 항목 메타 새로고침</button>
   <div style="font-size:12px; color:#888; margin-top:4px">클릭하면 선택 항목에 대해 수행합니다. 실행 중인 항목은 건너뜁니다.</div>
+  <style>#scan_summary_div strong { color:#444; }</style>
+  <div id="scan_summary_div" style="font-size:14.5px; color:#888; margin-top:8px"></div>
 </div>
 {{ macros.m_hr_head_top() }}
 {{ macros.m_row_start('0') }}
@@ -126,10 +128,10 @@ function make_list(data) {
       if (data[i].shyni_status == 'RUNNING' || data[i].shyni_status == 'REQUESTED') {
         if (data[i].shyni_phase == 'probe_assembling') {
           if (data[i].probe_expected && (data[i].probe_received || 0) >= data[i].probe_expected) {
-            // 조각은 다 모였고 shyni 스캐너 차례를 기다리는 중
+            // 데이터는 다 모였고 shyni 스캐너 차례를 기다리는 중
             tmp += text_color("스캔 대기 중", 'purple');
           } else {
-            var assembling_txt = "조각 대기 중";
+            var assembling_txt = "ffprobe 대기 중";
             if (data[i].probe_expected) assembling_txt += " (" + (data[i].probe_received || 0) + "/" + data[i].probe_expected + ")";
             tmp += text_color(assembling_txt, 'purple');
           }
@@ -347,6 +349,42 @@ $("body").on('click', '#searchResetBtn', function(e){
   $("#option3").val('all');
   $("#keyword").val('');
   globalRequestSearch(1, false);
+});
+
+// 스캔 진행현황 한 줄 — 30초마다 숫자만 다시 읽고, (N초 전)은 1초마다 올린다
+var scanSummaryLastAt = null;
+function scanSummaryRanges(ids) {
+  if (!ids || !ids.length) return '';
+  var parts = [], s = ids[0], p = ids[0];
+  for (var i = 1; i <= ids.length; i++) {
+    if (i < ids.length && ids[i] == p + 1) { p = ids[i]; continue; }
+    parts.push(s == p ? '' + s : s + '~' + p);
+    if (i < ids.length) { s = p = ids[i]; }
+  }
+  return parts.join(', ') + '번';
+}
+function paintScanSummary(ret) {
+  if (!ret || ret.ret != 'success' || !ret.summary) return;
+  var sm = ret.summary, segs = [];
+  if (sm.scanning_ids && sm.scanning_ids.length) segs.push('진행중 <strong>' + sm.scanning_ids.length + '개 (' + scanSummaryRanges(sm.scanning_ids) + ')</strong>');
+  if (sm.assembling) segs.push('ffprobe 대기 중 <strong>' + sm.assembling + '개</strong>');
+  if (sm.queued) segs.push('스캔 대기 중 <strong>' + sm.queued + '개</strong>');
+  segs.push('준비 <strong>' + (sm.ready || 0) + '개</strong>');
+  $('#scan_summary_div').html('<span style="font-weight:bold; color:#555; margin-right:8px">스캔 진행현황</span>' + segs.join(' · ') + ' <span id="scan_summary_ago" style="color:#aaa; font-size:13px"></span>');
+  scanSummaryLastAt = Date.now();
+  paintScanSummaryAgo();
+}
+function paintScanSummaryAgo() {
+  if (!scanSummaryLastAt) return;
+  var sec = Math.max(0, Math.floor((Date.now() - scanSummaryLastAt) / 1000));
+  $('#scan_summary_ago').text('(' + sec + '초 전)');
+}
+function loadScanSummary() { globalSendCommand('summary', null, null, null, paintScanSummary); }
+// ff_global1.js가 content 블록보다 뒤에서 로드되므로, 즉시 호출하면 함수가 없어 오류가 난다 — ready 이후에 시작한다
+$(document).ready(function(){
+  loadScanSummary();
+  setInterval(loadScanSummary, 30000);
+  setInterval(paintScanSummaryAgo, 1000);
 });
 
 </script>

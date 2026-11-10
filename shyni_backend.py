@@ -58,8 +58,8 @@ class ShyniBackend:
     def probe_group(db_item):
         """FP 수신 원문에 담긴 probe 그룹 정보({id, index, parts, files})를 돌려준다.
 
-        파일이 많은 앨범은 probe가 여러 항목으로 쪼개져 들어오며, 조각마다 같은
-        그룹 id가 붙는다. 게이트 예외(이어지는 조각 판정)에 쓰인다. 없으면 None."""
+        파일이 많은 앨범은 probe가 여러 항목으로 쪼개져 들어오며, 데이터마다 같은
+        그룹 id가 붙는다. 게이트 예외(이어지는 ffprobe 데이터 판정)에 쓰인다. 없으면 None."""
         try:
             probe = ShyniBackend._gds_metadata(db_item).get('scan_probe')
             if isinstance(probe, dict):
