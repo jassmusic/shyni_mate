@@ -32,7 +32,7 @@
       </div>
       {{ macros.m_hr() }}
 
-      {{ macros.setting_checkbox('scan_shyni_use', 'Shyni 연동 사용', value=arg['scan_shyni_use'], desc=['켜 두시면 목록에 올라온 항목을 shyni로 전송해 처리합니다.', '꺼 두시면 항목이 올라와도 shyni로 전송하지 않습니다. rclone vfs/refresh 사용이 켜져 있으면 VFS 새로고침까지는 진행합니다.', '단, 리셋한 항목은 꺼져 있어도 전송합니다. 이미 전송된 항목의 완료 확인은 계속됩니다.']) }}
+      {{ macros.setting_checkbox('scan_shyni_use', 'Shyni 연동 사용', value=arg['scan_shyni_use'], desc=['켜 두시면 목록에 올라온 항목을 shyni로 전송해 처리합니다.', '꺼 두시면 항목이 올라와도 shyni로 전송하지 않고 보류로 쌓입니다. 나중에 켜도 보류된 항목은 자동 처리되지 않으며, 스캔 목록에서 보류 해제를 해야 처리가 시작됩니다.', 'rclone vfs/refresh 사용이 켜져 있으면 VFS 새로고침까지는 진행합니다. 단, 리셋한 항목은 꺼져 있어도 전송합니다. 이미 전송된 항목의 완료 확인은 계속됩니다.']) }}
       {{ macros.setting_input_textarea('scan_shyni_path_rule', '샤이니 경로 매핑', col='12', row='3', value=arg['scan_shyni_path_rule'], desc=['이 플러그인이 보는 경로와 shyni 서버가 보는 경로가 다를 때만 적어 주세요. 한 줄에 하나씩, 플러그인 경로|shyni 경로 형식입니다.', '두 서버가 같은 경로를 본다면 비워 두시면 됩니다. 비워 두면 경로가 그대로 전달됩니다.', '예: /mnt/ff쪽경로|/mnt/shyni쪽경로']) }}
       {{ macros.m_hr() }}
 

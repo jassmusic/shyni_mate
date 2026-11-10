@@ -651,6 +651,7 @@ class ModuleStatus(PluginModuleBase):
                 scope = (req.form.get('scope') or 'all').strip()
                 only_no_code = scope == 'nocode'
                 is_folder = bool(only_no_code and db_support.library_is_folder(key))
+                _, ml = db_support.library_main_label(key)
                 try:
                     # 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라
                     # '메타 없는 앨범'을 표지 없는 앨범으로 본다.
@@ -659,10 +660,10 @@ class ModuleStatus(PluginModuleBase):
                     else:
                         ids = db_support.album_ids(key, only_no_code=only_no_code)
                 except Exception as e:
-                    return jsonify({'ret': 'fail', 'msg': f'앨범 목록을 읽지 못했습니다: {e}'})
+                    return jsonify({'ret': 'fail', 'msg': f'{ml} 목록을 읽지 못했습니다: {e}'})
                 if not ids:
                     return jsonify({'ret': 'fail',
-                                    'msg': '메타 없는 앨범이 없습니다.' if only_no_code else '이 라이브러리에는 앨범이 없습니다.'})
+                                    'msg': f'메타 없는 {ml}이 없습니다.' if only_no_code else f'이 라이브러리에는 {ml}이 없습니다.'})
                 state['meta'] = {'status': 'running', 'total': len(ids), 'done': 0, 'fail': 0,
                                  'cancel': False,
                                  'started_at': now, 'finished_at': None}
@@ -673,7 +674,7 @@ class ModuleStatus(PluginModuleBase):
                                       args=(key, sec['title'], ids, run_id, filled_kind), daemon=True)
                 _meta_refresh_threads[str(key)] = th
                 th.start()
-                scope_label = '메타 없는 앨범' if only_no_code else '앨범'
+                scope_label = ('표지 없는 ' if is_folder else '메타 없는 ') + ml if only_no_code else ml
                 logger.info(f"[현황] 메타 새로고침 시작: {sec['title']} {scope_label} {len(ids)}개 (범위 {scope})")
                 return jsonify({'ret': 'success',
                                 'msg': f"{sec['title']} 메타 새로고침을 시작했습니다. {scope_label} {len(ids)}개를 순서대로 처리합니다."})
@@ -786,6 +787,7 @@ class ModuleStatus(PluginModuleBase):
             card['code_pct'] = round(st['no_code'] * 100.0 / st['main_count'], 1) if st['main_count'] else 0
             card['avg_sub'] = round(st['sub_count'] * 1.0 / st['main_count'], 1) if st['main_count'] else 0
             card['avg_tracks'] = card['avg_sub']
+            card['avg_file'] = round(st['file_count'] * 1.0 / st['sub_count'], 1) if st.get('file_count') is not None and st['sub_count'] else 0
             lib_cards.append(card)
             if missing_any:
                 lib_no_code.append({'key': sec['key'], 'title': sec.get('title'),

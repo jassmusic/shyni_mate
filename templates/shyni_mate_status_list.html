@@ -45,25 +45,27 @@
 <div id="logwarn_div" style="display:none; margin-top:8px; font-size:13px; color:#c0392b">
   로그를 찾지 못했습니다. 폴더를 다시 확인해주세요.
 </div>
-<div id="status_foot_comment" style="font-size:13px; color:#888; margin-top:10px">
-  파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 아직 로그에 기록이 없는 라이브러리는 스캔이 끝난 뒤에 내용이 채워집니다. 앨범수는 로그에 기록되지 않아 표시하지 않습니다.
-</div>
 <div id="status_btn_guide" style="font-size:13px; color:#888; margin-top:14px; line-height:1.8">
-  <div style="font-weight:bold; color:#666">버튼 안내</div>
+  <div id="btn_guide_toggle" style="font-weight:bold; color:#666; cursor:pointer">버튼 안내 <span id="btn_guide_arrow" style="font-weight:normal; font-size:12px; color:#999">▸ 펼치기</span></div>
+  <div id="btn_guide_body" style="display:none">
   <div>- <strong style="color:#666">새로고침</strong> — rclone VFS 새로고침만 합니다. 드라이브 폴더를 다시 읽어 새 파일이 마운트에 보이게 합니다. 스캔 설정의 VFS 새로고침 규칙에 이 라이브러리 경로가 맞아야 동작합니다.</div>
   <div>- <strong style="color:#666">스캔</strong> — shyni에 이 라이브러리 전체 스캔을 전송합니다. 취소는 shyni 웹 화면에서 합니다.</div>
   <div>- <strong style="color:#666">새로고침 후 스캔</strong> — 새로고침이 끝나면 스캔이 자동으로 시작됩니다. 새로고침은 취소가 가능하나, 스캔으로 넘어간 뒤 취소는 shyni 웹 화면에서 해야 합니다.</div>
-  <div>- <strong style="color:#666">메타 새로고침</strong> — 앨범 메타데이터를 순서대로 새로고침합니다. 전체 앨범 또는 메타 없는 앨범만 고를 수 있고, 고급 설정의 데이터베이스 연결이 필요합니다.</div>
+  <div>- <strong style="color:#666">메타 새로고침</strong> — 미디어 메타데이터를 순서대로 새로고침합니다. 전체 또는 메타 없는 것만 고를 수 있고, 고급 설정의 데이터베이스 연결이 필요합니다.</div>
   <div>- <strong style="color:#666">취소</strong> — 진행 중인 새로고침과 메타 새로고침을 멈춥니다. 스캔 취소는 shyni 웹 화면에서 해야 합니다.</div>
   <div style="margin-top:6px">참고로 이 버튼들은 스캔 설정의 'rclone vfs/refresh 사용'과 'Shyni 연동 사용' 설정과 무관하게 동작합니다. 그 설정들은 스캔 목록의 자동 처리 전용입니다.</div>
+  </div>
+</div>
+<div id="status_foot_comment" style="font-size:13px; color:#888; margin-top:10px">
+  파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 아직 로그에 기록이 없는 라이브러리는 스캔이 끝난 뒤에 내용이 채워집니다. 미디어 수는 로그에 기록되지 않아 표시하지 않습니다.
 </div>
 <div id="meta_choice_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
   <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
     <div style="font-size:15px; font-weight:bold; margin-bottom:6px">메타 새로고침</div>
-    <div style="font-size:13px; color:#666; margin-bottom:14px">어느 범위로 진행할까요? 앨범이 많으면 오래 걸릴 수 있습니다.</div>
+    <div style="font-size:13px; color:#666; margin-bottom:14px">어느 범위로 진행할까요? 미디어가 많으면 오래 걸릴 수 있습니다.</div>
     <div style="display:flex; flex-direction:column; gap:8px">
-      <button type="button" class="btn btn-outline-info" id="meta_all_btn" style="padding:6px 10px; font-size:13px"><span id="meta_all_label">전체 앨범</span></button>
-      <button type="button" class="btn btn-outline-primary" id="meta_nocode_btn" style="padding:6px 10px; font-size:13px"><span id="meta_nocode_label">메타 없는 앨범만</span></button>
+      <button type="button" class="btn btn-outline-info" id="meta_all_btn" style="padding:6px 10px; font-size:13px"><span id="meta_all_label">전체 미디어</span></button>
+      <button type="button" class="btn btn-outline-primary" id="meta_nocode_btn" style="padding:6px 10px; font-size:13px"><span id="meta_nocode_label">메타 없는 미디어만</span></button>
       <button type="button" class="btn btn-outline-secondary" id="meta_cancel_btn" style="padding:6px 10px; font-size:13px">취소</button>
     </div>
   </div>
@@ -125,7 +127,7 @@ function fmtNum(n) {
   return Number(n).toLocaleString();
 }
 
-var TYPE_LABELS = {movie: '영화', show: '쇼', artist: '앨범', book: '도서', photo: '사진'};
+var TYPE_LABELS = {movie: '영화', show: '쇼', artist: '음악', book: '도서', photo: '사진'};
 var TYPE_ORDER = ['movie', 'show', 'artist', 'book', 'photo'];
 
 function renderTypeCounts(counts) {
@@ -219,7 +221,8 @@ function stateLineHtml(st) {
     var mtTxt = '';
     if (mt.status == 'running') {
       var mPct = mt.total ? Math.round((mt.done || 0) * 1000 / mt.total) / 10 : 0;
-      mtTxt = '메타 새로고침 중 ' + fmtNum(mt.done || 0) + '/' + fmtNum(mt.total || 0) + ' (' + mPct + '%)' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '');
+      var mPctTxt = ((mt.done || 0) > 0 && !(mPct > 0)) ? '<1%' : mPct + '%';
+      mtTxt = '메타 새로고침 중 ' + fmtNum(mt.done || 0) + '/' + fmtNum(mt.total || 0) + ' (' + mPctTxt + ')' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '');
     }
     else if (mt.status == 'done') mtTxt = '메타 새로고침 완료 (' + fmt(mt.finished_at) + ') · ' + fmtNum(mt.total || 0) + '개 처리' + (mt.fail ? ' · 실패 ' + fmtNum(mt.fail) : '') + (mt.filled != null ? ' (' + (mt.filled_label || '표지') + ' ' + fmtNum(mt.filled) + '개 채워짐)' : '');
     else if (mt.status == 'cancelled') mtTxt = '메타 새로고침 취소됨 (' + fmt(mt.finished_at) + ')';
@@ -298,7 +301,7 @@ function render(data, logFiles, periodicCurrent) {
     // 왼쪽 컬럼: 이름·상태 / 경로 / 수치 — 오른쪽 컬럼: 버튼 (좁으면 아래로 감싼다)
     str += '<div style="flex:1 1 500px; min-width:0">';
     // 1줄: 이름 + 상태
-    var CARD_TYPE_LABELS = {'movie': '영화', 'show': '쇼', 'artist': '앨범', 'book': '도서', 'photo': '사진'};
+    var CARD_TYPE_LABELS = {'movie': '영화', 'show': '쇼', 'artist': '음악', 'book': '도서', 'photo': '사진'};
     str += '<div>' + (CARD_TYPE_LABELS[s.type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + CARD_TYPE_LABELS[s.type] + '</span>' : '') + '<strong style="font-size:16px">' + s.title + '</strong>';
     if (hl) {
       var stageTxt = periodicCurrent.stage == 'vfs' ? '새로고침 중' : '스캔 중';
@@ -319,11 +322,12 @@ function render(data, logFiles, periodicCurrent) {
     }
     str += '</div>';
     // 4줄: 앨범·트랙·메타 없음·마지막 스캔 — 모든 카드에서 같은 열 위치, 좁은 화면에서는 2x2
-    str += '<div class="stats-grid" style="font-size:13px; margin-top:5px; display:grid; grid-template-columns:112px 118px 112px 1fr; column-gap:12px; row-gap:6px; align-items:center">';
+    var statsCols = (s.db_stats && s.db_stats.file_count != null) ? '104px 118px 100px 112px 1fr' : '112px 118px 112px 1fr';
+    str += '<div class="stats-grid" style="font-size:13px; margin-top:5px; display:grid; grid-template-columns:' + statsCols + '; column-gap:12px; row-gap:6px; align-items:center">';
     if (s.db_stats) {
       str += '<span id="dbstats-' + s.key + '" style="display:contents">' + dbStatsHtml(s.db_stats) + '</span>';
     } else if (window.__dbLoading) {
-      str += '<span id="dbstats-' + s.key + '" class="dbstats-ph" style="color:#888; grid-column:span 3">앨범·트랙·메타 없음 로딩중…</span>';
+      str += '<span id="dbstats-' + s.key + '" class="dbstats-ph" style="color:#888; grid-column:span 3">미디어·항목·메타 없음 로딩중…</span>';
     } else {
       str += '<span style="grid-column:span 3"></span>';
     }
@@ -334,7 +338,7 @@ function render(data, logFiles, periodicCurrent) {
     str += '<div style="display:flex; gap:4px; align-self:center; flex-shrink:0; max-width:100%">';
     str += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:4px">';
     str += '<button type="button" class="btn btn-outline-primary status-act" data-key="' + s.key + '" data-act="vfs_refresh"' + (running ? ' disabled' : '') + '>새로고침</button>';
-    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? s.db_stats.albums : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '" data-folder="' + (s.db_stats && s.db_stats.is_folder ? '1' : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
+    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? (s.db_stats.main_count != null ? s.db_stats.main_count : s.db_stats.albums) : '') + '" data-mainlabel="' + (s.db_stats ? (s.db_stats.main_label || '') : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '" data-folder="' + (s.db_stats && s.db_stats.is_folder ? '1' : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="scan"' + (running ? ' disabled' : '') + '>스캔</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="vfs_scan" style="white-space:nowrap"' + (running ? ' disabled' : '') + '>새로고침 후 스캔</button>';
     str += '</div>';
@@ -351,9 +355,11 @@ function dbStatsHtml(st) {
   var subLabel = st.sub_label || '트랙';
   var mainCount = (st.main_count != null) ? st.main_count : st.albums;
   var subCount = (st.sub_count != null) ? st.sub_count : st.tracks;
-  return '<span>' + mainLabel + ' <strong>' + fmtNum(mainCount) + '</strong></span>'
-    + '<span>' + subLabel + ' <strong>' + fmtNum(subCount) + '</strong></span>'
-    + '<span>' + (st.is_folder ? '표지 없음' : '메타 없음') + ' <strong>' + fmtNum(st.no_meta != null ? st.no_meta : st.no_code) + '</strong></span>';
+  var html = '<span>' + mainLabel + ' <strong>' + fmtNum(mainCount) + '</strong></span>'
+    + '<span>' + subLabel + ' <strong>' + fmtNum(subCount) + '</strong></span>';
+  if (st.file_count != null) html += '<span>파일 <strong>' + fmtNum(st.file_count) + '</strong></span>';
+  html += '<span>' + (st.is_folder ? '표지 없음' : '메타 없음') + ' <strong>' + fmtNum(st.no_meta != null ? st.no_meta : st.no_code) + '</strong></span>';
+  return html;
 }
 
 var progressActive = true;
@@ -429,7 +435,7 @@ function startDbPoll() {
             }
           }
           markInfoUpdated();
-          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
+          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 미디어·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
           finishProgress();
           progressActive = false;
         } else if (r.db_off) {
@@ -453,8 +459,9 @@ function openMetaChoice(btn) {
   metaChoiceKey = btn.data('key');
   var total = btn.attr('data-albums');
   var nocode = btn.attr('data-nocode');
-  var nocodeName = btn.attr('data-folder') ? '표지 없는 앨범만' : '메타 없는 앨범만';
-  $('#meta_all_label').text(total ? '전체 앨범 ' + Number(total).toLocaleString() + '개' : '전체 앨범');
+  var ml = btn.attr('data-mainlabel') || '미디어';
+  var nocodeName = (btn.attr('data-folder') ? '표지 없는 ' : '메타 없는 ') + ml + '만';
+  $('#meta_all_label').text(total ? '전체 ' + ml + ' ' + Number(total).toLocaleString() + '개' : '전체 ' + ml);
   $('#meta_nocode_label').text(nocode ? nocodeName + ' ' + Number(nocode).toLocaleString() + '개' : nocodeName);
   $('#meta_nocode_btn').prop('disabled', nocode === '0');
   $('#meta_choice_modal').show();
@@ -550,7 +557,7 @@ function load_list(force, quiet) {
         hasData = true;
         $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
-        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
+        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 미디어·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
         render(ret.data, ret.log_files, ret.periodic_current);
         markInfoUpdated();
         scheduleStatePoll(ret.data);
@@ -590,6 +597,12 @@ $(document).ready(function () {
   load_list();
   setInterval(pollStates, 30000);
   setInterval(paintInfoAgo, 1000);
+  $('#btn_guide_toggle').on('click', function () {
+    var body = $('#btn_guide_body');
+    var open = body.is(':visible');
+    body.toggle(!open);
+    $('#btn_guide_arrow').text(open ? '▸ 펼치기' : '▾ 접기');
+  });
   $('#statusRefreshBtn').off('click').on('click', function () { load_list(true); });
   $('#refreshUseCheck').off('change').on('change', function () {
     $('#refreshMinWrap').toggle($(this).is(':checked'));

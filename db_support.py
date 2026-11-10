@@ -163,6 +163,15 @@ def library_stats():
             GROUP BY mi.library_id
         """)
         movie_files = {int(r[0]): int(r[1] or 0) for r in cur.fetchall()}
+        # 하위 항목(에피소드·책)의 파일 수 — 쇼·도서 카드의 '파일' 행용
+        cur.execute("""
+            SELECT mi.library_id, mi.metadata_type, count(*)
+            FROM media_parts mp
+            JOIN metadata_items mi ON mi.id = mp.metadata_item_id
+            WHERE mi.metadata_type IN (4, 102)
+            GROUP BY mi.library_id, mi.metadata_type
+        """)
+        sub_files = {(int(r[0]), int(r[1])): int(r[2] or 0) for r in cur.fetchall()}
         stats = {}
         for lib_id, lib_type in lib_types.items():
             rows = per.get(lib_id, {})
@@ -175,6 +184,7 @@ def library_stats():
                     'no_code': 0, 'no_summary': 0, 'no_year': 0, 'no_thumb': 0,
                     'missing_any': 0, 'ok_pct': 100.0,
                     'is_folder': False, 'judge_missing': 0, 'no_meta': 0,
+                    'file_count': None,
                     'albums': 0, 'tracks': 0, 'artists': 0}
                 continue
             main_row = rows.get(info['main'], {})
@@ -183,6 +193,11 @@ def library_stats():
                 sub = rows.get(info['sub'], {}).get('count', 0)
             else:
                 sub = movie_files.get(lib_id, 0)
+            # 파일 수: 영화는 sub 자체가 파일 수라 따로 두지 않고(None),
+            # 쇼·도서는 하위 항목의 media_parts 수로 채운다.
+            file_count = None
+            if lib_type in ('tv', 'show', 'book') and info['sub'] is not None:
+                file_count = sub_files.get((lib_id, info['sub']), 0)
             group = rows.get(info['group'], {}).get('count', 0) if info['group'] else 0
             no_code = main_row.get('no_code', 0)
             missing_any = main_row.get('missing_any', 0)
@@ -203,6 +218,7 @@ def library_stats():
                 'no_thumb': no_thumb,
                 'missing_any': missing_any,
                 'is_folder': is_folder,
+                'file_count': file_count,
                 'judge_missing': judge_missing,
                 # 현황 '메타 없음' 표시용 — 폴더 에이전트는 표지 기준, 아니면 코드 기준
                 'no_meta': judge_missing if is_folder else no_code,
@@ -244,9 +260,32 @@ def dashboard_stats(libs=None):
             'no_year': sum(v['no_year'] for v in libs.values()),
             'no_thumb': sum(v['no_thumb'] for v in libs.values()),
             'all_music': all_music,
-            'main_label': '앨범' if all_music else '작품',
+            'main_label': '앨범' if all_music else '미디어',
             'sub_label': '트랙' if all_music else '항목',
-            'lib_count': len(libs)}
+            'lib_count': len(libs),
+            'lib_types': {t: sum(1 for v in libs.values() if v['lib_type'] == t)
+                          for t in {v['lib_type'] for v in libs.values()}}}
+
+
+def library_main_label(library_id):
+    """라이브러리의 종류와 작품 단위 이름 (예: ('music', '앨범')).
+
+    종류를 알 수 없으면 ('', '미디어')를 돌려준다 — 문구에 종류별 단위가
+    필요한 곳(메타 새로고침 안내 등)에서 쓴다.
+    """
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT type FROM libraries WHERE id = %s', (library_id,))
+        row = cur.fetchone()
+        if not row:
+            return '', '미디어'
+        info = TYPE_INFO.get(row[0] or '')
+        if info is None:
+            return (row[0] or ''), '미디어'
+        return (row[0] or ''), info['main_label']
+    finally:
+        conn.close()
 
 
 def library_is_folder(library_id):

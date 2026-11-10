@@ -83,6 +83,10 @@ class Task:
                             continue
                         if item.mode not in ('ADD', 'REFRESH', 'REMOVE_FILE', 'REMOVE_FOLDER'):
                             continue
+                        # 보류 항목은 연동을 켜도 자동 처리하지 않는다 — 보류 해제가 있어야
+                        # 다시 흐른다 (단, 리셋한 항목은 현행대로 바로 전송한다).
+                        if getattr(item, 'held', None) and not getattr(item, 'reset_done', None):
+                            continue
                         # Shyni 연동 사용이 꺼져 있으면 shyni로만 보내지 않는다 (단, 리셋한 항목은 전송한다).
                         # VFS 새로고침은 그 설정(scan_use_vfs_refresh)을 따로 따른다.
                         hold_send = not P.ModelSetting.get_bool('scan_shyni_use') and not getattr(item, 'reset_done', None)
@@ -110,6 +114,11 @@ class Task:
                             except Exception as e:
                                 logger.error(f'vfs_refresh 실패: {item.target} {e}')
                         if hold_send:
+                            # 연동이 꺼진 동안 쌓인 항목은 보류로 확정한다 — 나중에 켜도
+                            # 자동 처리되지 않고, 보류 해제를 해야 처리가 시작된다.
+                            if not getattr(item, 'held', None):
+                                item.held = True
+                                logger.info(f'[Scan] 보류 확정 (Shyni 연동 꺼짐): item={item.id} {item.target}')
                             continue
                         if continuation:
                             logger.info(f'[Scan] probe 그룹 이어지는 ffprobe 데이터 — 게이트 예외 전송: item={item.id} '

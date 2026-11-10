@@ -122,7 +122,7 @@ class ModuleBase(PluginModuleBase):
             try:
                 cur = conn.cursor()
                 cur.execute('SELECT 1')
-                cur.execute('SELECT count(*) FROM metadata_items WHERE metadata_type = 9')
+                cur.execute('SELECT count(*) FROM metadata_items WHERE metadata_type IN (1, 2, 9, 100)')
                 albums = cur.fetchone()[0]
             finally:
                 conn.close()
@@ -132,8 +132,8 @@ class ModuleBase(PluginModuleBase):
             return {'ret': 'warning', 'msg': f'연결에 실패했습니다: {e}'}
         P.ModelSetting.set('base_db_ok_hash', db_support.params_fingerprint(params))
         logger.info(f"[Base] DB 연결 테스트 성공: {params['host']}:{params['port']} "
-                    f"db={params['dbname']} user={params['user']} 앨범 총 {albums}개")
+                    f"db={params['dbname']} user={params['user']} 미디어 총 {albums}개")
         return {'ret': 'success', 'title': 'PostgreSQL Relay 연결 테스트',
-                'modal': (f"연결에 성공했습니다. 전체 앨범 {albums:,}개가 조회됩니다.<br>"
-                          '현황에서 라이브러리별 앨범 수·트랙 수·메타 없음 수를 확인할 수 있습니다.<br>'
+                'modal': (f"연결에 성공했습니다. 전체 미디어 {albums:,}개가 조회됩니다.<br>"
+                          '현황에서 라이브러리별 미디어 수·항목 수·메타 없음 수를 확인할 수 있습니다.<br>'
                           '설정을 저장해 두시면, 설정을 바꾸기 전까지 이 연결 정보를 활용합니다.')}

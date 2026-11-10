@@ -47,6 +47,7 @@ class ModelScanItem(ModelBase):
     probe_expected = db.Column(db.Integer)  # 조립 전체 파일 수 (job stats expected_files)
     vfs_done = db.Column(db.Boolean)  # VFS 새로고침 완료 여부 (체크완료 표시용)
     vfs_done_time = db.Column(db.DateTime)  # VFS 새로고침 완료 시각
+    held = db.Column(db.Boolean)  # Shyni 연동이 꺼진 동안 쌓여 보류된 항목인지 표시 (켜도 자동 처리 안 함)
     reset_done = db.Column(db.Boolean)  # 선택 항목 리셋으로 초기화된 항목인지 표시
     reset_time = db.Column(db.DateTime)  # 리셋된 시각
     in_library = db.Column(db.Boolean)  # shyni 라이브러리에 이미 반영된 항목인지 표시
@@ -87,6 +88,7 @@ class ModelScanItem(ModelBase):
         self.flag_cancel = False
         self.flag_finish = False
         self.filecheck_count = 0
+        self.held = False
         self.reset_done = False
         self.in_library = None
 
@@ -213,9 +215,13 @@ class ModelScanItem(ModelBase):
                     # 라이브러리/항목 없음 외의 job 실패·오류
                     query = query.filter(cls.status == 'FINISH_SHYNI_FAILED',
                                          cls.shyni_status.in_(('FAILED', 'ERROR')))
+                elif option2 == 'HELD':
+                    # 보류 — Shyni 연동이 꺼진 동안 쌓여, 켜도 자동 처리되지 않는 항목
+                    query = query.filter(cls.status == 'READY', cls.held.is_(True))
                 elif option2 == 'READY':
-                    # 진행중은 READY가 아니다 — 아직 전송되지 않은 항목만
+                    # 진행중은 READY가 아니다 — 아직 전송되지 않은 항목만 (보류 제외)
                     query = query.filter(cls.status == 'READY',
+                                         or_(cls.held.is_(None), cls.held.is_(False)),
                                          or_(cls.shyni_status.is_(None),
                                              not_(cls.shyni_status.in_(('RUNNING', 'REQUESTED')))))
                 else:
@@ -233,6 +239,17 @@ class ModelScanItem(ModelBase):
 
 
     @classmethod
+    def release_all_held(cls):
+        """보류 중인 READY 항목을 전부 해제하고 개수를 돌려준다."""
+        with F.app.app_context():
+            rows = db.session.query(cls).filter(
+                cls.status == 'READY', cls.held.is_(True)).all()
+            for item in rows:
+                item.held = False
+                item.save()
+            return len(rows)
+
+    @classmethod
     def summary_counts(cls):
         """스캔 진행현황 한 줄용 집계 — 목록 필터(표시 상태)와 같은 기준으로 센다."""
         with F.app.app_context():
@@ -243,7 +260,8 @@ class ModelScanItem(ModelBase):
             return {'scanning_ids': scanning_ids,
                     'assembling': _query('ASSEMBLING').count(),
                     'queued': _query('QUEUED').count(),
-                    'ready': _query('READY').count()}
+                    'ready': _query('READY').count(),
+                    'held': _query('HELD').count()}
 
     @classmethod
     def web_list(cls, req) -> dict:

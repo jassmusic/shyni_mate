@@ -25,6 +25,7 @@
           <select id="option2" name="option2" class="form-control form-control-sm">
             <option value="all" selected>전체</option>
             <option value="READY">준비</option>
+            <option value="HELD">보류</option>
             <option value="ASSEMBLING">ffprobe 대기 중</option>
             <option value="QUEUED">스캔 대기 중</option>
             <option value="SCANNING">진행중</option>
@@ -47,14 +48,21 @@
   </div>
 </form>
 <div id='page1'></div>
-<div style="padding:6px 2px">
-  <label style="font-weight:normal"><input type="checkbox" id="check_all_page"> 현재 페이지 전체선택</label>
-  <button type="button" class="btn btn-sm btn-outline-danger" id="resetSelectedBtn" style="margin-left:10px">선택 항목 리셋</button>
-  <button type="button" class="btn btn-sm btn-outline-info" id="metaLoadSelectedBtn" style="margin-left:6px">선택 항목 라이브러리 메타 불러오기</button>
-  <button type="button" class="btn btn-sm btn-outline-primary" id="metaRefreshSelectedBtn" style="margin-left:6px">선택 항목 메타 새로고침</button>
-  <div style="font-size:12px; color:#888; margin-top:4px">클릭하면 선택 항목에 대해 수행합니다. 실행 중인 항목은 건너뜁니다.</div>
-  <style>#scan_summary_div strong { color:#444; }</style>
-  <div id="scan_summary_div" style="font-size:14.5px; color:#888; margin-top:8px"></div>
+<div style="padding:4px 2px">
+  <style>
+  .scan-act { padding:1px 8px !important; font-size:12px !important; line-height:1.5 !important; }
+  #scan_summary_div strong { color:#444; }
+  </style>
+  <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center">
+    <label style="font-weight:normal; font-size:12.5px; margin:0 2px 0 0"><input type="checkbox" id="check_all_page"> 현재 페이지 전체선택</label>
+    <button type="button" class="btn btn-sm btn-outline-danger scan-act" id="resetSelectedBtn">선택 항목 리셋</button>
+    <button type="button" class="btn btn-sm btn-outline-secondary scan-act" id="releaseHoldSelectedBtn">선택 항목 보류 해제</button>
+    <button type="button" class="btn btn-sm btn-outline-info scan-act" id="metaLoadSelectedBtn">선택 항목 라이브러리 메타 불러오기</button>
+    <button type="button" class="btn btn-sm btn-outline-primary scan-act" id="metaRefreshSelectedBtn">선택 항목 메타 새로고침</button>
+  </div>
+  <div style="font-size:11.5px; color:#888; margin-top:3px">클릭하면 선택 항목에 대해 수행합니다. 실행 중인 항목은 건너뜁니다.</div>
+  <div id="scan_summary_div" style="font-size:13px; color:#888; margin-top:5px"></div>
+  <div id="scan_hold_notice" style="display:none; font-size:12.5px; color:#b7791f; margin-top:3px"></div>
 </div>
 {{ macros.m_hr_head_top() }}
 {{ macros.m_row_start('0') }}
@@ -125,7 +133,10 @@ function make_list(data) {
     tmp += '<br>상태 : ';
     // 샤이니 결과는 별도 줄 없이 상태에 함께 반영한다
     if (data[i].status == 'READY') {
-      if (data[i].shyni_status == 'RUNNING' || data[i].shyni_status == 'REQUESTED') {
+      if (data[i].held) {
+        tmp += text_color("보류", 'orange');
+      }
+      else if (data[i].shyni_status == 'RUNNING' || data[i].shyni_status == 'REQUESTED') {
         if (data[i].shyni_phase == 'probe_assembling') {
           if (data[i].probe_expected && (data[i].probe_received || 0) >= data[i].probe_expected) {
             // 데이터는 다 모였고 shyni 스캐너 차례를 기다리는 중
@@ -341,6 +352,27 @@ $("body").on('click', '#resetSelectedBtn', function(e){
   });
 });
 
+$("body").on('click', '#releaseHoldSelectedBtn', function(e){
+  e.preventDefault();
+  var ids = [];
+  $('.item-check:checked').each(function(){ ids.push($(this).val()); });
+  if (!ids.length) { alert('먼저 보류 해제할 항목을 선택해 주세요.'); return; }
+  globalSendCommand('release_hold', ids.join(','), null, null, function(ret){
+    $('#check_all_page').prop('checked', false);
+    globalRequestSearch('1');
+    loadScanSummary();
+  });
+});
+
+$("body").on('click', '#releaseHoldAllBtn', function(e){
+  e.preventDefault();
+  if (!confirm('보류 중인 항목을 전부 해제합니다. 파일체크 주기에 처리가 시작됩니다. 계속하시겠습니까?')) return;
+  globalSendCommand('release_hold_all', null, null, null, function(ret){
+    globalRequestSearch('1');
+    loadScanSummary();
+  });
+});
+
 $("body").on('click', '#searchResetBtn', function(e){
   e.preventDefault();
   $("#order").val('desc');
@@ -370,7 +402,14 @@ function paintScanSummary(ret) {
   if (sm.assembling) segs.push('ffprobe 대기 중 <strong>' + sm.assembling + '개</strong>');
   if (sm.queued) segs.push('스캔 대기 중 <strong>' + sm.queued + '개</strong>');
   segs.push('준비 <strong>' + (sm.ready || 0) + '개</strong>');
+  if (sm.held) segs.push('보류 <strong>' + sm.held + '개</strong>');
   $('#scan_summary_div').html('<span style="font-weight:bold; color:#555; margin-right:8px">스캔 진행현황</span>' + segs.join(' · ') + ' <span id="scan_summary_ago" style="color:#aaa; font-size:13px"></span>');
+  var holdNotice = $('#scan_hold_notice');
+  if (sm.held) {
+    holdNotice.html((sm.shyni_use ? '보류 중인 항목은 자동 처리되지 않습니다. 처리하려면 보류 해제를 해 주세요. ' : 'Shyni 연동이 꺼져 있어 항목이 보류되고 있습니다. 켜도 보류분은 자동 처리되지 않습니다. ') + '<button type="button" class="btn btn-sm btn-outline-secondary" id="releaseHoldAllBtn" style="padding:1px 8px; font-size:12px">전체 보류 해제</button>').show();
+  } else {
+    holdNotice.hide().html('');
+  }
   scanSummaryLastAt = Date.now();
   paintScanSummaryAgo();
 }

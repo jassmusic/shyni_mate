@@ -75,6 +75,8 @@ class ModuleScan(PluginModuleBase):
                             conn.execute(text('ALTER TABLE scan_item ADD probe_received INTEGER'))
                         if 'probe_expected' not in cols:
                             conn.execute(text('ALTER TABLE scan_item ADD probe_expected INTEGER'))
+                        if 'held' not in cols:
+                            conn.execute(text('ALTER TABLE scan_item ADD held BOOLEAN'))
                     if 'shyni_status' not in cols:
                         P.logger.info('[Scan] migration: scan_item.shyni_status/shyni_job_id 컬럼 추가')
         except Exception as e:
@@ -121,6 +123,7 @@ class ModuleScan(PluginModuleBase):
         if command == 'summary':
             try:
                 ret['summary'] = ModelScanItem.summary_counts()
+                ret['summary']['shyni_use'] = P.ModelSetting.get_bool('scan_shyni_use')
             except Exception as e:
                 # 30초마다 폴링하므로 실패해도 알림을 띄우지 않는다 —
                 # 화면은 마지막 숫자를 유지하고 (N초 전) 표시가 오래됐음을 알린다
@@ -183,6 +186,7 @@ class ModuleScan(PluginModuleBase):
                 item.flag_cancel = False
                 item.flag_finish = False
                 item.scan_folder = None
+                item.held = False
                 item.reset_done = True
                 item.reset_time = datetime.now()
                 item.set_status('READY', save=True)
@@ -204,6 +208,24 @@ class ModuleScan(PluginModuleBase):
             item.set_status('READY', save=True)
             logger.info(f'[Scan] 재시도(READY로 변경): item={arg1} mode={item.mode}')
             ret['msg'] = 'READY 상태로 변경했습니다.'
+        elif command == 'release_hold':
+            ids = [int(x) for x in (arg1 or '').split(',') if x.strip().isdigit()]
+            done = 0
+            for item_id in ids:
+                try:
+                    item = ModelScanItem.get_by_id(item_id)
+                except Exception:
+                    item = None
+                if item is not None and getattr(item, 'held', None):
+                    item.held = False
+                    item.save()
+                    done += 1
+            logger.info(f'[Scan] 보류 해제: {done}개 (요청 ids={ids})')
+            ret['msg'] = f'{done}개 항목의 보류를 해제했습니다. 파일체크 주기에 처리가 시작됩니다.'
+        elif command == 'release_hold_all':
+            done = ModelScanItem.release_all_held()
+            logger.info(f'[Scan] 전체 보류 해제: {done}개')
+            ret['msg'] = f'보류 중인 {done}개 항목을 전부 해제했습니다. 파일체크 주기에 처리가 시작됩니다.'
         elif command == 'meta_load_items':
             ids = [int(x) for x in (arg1 or '').split(',') if x.strip().isdigit()]
             if not ids:
@@ -223,7 +245,7 @@ class ModuleScan(PluginModuleBase):
                 t.daemon = True
                 t.start()
                 logger.info(f'[Scan] 선택 항목 메타 새로고침 시작: {len(ids)}개 ids={ids}')
-                ret['msg'] = f'{len(ids)}개 항목의 메타 새로고침을 시작했습니다. 반영되면 앨범 정보가 갱신됩니다.'
+                ret['msg'] = f'{len(ids)}개 항목의 메타 새로고침을 시작했습니다. 반영되면 미디어 정보가 갱신됩니다.'
         elif command == 'meta_load':
             item = ModelScanItem.get_by_id(arg1)
             if item is None:
@@ -243,7 +265,7 @@ class ModuleScan(PluginModuleBase):
                 t.daemon = True
                 t.start()
                 logger.info(f'[Scan] 메타 새로고침(수동) 시작: item={item.id} target={item.target}')
-                ret['msg'] = '메타 새로고침을 요청했습니다. 반영되면 앨범 정보(이미지 포함)가 갱신됩니다.'
+                ret['msg'] = '메타 새로고침을 요청했습니다. 반영되면 미디어 정보(이미지 포함)가 갱신됩니다.'
         return jsonify(ret)
 
 

@@ -72,41 +72,57 @@ function healthCard(label, valueHtml, sub) {
     + '</div>';
 }
 
+function pctText(count, pct) {
+  // 개수가 있는데 비율이 0%로 반올림되면 <1%로 표시한다
+  if (count > 0 && !(pct > 0)) return '<1%';
+  return (pct != null ? pct : 0) + '%';
+}
+
 function libComment(c) {
   // 수치로 한 줄 설명을 만든다
   var ml = c.main_label || '앨범';
   var mainCount = (c.main_count != null) ? c.main_count : c.albums;
-  if (c.is_folder && mainCount > 0) return '라이브러리 특성상 코드가 없어, 표지 여부로 건강도를 판단합니다. 표지 없는 ' + ml + ' ' + fmtNum(c.no_thumb) + '개(' + (c.check_pct != null ? c.check_pct : 0) + '%)은 점검이 필요합니다.';
+  if (c.is_folder && mainCount > 0) {
+    if (!(c.no_thumb > 0)) return '라이브러리 특성상 코드가 없어, 표지 여부로 건강도를 판단합니다. 모든 ' + ml + '에 표지가 있습니다.';
+    return '라이브러리 특성상 코드가 없어, 표지 여부로 건강도를 판단합니다. 표지 없는 ' + ml + ' ' + fmtNum(c.no_thumb) + '개(' + pctText(c.no_thumb, c.check_pct) + ')은 점검이 필요합니다.';
+  }
   if (mainCount > 0 && c.no_code >= mainCount) return ml + ' 전부에 코드가 없습니다.' + (c.lib_type == 'music' ? ' 차트 라이브러리 특성으로 보입니다.' : '');
   var miss = [['코드 없음', c.no_code], ['소개 없음', c.no_summary], ['연도 없음', c.no_year], ['표지 없음', c.no_thumb]];
   miss.sort(function(a, b){ return b[1] - a[1]; });
   if (miss[0][1] == 0) return '누락 항목이 없습니다.';
   var msg = '누락 중에서는 ' + miss[0][0] + '이 ' + fmtNum(miss[0][1]) + '개로 가장 많습니다.';
-  if (c.no_code > 0) msg += ' 코드 없는 ' + ml + ' ' + fmtNum(c.no_code) + '개(' + (c.code_pct != null ? c.code_pct : c.check_pct) + '%)는 점검이 필요합니다.';
+  if (c.no_code > 0) msg += ' 코드 없는 ' + ml + ' ' + fmtNum(c.no_code) + '개(' + pctText(c.no_code, (c.code_pct != null ? c.code_pct : c.check_pct)) + ')는 점검이 필요합니다.';
   else msg += (c.lib_type == 'music' || !c.lib_type) ? ' 코드 없는 앨범은 없습니다.' : ' 코드 없는 항목은 없습니다.';
   return msg;
 }
 
-var KIND_LABELS = {'music': '앨범', 'movie': '영화', 'tv': '쇼', 'show': '쇼', 'book': '도서', 'photo': '사진'};
+var KIND_LABELS = {'music': '음악', 'movie': '영화', 'tv': '쇼', 'show': '쇼', 'book': '도서', 'photo': '사진'};
 
 function libCard(c) {
-  var card = '<div style="display:flex; justify-content:space-between; align-items:baseline">';
-  card += '<span>' + (KIND_LABELS[c.lib_type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + KIND_LABELS[c.lib_type] + '</span>' : '') + '<strong style="font-size:15px">' + c.title + '</strong></span>';
-  card += '<span style="font-size:12px; color:#888">정상 <strong style="color:#38a169">' + c.ok_pct + '%</strong></span></div>';
-  card += '<div style="display:flex; height:8px; border-radius:4px; overflow:hidden; background:#dd6b20; margin:6px 0 8px 0"><div style="width:' + c.ok_pct + '%; background:#38a169"></div></div>';
   var ml = c.main_label || '앨범';
   var sl = c.sub_label || '트랙';
   var mainCount = (c.main_count != null) ? c.main_count : c.albums;
   var subCount = (c.sub_count != null) ? c.sub_count : c.tracks;
   var avgSub = (c.avg_sub != null) ? c.avg_sub : c.avg_tracks;
-  card += '<div style="font-size:13px; line-height:1.9">';
-  card += ml + ' <strong style="float:right">' + fmtNum(mainCount) + '</strong><br>';
-  card += sl + ' <strong style="float:right">' + fmtNum(subCount) + '</strong> <span style="color:#aaa; font-size:12px">(' + ml + '당 평균 ' + avgSub + ')</span><br>';
+  var isEmpty = !(mainCount > 0);
+  var card = '<div style="display:flex; justify-content:space-between; align-items:baseline">';
+  card += '<span>' + (KIND_LABELS[c.lib_type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + KIND_LABELS[c.lib_type] + '</span>' : '') + '<strong style="font-size:15px">' + c.title + '</strong></span>';
+  if (isEmpty) card += '<span style="font-size:12px; color:#888"><strong style="color:#dd6b20; font-size:13px">비어있음</strong></span></div>';
+  else card += '<span style="font-size:12px; color:#888">정상 <strong style="color:#38a169">' + pctText(c.ok || 0, c.ok_pct) + '</strong></span></div>';
+  if (isEmpty) card += '<div style="height:8px; border-radius:4px; background:#edf2f7; margin:6px 0 8px 0"></div>';
+  else card += '<div style="display:flex; height:8px; border-radius:4px; overflow:hidden; background:#dd6b20; margin:6px 0 8px 0"><div style="width:' + c.ok_pct + '%; background:#38a169"></div></div>';
+  var mainRow = ml + ' <strong style="float:right">' + fmtNum(mainCount) + '</strong>';
+  var subRow = sl + ' <strong style="float:right">' + fmtNum(subCount) + '</strong> <span style="color:#aaa; font-size:12px">(' + ml + '당 평균 ' + avgSub + ')</span>';
+  var groupRow = '';
   if (c.group_label) {
     var groupCount = (c.group_count != null) ? c.group_count : c.artists;
-    card += c.group_label + ' <strong style="float:right">' + fmtNum(groupCount) + '</strong>';
+    groupRow = c.group_label + ' <strong style="float:right">' + fmtNum(groupCount) + '</strong>';
   }
-  card += '</div>';
+  var rows = [];
+  if (c.lib_type == 'music' && groupRow) rows = [groupRow, mainRow, subRow];
+  else { rows = [mainRow, subRow]; if (groupRow) rows.push(groupRow); }
+  if (c.file_count != null) rows.push('파일 <strong style="float:right">' + fmtNum(c.file_count) + '</strong> <span style="color:#aaa; font-size:12px">(' + sl + '당 평균 ' + (c.avg_file != null ? c.avg_file : 0) + ')</span>');
+  card += '<div style="font-size:13px; line-height:1.9">' + rows.join('<br>') + '</div>';
   card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:13px; line-height:1.9">';
   card += '정상 ' + ml + ' <strong style="float:right; color:#2f855a">' + fmtNum(c.ok) + '</strong><br>';
   card += '점검 필요 <strong style="float:right; color:#c05621">' + fmtNum(c.judge_missing != null ? c.judge_missing : (c.missing_any != null ? c.missing_any : c.no_code)) + '</strong></div>';
@@ -115,7 +131,8 @@ function libCard(c) {
   card += '소개 없음 <strong style="float:right">' + fmtNum(c.no_summary) + '</strong><br>';
   card += '연도 없음 <strong style="float:right">' + fmtNum(c.no_year) + '</strong><br>';
   card += '표지 없음 <strong style="float:right">' + fmtNum(c.no_thumb) + '</strong></div>';
-  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#666">' + libComment(c) + '</div>';
+  if (isEmpty) card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#dd6b20; font-weight:bold">라이브러리가 비어있습니다.</div>';
+  else card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#666">' + libComment(c) + '</div>';
   return '<div style="border:1px solid #ddd; border-radius:6px; padding:10px 14px; background:#fff">' + card + '</div>';
 }
 
@@ -155,11 +172,10 @@ function renderHealth(h) {
   var sl = t.sub_label || '트랙';
   var str = '<div style="display:flex; flex-wrap:wrap; gap:10px">';
   str += healthCard('전체 ' + ml, fmtNum(t.works != null ? t.works : t.albums));
-  str += healthCard('정상 ' + ml, fmtNum(t.ok), t.ok_pct + '%');
-  str += healthCard('점검 필요', fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), t.check_pct + '% · 누락 항목 기준');
+  str += healthCard('정상 ' + ml, fmtNum(t.ok), pctText(t.ok, t.ok_pct));
+  str += healthCard('점검 필요', fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), pctText((t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), t.check_pct) + ' · 누락 항목 기준');
   str += healthCard('전체 ' + sl, fmtNum(t.subs != null ? t.subs : t.tracks));
   if (t.all_music || t.all_music == null) str += healthCard('아티스트', fmtNum(t.artists));
-  else str += healthCard('라이브러리', fmtNum(t.lib_count));
   str += '</div>';
   // 도넛 차트 3개: 건강도 · 누락 구성 · 스캔 상태
   var sc = h.scan || {};
@@ -170,11 +186,23 @@ function renderHealth(h) {
   var judgeNote = '코드·소개·연도·표지 중 하나라도 누락된 항목이 점검 필요입니다.';
   if (h.libs && h.libs.some(function(c){ return c.is_folder; })) judgeNote += ' 폴더 에이전트 라이브러리는 표지 여부로만 판단합니다.';
   str += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px">';
+  var LIB_TYPE_DONUT = [['movie', '영화', '#3182ce'], ['tv', '쇼', '#805ad5'], ['show', '쇼', '#805ad5'], ['music', '음악', '#38a169'], ['book', '도서', '#d69e2e'], ['photo', '사진', '#718096']];
+  var lt = t.lib_types || {};
+  var ltKinds = LIB_TYPE_DONUT.filter(function(d){ return lt[d[0]]; });
+  if (ltKinds.length >= 2) {
+    var ltSegs = [], ltLegend = '';
+    for (var li = 0; li < ltKinds.length; li++) {
+      var lp = pctOf(lt[ltKinds[li][0]], t.lib_count);
+      ltSegs.push({pct: lp, color: ltKinds[li][2]});
+      ltLegend += '<span style="color:' + ltKinds[li][2] + '">●</span> ' + ltKinds[li][1] + ' <strong>' + fmtNum(lt[ltKinds[li][0]]) + '</strong> (' + pctText(lt[ltKinds[li][0]], lp) + ')' + (li < ltKinds.length - 1 ? '<br>' : '');
+    }
+    str += donutCard('라이브러리 구성', ltSegs, null, fmtNum(t.lib_count), '라이브러리', ltLegend);
+  }
   str += donutCard('라이브러리 건강도',
     [{pct: t.ok_pct, color: '#38a169'}], '#fde3cf',
     t.ok_pct + '%', '건강도',
-    '<span style="color:#38a169">●</span> 정상 ' + ml + ' <strong>' + fmtNum(t.ok) + '</strong> (' + t.ok_pct + '%)<br>'
-    + '<span style="color:#dd6b20">●</span> 점검 필요 <strong>' + fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)) + '</strong> (' + t.check_pct + '%)<br>'
+    '<span style="color:#38a169">●</span> 정상 ' + ml + ' <strong>' + fmtNum(t.ok) + '</strong> (' + pctText(t.ok, t.ok_pct) + ')<br>'
+    + '<span style="color:#dd6b20">●</span> 점검 필요 <strong>' + fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)) + '</strong> (' + pctText((t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), t.check_pct) + ')<br>'
     + '<span style="color:#888; font-size:12px">' + judgeNote + '</span>');
   str += donutCard('메타데이터 누락',
     [{pct: pctOf(t.no_code, missTot), color: '#dd6b20'},
@@ -182,15 +210,15 @@ function renderHealth(h) {
      {pct: pctOf(t.no_year, missTot), color: '#805ad5'},
      {pct: pctOf(t.no_thumb, missTot), color: '#d69e2e'}], null,
     fmtNum(missTot), '누락 합계',
-    '<span style="color:#dd6b20">●</span> 코드 없음 <strong>' + fmtNum(t.no_code) + '</strong> (' + pctOf(t.no_code, missTot) + '%)<br>'
-    + '<span style="color:#3182ce">●</span> 소개 없음 <strong>' + fmtNum(t.no_summary) + '</strong> (' + pctOf(t.no_summary, missTot) + '%)<br>'
-    + '<span style="color:#805ad5">●</span> 연도 없음 <strong>' + fmtNum(t.no_year) + '</strong> (' + pctOf(t.no_year, missTot) + '%)<br>'
-    + '<span style="color:#d69e2e">●</span> 표지 없음 <strong>' + fmtNum(t.no_thumb) + '</strong> (' + pctOf(t.no_thumb, missTot) + '%)');
+    '<span style="color:#dd6b20">●</span> 코드 없음 <strong>' + fmtNum(t.no_code) + '</strong> (' + pctText(t.no_code, pctOf(t.no_code, missTot)) + ')<br>'
+    + '<span style="color:#3182ce">●</span> 소개 없음 <strong>' + fmtNum(t.no_summary) + '</strong> (' + pctText(t.no_summary, pctOf(t.no_summary, missTot)) + ')<br>'
+    + '<span style="color:#805ad5">●</span> 연도 없음 <strong>' + fmtNum(t.no_year) + '</strong> (' + pctText(t.no_year, pctOf(t.no_year, missTot)) + ')<br>'
+    + '<span style="color:#d69e2e">●</span> 표지 없음 <strong>' + fmtNum(t.no_thumb) + '</strong> (' + pctText(t.no_thumb, pctOf(t.no_thumb, missTot)) + ')');
   str += donutCard('스캔 상태',
     sTot ? [{pct: pctOf(sDone, sTot), color: '#38a169'},
             {pct: pctOf(sRun, sTot), color: '#3182ce'},
             {pct: pctOf(sFail, sTot), color: '#e53e3e'}] : [], null,
-    sTot ? pctOf(sDone, sTot) + '%' : '-', '완료율',
+    sTot ? pctText(sDone, pctOf(sDone, sTot)) : '-', '완료율',
     '<span style="color:#38a169">●</span> 완료 <strong>' + fmtNum(sDone) + '</strong><br>'
     + '<span style="color:#3182ce">●</span> 실행 중 <strong>' + fmtNum(sRun) + '</strong><br>'
     + '<span style="color:#e53e3e">●</span> 실패 <strong>' + fmtNum(sFail) + '</strong><br>'
@@ -206,18 +234,25 @@ function renderHealth(h) {
     str += '</div>';
   }
   str += '<div style="font-size:13px; color:#888; margin-top:14px; line-height:1.8">'
-    + '<div style="font-weight:bold; color:#666">건강도 안내</div>'
-    + '<div>- <strong style="color:#666">코드</strong> — 앨범이 무슨 앨범인지 매칭이 확정됐는지를 나타냅니다. 코드가 없는 앨범이 \'메타 없음(매칭안됨)\' 상태입니다.</div>'
-    + '<div>- <strong style="color:#666">소개</strong> — 앨범 설명글이 채워져 있는지입니다.</div>'
-    + '<div>- <strong style="color:#666">연도</strong> — 발매 연도가 입력돼 있는지입니다.</div>'
-    + '<div>- <strong style="color:#666">표지</strong> — 표지 이미지가 있는지입니다.</div>'
-    + '<div style="margin-top:6px">네 가지 중 하나라도 없으면 점검 필요로 셉니다. 코드가 있어도 소개·연도·표지 중 하나가 없으면 점검 필요에 포함됩니다. 단, 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라 표지 여부로만 건강도를 판단합니다.</div></div>';
-  str += '<div style="font-size:13px; color:#888; margin-top:10px">작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.</div>';
+    + '<div style="font-weight:bold; color:#666; cursor:pointer" onclick="toggleHealthGuide()">건강도 안내 <span id="health_guide_arrow" style="font-weight:normal; font-size:12px; color:#999">' + (healthGuideOpen ? '▾ 접기' : '▸ 펼치기') + '</span></div>'
+    + '<div id="health_guide_body" style="display:' + (healthGuideOpen ? 'block' : 'none') + '">'
+    + '<div>- <strong style="color:#666">코드</strong> — 미디어가 어떤 미디어인지 매칭이 확정됐는지를 나타냅니다. 코드가 없는 미디어가 \'메타 없음(매칭안됨)\' 상태입니다.</div>'
+    + '<div>- <strong style="color:#666">소개</strong> — 미디어 설명글이 채워져 있는지입니다.</div>'
+    + '<div>- <strong style="color:#666">연도</strong> — 미디어의 연도(발매·개봉·출간)가 입력돼 있는지입니다.</div>'
+    + '<div>- <strong style="color:#666">표지</strong> — 표지(포스터·커버) 이미지가 있는지입니다.</div>'
+    + '<div style="margin-top:6px">네 가지 중 하나라도 없으면 점검 필요로 셉니다. 코드가 있어도 소개·연도·표지 중 하나가 없으면 점검 필요에 포함됩니다. 단, 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라 표지 여부로만 건강도를 판단합니다.</div></div></div>';
+  str += '<div style="font-size:13px; color:#888; margin-top:10px">미디어·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.</div>';
   $('#health_div').html(str);
   $('#health_head_div, #health_div').show();
 }
 
 var healthPollCount = 0;
+var healthGuideOpen = false;
+function toggleHealthGuide() {
+  healthGuideOpen = !healthGuideOpen;
+  $('#health_guide_body').toggle(healthGuideOpen);
+  $('#health_guide_arrow').text(healthGuideOpen ? '▾ 접기' : '▸ 펼치기');
+}
 var healthLoadStartAt = null;
 function fmtHealthElapsed(ms) {
   var s = ms / 1000;
