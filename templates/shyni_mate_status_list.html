@@ -48,6 +48,15 @@
 <div id="status_foot_comment" style="font-size:13px; color:#888; margin-top:10px">
   파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 아직 로그에 기록이 없는 라이브러리는 스캔이 끝난 뒤에 내용이 채워집니다. 앨범수는 로그에 기록되지 않아 표시하지 않습니다.
 </div>
+<div id="status_btn_guide" style="font-size:13px; color:#888; margin-top:14px; line-height:1.8">
+  <div style="font-weight:bold; color:#666">버튼 안내</div>
+  <div>- <strong style="color:#666">새로고침</strong> — rclone VFS 새로고침만 합니다. 드라이브 폴더를 다시 읽어 새 파일이 마운트에 보이게 합니다. 스캔 설정의 VFS 새로고침 규칙에 이 라이브러리 경로가 맞아야 동작합니다.</div>
+  <div>- <strong style="color:#666">스캔</strong> — shyni에 이 라이브러리 전체 스캔을 전송합니다. 취소는 shyni 웹 화면에서 합니다.</div>
+  <div>- <strong style="color:#666">새로고침 후 스캔</strong> — 새로고침이 끝나면 스캔이 자동으로 시작됩니다. 새로고침은 취소가 가능하나, 스캔으로 넘어간 뒤 취소는 shyni 웹 화면에서 해야 합니다.</div>
+  <div>- <strong style="color:#666">메타 새로고침</strong> — 앨범 메타데이터를 순서대로 새로고침합니다. 전체 앨범 또는 메타 없는 앨범만 고를 수 있고, 고급 설정의 데이터베이스 연결이 필요합니다.</div>
+  <div>- <strong style="color:#666">취소</strong> — 진행 중인 새로고침과 메타 새로고침을 멈춥니다. 스캔 취소는 shyni 웹 화면에서 해야 합니다.</div>
+  <div style="margin-top:6px">참고로 이 버튼들은 스캔 설정의 'rclone vfs/refresh 사용'과 'Shyni 연동 사용' 설정과 무관하게 동작합니다. 그 설정들은 스캔 목록의 자동 처리 전용입니다.</div>
+</div>
 <div id="meta_choice_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
   <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
     <div style="font-size:15px; font-weight:bold; margin-bottom:6px">메타 새로고침</div>
@@ -344,7 +353,7 @@ function finishProgress(ret) {
   $('#load_progress_bar').css('width', '100%');
   var el = loadStartAt ? fmtElapsed(Date.now() - loadStartAt) : '';
   var txt = '불러오기 완료 · 100%' + (el ? ' · 소요시간 ' + el : '');
-  if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + '에 불러온 정보';
+  if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + ' 기준';
   $('#load_progress_text').text(txt);
   progressDoneOnce = true;
 }
@@ -481,7 +490,7 @@ function load_list(force, quiet) {
           hasData = true;
           stopProgressCreep();
           $('#load_progress_wrap').hide();
-          $('#server_head_div, #lib_head_div, #status_foot_comment, #logwarn_div').hide();
+          $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide, #logwarn_div').hide();
           $('#server_card_div').html('');
           $('#type_counts_div').html('');
           $('#status_list_div').html('<div style="padding:24px 4px; color:#888">현황을 보기 위해 설정에서 정보를 입력해 주세요.</div>');
@@ -492,7 +501,7 @@ function load_list(force, quiet) {
           return;
         }
         hasData = true;
-        $('#server_head_div, #lib_head_div, #status_foot_comment').show();
+        $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
         if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 작품·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.');
         render(ret.data, ret.log_files, ret.periodic_current);
