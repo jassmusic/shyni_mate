@@ -12,6 +12,7 @@ import requests
 
 from .setup import *
 from .shyni_backend import ShyniBackend
+from .task_status import TaskStatus
 
 name = 'status'
 logger = P.logger
@@ -46,6 +47,14 @@ class ModuleStatus(PluginModuleBase):
             f"{self.name}_db_version": "1",
             f"{self.name}_auto_refresh_min": "30",
         }
+
+    def plugin_load(self):
+        # DB 통계 계산은 Celery 워커(task_status)가 전담한다 — 웹은 요청만 남긴다
+        def func():
+            self.start_celery(TaskStatus.start)
+        thread = threading.Thread(target=func, args=())
+        thread.daemon = True
+        thread.start()
 
     # ---------- shyni 서버 정보 (헬스체크·용량) ----------
     @staticmethod
@@ -684,70 +693,50 @@ class ModuleStatus(PluginModuleBase):
     _list_cache = {'at': 0, 'data': None}
 
     def _db_stats(self, force=False):
-        """DB 통계를 (데이터, 로딩중) 으로 돌려준다. 계산이 오래 걸리므로 백그라운드로 하고,
-        이전 결과(재시작 전에 저장해 둔 것 포함)가 있으면 그걸 바로 돌려줘 화면이 즉시 뜨게 한다.
-        오래된 결과는 뒤에서 새로 계산해 다음 표시부터 갱신한다.
-        force(강제 새로고침)면 캐시를 보여 주면서 즉시 재계산을 시작하고 로딩중으로 알린다."""
+        """DB 통계를 (데이터, 로딩중) 으로 돌려준다. 계산은 Celery 워커(task_status)가
+        전담하고, 웹은 저장된 결과만 읽어 즉시 돌려준다 — 계산 중에도 화면이
+        무거워지지 않는다. 결과가 없거나 오래됐거나 force(강제 새로고침)면
+        워커에 계산 요청만 남긴다. 워커가 저장한 최신 결과가 메모리 복사본보다
+        새로우면 받아들여, 옛 결과가 화면에 고착되지 않게 한다."""
         from .db_support import db_ready
         if not db_ready():
             return None, False
+        from .task_status import read_state, request_stats
         cls = type(self)
-        if cls._db_stats_cache['data'] is None:
-            try:
-                saved_raw = P.ModelSetting.get('status_db_stats_cache')
-                if saved_raw:
-                    saved = json.loads(saved_raw)
-                    data = saved.get('data') if isinstance(saved, dict) else None
-                    if data and data.get('libs'):
-                        data['libs'] = {int(k): v for k, v in data['libs'].items()}
-                        cls._db_stats_cache = {'at': saved.get('at') or 0, 'data': data}
-            except Exception:
-                pass
+        try:
+            saved_raw = P.ModelSetting.get('status_db_stats_cache')
+            if saved_raw:
+                saved = json.loads(saved_raw)
+                data = saved.get('data') if isinstance(saved, dict) else None
+                saved_at = (saved.get('at') or 0) if isinstance(saved, dict) else 0
+                if data and data.get('libs') and saved_at >= cls._db_stats_cache['at']:
+                    data = dict(data)
+                    data['libs'] = {int(k): v for k, v in data['libs'].items()}
+                    cls._db_stats_cache = {'at': saved_at, 'data': data}
+        except Exception:
+            pass
+        state = read_state()
+        pending = (state.get('requested_at') or 0) > (state.get('finished_at') or 0)
+        cls._db_stats_busy = bool(state.get('busy')) or pending
+        cls._db_stats_progress = state.get('progress') or 0
         cached = cls._db_stats_cache['data']
         if cached is not None:
             if force:
-                self._start_db_stats()
+                request_stats(force=True)
+                state = read_state()
+                pending = (state.get('requested_at') or 0) > (state.get('finished_at') or 0)
+                cls._db_stats_busy = bool(state.get('busy')) or pending
+                cls._db_stats_progress = state.get('progress') or 0
                 return cached, cls._db_stats_busy
             try:
                 stale_after = max(60, int(self._refresh_min()) * 60)
             except Exception:
                 stale_after = 60
             if time.time() - cls._db_stats_cache['at'] >= stale_after:
-                self._start_db_stats()
+                request_stats()
             return cached, False
-        self._start_db_stats()
+        request_stats()
         return None, True
-
-    def _start_db_stats(self):
-        cls = type(self)
-        if cls._db_stats_busy:
-            return
-        cls._db_stats_busy = True
-        cls._db_stats_progress = 5
-
-        def _run():
-            try:
-                t0 = time.time()
-                from .db_support import dashboard_stats, library_stats
-                libs = library_stats()
-                cls._db_stats_progress = 55
-                dash = dashboard_stats(libs)
-                data = {'libs': libs, 'dash': dash,
-                        'elapsed': round(time.time() - t0, 2)}
-                cls._db_stats_cache = {'at': time.time(), 'data': data}
-                cls._db_stats_progress = 100
-                try:
-                    P.ModelSetting.set('status_db_stats_cache',
-                                       json.dumps({'at': cls._db_stats_cache['at'],
-                                                   'data': data}))
-                except Exception:
-                    pass
-            except Exception as e:
-                logger.warning(f'[Status] DB 통계 백그라운드 조회 실패: {e}')
-            finally:
-                cls._db_stats_busy = False
-
-        threading.Thread(target=_run, daemon=True).start()
 
     @classmethod
     def _overall_progress(cls, db_loading):

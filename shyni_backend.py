@@ -55,6 +55,22 @@ class ShyniBackend:
             return {}
 
     @staticmethod
+    def probe_group(db_item):
+        """FP 수신 원문에 담긴 probe 그룹 정보({id, index, parts, files})를 돌려준다.
+
+        파일이 많은 앨범은 probe가 여러 항목으로 쪼개져 들어오며, 조각마다 같은
+        그룹 id가 붙는다. 게이트 예외(이어지는 조각 판정)에 쓰인다. 없으면 None."""
+        try:
+            probe = ShyniBackend._gds_metadata(db_item).get('scan_probe')
+            if isinstance(probe, dict):
+                group = probe.get('group')
+                if isinstance(group, dict) and group.get('id'):
+                    return group
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def gather_probe_payload(db_item, shyni_path):
         """폴더별 압축 자료는 해제/경로 재작성 없이 샤이니가 검증하도록 전달한다.
 
@@ -464,8 +480,23 @@ class ShyniBackend:
                 return
             res.raise_for_status()
             job = res.json()
+            # 진행 단계 기록 — 단, stats.phase는 조립 당시 값으로 고정돼 스캔이 시작된
+            # 뒤에도 probe_assembling으로 남는다 (실측). 실제 대기와 스캔 중의 구분은
+            # job 상태(accepted=미시작, running=스캔 중)로만 가능하므로 함께 본다.
+            stats = job.get('stats') or {}
+            if job['status'] == 'accepted' and stats.get('phase') == 'probe_assembling':
+                item.shyni_phase = 'probe_assembling'
+                item.probe_received = stats.get('manifest_files')
+                item.probe_expected = stats.get('expected_files')
+            elif job['status'] == 'accepted':
+                item.shyni_phase = 'queued'
+            else:
+                item.shyni_phase = None
+                item.probe_received = None
+                item.probe_expected = None
             if job['status'] == 'failed':
                 item.shyni_status = 'FAILED'
+                item.shyni_phase = None
                 if item.process_finish_time is None:
                     item.process_finish_time = datetime.now()
                 logger.warning(f"[Shyni] job 실패: item={item.id} error={job.get('error')}")
@@ -477,6 +508,14 @@ class ShyniBackend:
             return
         if not waiting_refresh:
             item.shyni_status = 'FINISH'
+            # 완료 판정: 스캔은 됐지만 신규 등록이 없었으면 '이미 반영됨'으로 구분한다
+            # (plex_mate의 FINISH_ADD_ALREADY_IN_DB에 해당 — 상태값은 FINISH_SHYNI 그대로).
+            stats = job.get('stats') or {}
+            if stats.get('total') is not None:
+                item.in_library = (stats.get('new') == 0 and stats.get('total') > 0)
+            item.shyni_phase = None
+            item.probe_received = None
+            item.probe_expected = None
             if item.process_finish_time is None:
                 item.process_finish_time = datetime.now()
                 if item.process_start_time is not None:

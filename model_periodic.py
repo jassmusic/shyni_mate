@@ -24,6 +24,11 @@ class ModelPeriodicItem(ModelBase):
     duration = db.Column(db.Integer)       # 초
     message = db.Column(db.String)
 
+    def save(self):
+        # SQLite 잠금이면 재시도한다 (스캔 항목과 같은 DB를 쓴다)
+        from .extensions import save_with_retry
+        return save_with_retry(self)
+
     def __init__(self, job_name, section_key, section_title, mode):
         self.created_time = datetime.now()
         self.start_time = datetime.now()

@@ -69,6 +69,12 @@ class ModuleScan(PluginModuleBase):
                             conn.execute(text('ALTER TABLE scan_item ADD reset_time DATETIME'))
                         if 'in_library' not in cols:
                             conn.execute(text('ALTER TABLE scan_item ADD in_library BOOLEAN'))
+                        if 'shyni_phase' not in cols:
+                            conn.execute(text('ALTER TABLE scan_item ADD shyni_phase VARCHAR'))
+                        if 'probe_received' not in cols:
+                            conn.execute(text('ALTER TABLE scan_item ADD probe_received INTEGER'))
+                        if 'probe_expected' not in cols:
+                            conn.execute(text('ALTER TABLE scan_item ADD probe_expected INTEGER'))
                     if 'shyni_status' not in cols:
                         P.logger.info('[Scan] migration: scan_item.shyni_status/shyni_job_id 컬럼 추가')
         except Exception as e:

@@ -24,9 +24,16 @@
           </select>
           <select id="option2" name="option2" class="form-control form-control-sm">
             <option value="all" selected>전체</option>
-            <option value="READY">READY</option>
-            <option value="FINISH_SHYNI">FINISH_SHYNI</option>
-            <option value="FINISH_SHYNI_FAILED">FINISH_SHYNI_FAILED</option>
+            <option value="READY">준비</option>
+            <option value="ASSEMBLING">조각 대기 중</option>
+            <option value="QUEUED">스캔 대기 중</option>
+            <option value="SCANNING">진행중</option>
+            <option value="FINISH_SHYNI">완료</option>
+            <option value="ALREADY_IN_DB">이미 반영됨</option>
+            <option value="FINISH_SHYNI_FAILED">실패</option>
+            <option value="NOT_FIND_LIBRARY">라이브러리 없음</option>
+            <option value="NOT_FIND_IN_LIBRARY">항목 없음</option>
+            <option value="FAILED">job 실패</option>
           </select>
         </div>
       </span>
@@ -116,8 +123,22 @@ function make_list(data) {
     tmp += '<br>상태 : ';
     // 샤이니 결과는 별도 줄 없이 상태에 함께 반영한다
     if (data[i].status == 'READY') {
-      if (data[i].shyni_status == 'RUNNING' || data[i].shyni_status == 'REQUESTED')
-        tmp += text_color("진행중", 'green');
+      if (data[i].shyni_status == 'RUNNING' || data[i].shyni_status == 'REQUESTED') {
+        if (data[i].shyni_phase == 'probe_assembling') {
+          if (data[i].probe_expected && (data[i].probe_received || 0) >= data[i].probe_expected) {
+            // 조각은 다 모였고 shyni 스캐너 차례를 기다리는 중
+            tmp += text_color("스캔 대기 중", 'purple');
+          } else {
+            var assembling_txt = "조각 대기 중";
+            if (data[i].probe_expected) assembling_txt += " (" + (data[i].probe_received || 0) + "/" + data[i].probe_expected + ")";
+            tmp += text_color(assembling_txt, 'purple');
+          }
+        } else if (data[i].shyni_phase == 'queued') {
+          tmp += text_color("스캔 대기 중", 'purple');
+        } else {
+          tmp += text_color("진행중", 'green');
+        }
+      }
       else if (data[i].shyni_status == 'FINISH')
         tmp += text_color("완료", 'blue');
       else if (data[i].shyni_status == 'FAILED' || data[i].shyni_status == 'ERROR')
@@ -131,7 +152,10 @@ function make_list(data) {
       else
         tmp += "준비";
     }
-    else if (data[i].status == 'FINISH_SHYNI') tmp += text_color("완료", 'blue');
+    else if (data[i].status == 'FINISH_SHYNI') {
+      tmp += text_color("완료", 'blue');
+      if (data[i].in_library) tmp += " (이미 반영됨)";
+    }
     else if (data[i].status == 'FINISH_SHYNI_FAILED') tmp += text_color("실패", 'red');
     else tmp += data[i].status;
     if (data[i].in_library) tmp += '<br>라이브러리에 이미 반영된 항목';

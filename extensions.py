@@ -552,3 +552,44 @@ class BrowserPage(ExtPageBase):
             return self.returns('warning', '폴더 목록을 생성할 수 없습니다.')
 
 
+
+
+def save_with_retry(item, attempts=6):
+    """ModelBase.save()와 같은 의미로 저장하되, SQLite 'database is locked'면
+    롤백 후 간격을 두고 재시도한다.
+
+    프레임워크 기본 save()는 예외를 로그만 남기고 삼켜서, 등록이 몰리는 순간
+    잠금에 걸린 항목이 조용히 사라진 일이 있었다 (2026-11-10 FP 등록 5건 유실).
+    성공하면 item, 끝내 실패하면 기존처럼 오류 로그를 남기고 None을 돌려준다."""
+    # 실패한 commit 뒤에는 인스턴스 속성이 만료돼 있어 item.id를 그냥 읽으면
+    # DetachedInstanceError가 난다 — dict에서 직접 읽어 그 함정을 피한다.
+    item_id = item.__dict__.get('id')
+    delays = (1, 2, 3, 5, 8)
+    last_exc = None
+    last_tb = None
+    for attempt in range(attempts):
+        try:
+            with F.app.app_context():
+                try:
+                    F.db.session.add(item)
+                    F.db.session.commit()
+                    return item
+                except Exception:
+                    try:
+                        F.db.session.rollback()
+                    except Exception:
+                        pass
+                    raise
+        except Exception as e:
+            last_exc = e
+            last_tb = traceback.format_exc()
+            if 'database is locked' not in str(e) or attempt >= attempts - 1:
+                break
+            delay = delays[min(attempt, len(delays) - 1)]
+            P.logger.info(f'[DB] 잠금으로 저장 재시도 ({attempt + 1}/{attempts - 1}): '
+                        f'{type(item).__name__} id={item_id} — {delay}초 후')
+            time.sleep(delay)
+    P.logger.error(f'Exception:{last_exc}')
+    if last_tb:
+        P.logger.error(last_tb)
+    return None

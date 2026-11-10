@@ -42,6 +42,9 @@ class ModelScanItem(ModelBase):
     # 샤이니 대상 실행 상태(F-4: 대상별 독립) — RUNNING/FINISH/FAILED/ERROR/SKIP/NOT_FIND_LIBRARY
     shyni_status = db.Column(db.String)
     shyni_job_id = db.Column(db.String)
+    shyni_phase = db.Column(db.String)  # shyni job 단계 (probe_assembling = 조각 대기 중) — 진행중 세부 표시용
+    probe_received = db.Column(db.Integer)  # 조립 중 받은 파일 수 (job stats manifest_files)
+    probe_expected = db.Column(db.Integer)  # 조립 전체 파일 수 (job stats expected_files)
     vfs_done = db.Column(db.Boolean)  # VFS 새로고침 완료 여부 (체크완료 표시용)
     vfs_done_time = db.Column(db.DateTime)  # VFS 새로고침 완료 시각
     reset_done = db.Column(db.Boolean)  # 선택 항목 리셋으로 초기화된 항목인지 표시
@@ -60,6 +63,11 @@ class ModelScanItem(ModelBase):
     #         세부 진행은 shyni_status(None/RUNNING/FINISH 등)가 따로 표시한다)
     # FINISH_SHYNI : shyni 스캔까지 마치고 완료
     # FINISH_SHYNI_FAILED : 처리 실패 (경로·섹션을 찾지 못했거나 shyni 작업이 실패)
+
+    def save(self):
+        # SQLite 잠금이면 재시도한다 (등록 폭주 시 항목이 조용히 사라지던 문제)
+        from .extensions import save_with_retry
+        return save_with_retry(self)
 
     def __init__(self, target, mode="ADD", target_section_id='0', callback_id=None, callback_url=None):
         self.mode = mode
@@ -166,7 +174,52 @@ class ModelScanItem(ModelBase):
                 query = query.filter(cls.callback == option1)
 
             if option2 != 'all':
-                query = query.filter(cls.status == option2)
+                if option2 == 'SCANNING':
+                    # 진행중 — 대기(조각/스캔 차례)가 아니라 실제로 스캔이 도는 중
+                    query = query.filter(cls.status == 'READY',
+                                         cls.shyni_status.in_(('RUNNING', 'REQUESTED')),
+                                         or_(cls.shyni_phase.is_(None),
+                                             not_(cls.shyni_phase.in_(('probe_assembling', 'queued')))))
+                elif option2 == 'ASSEMBLING':
+                    # 조각 대기 중 — 전송은 됐고 shyni가 나머지 조각을 기다리는 중
+                    query = query.filter(cls.status == 'READY',
+                                         cls.shyni_status.in_(('RUNNING', 'REQUESTED')),
+                                         cls.shyni_phase == 'probe_assembling',
+                                         or_(cls.probe_expected.is_(None),
+                                             cls.probe_expected == 0,
+                                             cls.probe_received.is_(None),
+                                             cls.probe_received < cls.probe_expected))
+                elif option2 == 'QUEUED':
+                    # 스캔 대기 중 — 조각은 다 모였고(또는 일반 job이) 스캐너 차례를 기다리는 중
+                    query = query.filter(cls.status == 'READY',
+                                         cls.shyni_status.in_(('RUNNING', 'REQUESTED')),
+                                         or_(cls.shyni_phase == 'queued',
+                                             and_(cls.shyni_phase == 'probe_assembling',
+                                                  cls.probe_expected.isnot(None),
+                                                  cls.probe_expected > 0,
+                                                  cls.probe_received.isnot(None),
+                                                  cls.probe_received >= cls.probe_expected)))
+                elif option2 == 'ALREADY_IN_DB':
+                    # 완료됐지만 신규 등록이 없어 이미 반영돼 있던 항목 (plex의 FINISH_ADD_ALREADY_IN_DB)
+                    query = query.filter(cls.status == 'FINISH_SHYNI',
+                                         cls.in_library.is_(True))
+                elif option2 == 'NOT_FIND_LIBRARY':
+                    query = query.filter(cls.status == 'FINISH_SHYNI_FAILED',
+                                         cls.shyni_status == 'NOT_FIND_LIBRARY')
+                elif option2 == 'NOT_FIND_IN_LIBRARY':
+                    query = query.filter(cls.status == 'FINISH_SHYNI_FAILED',
+                                         cls.shyni_status == 'NOT_FIND_IN_LIBRARY')
+                elif option2 == 'FAILED':
+                    # 라이브러리/항목 없음 외의 job 실패·오류
+                    query = query.filter(cls.status == 'FINISH_SHYNI_FAILED',
+                                         cls.shyni_status.in_(('FAILED', 'ERROR')))
+                elif option2 == 'READY':
+                    # 진행중은 READY가 아니다 — 아직 전송되지 않은 항목만
+                    query = query.filter(cls.status == 'READY',
+                                         or_(cls.shyni_status.is_(None),
+                                             not_(cls.shyni_status.in_(('RUNNING', 'REQUESTED')))))
+                else:
+                    query = query.filter(cls.status == option2)
 
             if option3 != 'all':
                 query = query.filter(cls.mode == option3)
