@@ -334,7 +334,7 @@ function render(data, logFiles, periodicCurrent) {
     str += '<div style="display:flex; gap:4px; align-self:center; flex-shrink:0; max-width:100%">';
     str += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:4px">';
     str += '<button type="button" class="btn btn-outline-primary status-act" data-key="' + s.key + '" data-act="vfs_refresh"' + (running ? ' disabled' : '') + '>새로고침</button>';
-    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? s.db_stats.albums : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
+    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? s.db_stats.albums : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '" data-folder="' + (s.db_stats && s.db_stats.is_folder ? '1' : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="scan"' + (running ? ' disabled' : '') + '>스캔</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="vfs_scan" style="white-space:nowrap"' + (running ? ' disabled' : '') + '>새로고침 후 스캔</button>';
     str += '</div>';
@@ -353,7 +353,7 @@ function dbStatsHtml(st) {
   var subCount = (st.sub_count != null) ? st.sub_count : st.tracks;
   return '<span>' + mainLabel + ' <strong>' + fmtNum(mainCount) + '</strong></span>'
     + '<span>' + subLabel + ' <strong>' + fmtNum(subCount) + '</strong></span>'
-    + '<span>메타 없음 <strong>' + fmtNum(st.no_meta != null ? st.no_meta : st.no_code) + '</strong></span>';
+    + '<span>' + (st.is_folder ? '표지 없음' : '메타 없음') + ' <strong>' + fmtNum(st.no_meta != null ? st.no_meta : st.no_code) + '</strong></span>';
 }
 
 var progressActive = true;
@@ -453,8 +453,9 @@ function openMetaChoice(btn) {
   metaChoiceKey = btn.data('key');
   var total = btn.attr('data-albums');
   var nocode = btn.attr('data-nocode');
+  var nocodeName = btn.attr('data-folder') ? '표지 없는 앨범만' : '메타 없는 앨범만';
   $('#meta_all_label').text(total ? '전체 앨범 ' + Number(total).toLocaleString() + '개' : '전체 앨범');
-  $('#meta_nocode_label').text(nocode ? '메타 없는 앨범만 ' + Number(nocode).toLocaleString() + '개' : '메타 없는 앨범만');
+  $('#meta_nocode_label').text(nocode ? nocodeName + ' ' + Number(nocode).toLocaleString() + '개' : nocodeName);
   $('#meta_nocode_btn').prop('disabled', nocode === '0');
   $('#meta_choice_modal').show();
 }
