@@ -759,9 +759,13 @@ class ModuleStatus(PluginModuleBase):
             card['key'] = sec['key']
             card['title'] = sec.get('title')
             missing_any = st.get('missing_any', st['no_code'])
+            judge_missing = st.get('judge_missing', missing_any)
             card['missing_any'] = missing_any
-            card['ok'] = st['main_count'] - missing_any
-            card['check_pct'] = round(missing_any * 100.0 / st['main_count'], 1) if st['main_count'] else 0
+            card['judge_missing'] = judge_missing
+            card['is_folder'] = bool(st.get('is_folder'))
+            card['ok'] = st['main_count'] - judge_missing
+            card['ok_pct'] = round(card['ok'] * 100.0 / st['main_count'], 1) if st['main_count'] else 100.0
+            card['check_pct'] = round(judge_missing * 100.0 / st['main_count'], 1) if st['main_count'] else 0
             card['code_pct'] = round(st['no_code'] * 100.0 / st['main_count'], 1) if st['main_count'] else 0
             card['avg_sub'] = round(st['sub_count'] * 1.0 / st['main_count'], 1) if st['main_count'] else 0
             card['avg_tracks'] = card['avg_sub']

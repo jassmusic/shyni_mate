@@ -129,8 +129,13 @@ def library_stats():
     conn = connect()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, type FROM libraries")
-        lib_types = {int(r[0]): (r[1] or 'music') for r in cur.fetchall()}
+        cur.execute("SELECT id, type, scanner_variant, ff_module_name FROM libraries")
+        lib_rows = cur.fetchall()
+        lib_types = {int(r[0]): (r[1] or 'music') for r in lib_rows}
+        # 적용 에이전트는 shyni 자체 규칙과 같다: ff_module_name이 있으면 그 값,
+        # 없으면 scanner_variant (library_views.py의 COALESCE와 동일).
+        lib_variants = {int(r[0]): ((r[3] or '').strip() or (r[2] or ''))
+                        for r in lib_rows}
         cur.execute("""
             SELECT library_id, metadata_type, count(*),
                    count(*) FILTER (WHERE metadata_code IS NULL AND yaml_code IS NULL),
@@ -169,6 +174,7 @@ def library_stats():
                     'sub_label': '', 'sub_count': 0, 'group_label': '', 'group_count': 0,
                     'no_code': 0, 'no_summary': 0, 'no_year': 0, 'no_thumb': 0,
                     'missing_any': 0, 'ok_pct': 100.0,
+                    'is_folder': False, 'judge_missing': 0,
                     'albums': 0, 'tracks': 0, 'artists': 0}
                 continue
             main_row = rows.get(info['main'], {})
@@ -180,6 +186,12 @@ def library_stats():
             group = rows.get(info['group'], {}).get('count', 0) if info['group'] else 0
             no_code = main_row.get('no_code', 0)
             missing_any = main_row.get('missing_any', 0)
+            no_thumb = main_row.get('no_thumb', 0)
+            # 폴더 에이전트(적용 에이전트 이름에 folder가 들어간) 라이브러리는
+            # 코드가 없는 것이 특성이라 건강도를 표지 여부로만 판단한다
+            # (judge_missing가 판정 기준).
+            is_folder = 'folder' in (lib_variants.get(lib_id) or '').lower()
+            judge_missing = no_thumb if is_folder else missing_any
             stats[lib_id] = {
                 'lib_type': lib_type,
                 'main_label': info['main_label'], 'main_count': main,
@@ -188,9 +200,11 @@ def library_stats():
                 'no_code': no_code,
                 'no_summary': main_row.get('no_summary', 0),
                 'no_year': main_row.get('no_year', 0),
-                'no_thumb': main_row.get('no_thumb', 0),
+                'no_thumb': no_thumb,
                 'missing_any': missing_any,
-                'ok_pct': round((main - missing_any) * 100.0 / main, 1) if main else 100.0,
+                'is_folder': is_folder,
+                'judge_missing': judge_missing,
+                'ok_pct': round((main - judge_missing) * 100.0 / main, 1) if main else 100.0,
                 'albums': main if lib_type == 'music' else 0,
                 'tracks': sub if lib_type == 'music' else 0,
                 'artists': group if lib_type == 'music' else 0}
@@ -210,7 +224,9 @@ def dashboard_stats(libs=None):
     main = sum(v['main_count'] for v in libs.values())
     no_code = sum(v['no_code'] for v in libs.values())
     missing_any = sum(v.get('missing_any', v['no_code']) for v in libs.values())
-    ok = main - missing_any
+    judge_missing = sum(v.get('judge_missing', v.get('missing_any', v['no_code']))
+                        for v in libs.values())
+    ok = main - judge_missing
     all_music = bool(libs) and all(v['lib_type'] == 'music' for v in libs.values())
     return {'works': main,
             'subs': sum(v['sub_count'] for v in libs.values()),
@@ -219,8 +235,9 @@ def dashboard_stats(libs=None):
             'tracks': sum(v['tracks'] for v in libs.values()),
             'artists': sum(v['artists'] for v in libs.values()),
             'ok': ok, 'no_code': no_code, 'missing_any': missing_any,
+            'judge_missing': judge_missing,
             'ok_pct': round(ok * 100.0 / main, 1) if main else 100.0,
-            'check_pct': round(missing_any * 100.0 / main, 1) if main else 0,
+            'check_pct': round(judge_missing * 100.0 / main, 1) if main else 0,
             'no_summary': sum(v['no_summary'] for v in libs.values()),
             'no_year': sum(v['no_year'] for v in libs.values()),
             'no_thumb': sum(v['no_thumb'] for v in libs.values()),
