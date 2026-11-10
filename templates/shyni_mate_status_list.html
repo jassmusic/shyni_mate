@@ -294,7 +294,7 @@ function render(data, logFiles, periodicCurrent) {
     if (ls) lastScan = ls.time_text + (ls.result == 'failed' ? ' (실패)' : '');
     else if (st.scan) lastScan = fmt(st.scan.finished_at || st.scan.started_at);
 
-    str += '<div style="border:' + (hl ? '2px solid #2b6cb0' : '1px solid #ddd') + '; border-radius:6px; padding:10px 14px; margin-bottom:10px; background:' + (hl ? '#ebf4ff' : '#fff') + '; display:flex; flex-wrap:wrap; gap:10px 14px">';
+    str += '<div style="border:' + (running ? '2px solid #2b6cb0' : '1px solid #ddd') + '; border-radius:6px; padding:10px 14px; margin-bottom:10px; background:' + (running ? '#ebf4ff' : '#fff') + '; display:flex; flex-wrap:wrap; gap:10px 14px">';
     // 왼쪽 컬럼: 이름·상태 / 경로 / 수치 — 오른쪽 컬럼: 버튼 (좁으면 아래로 감싼다)
     str += '<div style="flex:1 1 500px; min-width:0">';
     // 1줄: 이름 + 상태
