@@ -126,7 +126,7 @@ function renderPickList() {
     if (q && String(lib.title).toLowerCase().indexOf(q) < 0) continue;
     shown++;
     var checked = pickSel[String(lib.key)] ? ' checked' : '';
-    str += '<label style="display:block; font-weight:normal; padding:3px 2px; margin:0"><input type="checkbox" class="pick-sec" value="' + lib.key + '"' + checked + '> ' + esc(lib.title) + '</label>';
+    str += '<label style="display:block; font-weight:normal; padding:3px 2px; margin:0"><input type="checkbox" class="pick-sec" name="tmp_pick_sec" value="' + lib.key + '"' + checked + '> ' + esc(lib.title) + '</label>';
   }
   if (!shown) str = '<div style="color:#888; padding:4px 2px">검색 결과가 없습니다.</div>';
   $('#libPickList').html(str);
@@ -161,7 +161,7 @@ function renderJobs() {
       str += '<option value="' + ACTIONS[a][0] + '"' + (j.action == ACTIONS[a][0] ? ' selected' : '') + '>' + ACTIONS[a][1] + '</option>';
     }
     str += '</select>';
-    str += '<label style="font-weight:normal"><input type="checkbox" class="j-use"' + (j.use ? ' checked' : '') + '> 사용</label>';
+    str += '<label style="font-weight:normal"><input type="checkbox" class="j-use" name="tmp_j_use"' + (j.use ? ' checked' : '') + '> 사용</label>';
     str += '<span style="margin-left:auto">';
     str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '">지금 실행</button> ';
     str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '">삭제</button>';

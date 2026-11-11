@@ -630,7 +630,7 @@ class ModuleStatus(PluginModuleBase):
             value = (req.form.get('value') or '').strip()
             allowed = {
                 'list': ('status_lib_sort', ('default', 'name', 'nometa', 'media', 'trash')),
-                'health': ('status_health_sort', ('default', 'name', 'check', 'okpct', 'media', 'trash')),
+                'health': ('status_health_sort', ('default', 'name', 'check', 'okpct', 'media', 'trash', 'code', 'summary', 'year', 'thumb')),
             }
             if which not in allowed or value not in allowed[which][1]:
                 return jsonify({'ret': 'fail', 'msg': '요청 값이 올바르지 않습니다.'})

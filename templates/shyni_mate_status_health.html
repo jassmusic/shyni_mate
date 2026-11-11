@@ -269,7 +269,7 @@ function donutCard(title, segs, track, centerMain, centerSub, legendHtml, iconNa
 }
 
 var healthLibSort = "{{ arg['status_health_sort'] or 'default' }}";
-if (['default', 'name', 'check', 'okpct', 'media', 'trash'].indexOf(healthLibSort) < 0) healthLibSort = 'default';
+if (['default', 'name', 'check', 'okpct', 'media', 'trash', 'code', 'summary', 'year', 'thumb'].indexOf(healthLibSort) < 0) healthLibSort = 'default';
 var lastHealthLibs = null;
 function libJudgeCount(c) { return c.judge_missing != null ? c.judge_missing : (c.missing_any != null ? c.missing_any : (c.no_code || 0)); }
 function libMainCount(c) { return c.main_count != null ? c.main_count : (c.albums || 0); }
@@ -282,6 +282,10 @@ function sortedHealthLibs() {
   else if (healthLibSort == 'okpct') libs.sort(function(a, b) { return (a.ok_pct || 0) - (b.ok_pct || 0); });
   else if (healthLibSort == 'media') libs.sort(function(a, b) { return libMainCount(b) - libMainCount(a); });
   else if (healthLibSort == 'trash') libs.sort(function(a, b) { return (b.trash || 0) - (a.trash || 0); });
+  else if (healthLibSort == 'code') libs.sort(function(a, b) { return (b.no_code || 0) - (a.no_code || 0); });
+  else if (healthLibSort == 'summary') libs.sort(function(a, b) { return (b.no_summary || 0) - (a.no_summary || 0); });
+  else if (healthLibSort == 'year') libs.sort(function(a, b) { return (b.no_year || 0) - (a.no_year || 0); });
+  else if (healthLibSort == 'thumb') libs.sort(function(a, b) { return (b.no_thumb || 0) - (a.no_thumb || 0); });
   return libs;
 }
 function libCardsHtml() {
@@ -437,6 +441,10 @@ function renderHealth(h) {
       + libSortOption('okpct', '정상률')
       + libSortOption('media', '미디어')
       + libSortOption('trash', '휴지통')
+      + libSortOption('code', '코드')
+      + libSortOption('summary', '소개')
+      + libSortOption('year', '연도')
+      + libSortOption('thumb', '표지')
       + '</select></label></div>';
     str += '<div class="sm-health-libs" id="health_libs_div">' + libCardsHtml() + '</div>';
   }

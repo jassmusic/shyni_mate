@@ -496,7 +496,7 @@ function render(data, logFiles, periodicCurrent) {
     str += '</div>';
     str += '</div>';
     // 오른쪽 컬럼: 왼쪽 2열(새로고침·메타 새로고침 / 스캔·새로고침 후 스캔), 오른쪽 취소(세로로 길게)
-    str += '<div style="display:grid; grid-template-columns:auto 46px 46px; gap:6px; align-items:stretch; align-self:center; flex-shrink:0; max-width:100%">';
+    str += '<div style="display:grid; grid-template-columns:minmax(0,1fr) 46px 46px; gap:6px; align-items:stretch; align-self:center; flex:1 1 340px; min-width:0; max-width:100%">';
     str += '<div style="display:grid; grid-template-columns:1fr 1.2fr; gap:6px">';
     str += '<button type="button" class="btn btn-outline-primary status-act" data-key="' + s.key + '" data-act="vfs_refresh"' + (running ? ' disabled' : '') + '>새로고침</button>';
     str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? (s.db_stats.main_count != null ? s.db_stats.main_count : s.db_stats.albums) : '') + '" data-mainlabel="' + (s.db_stats ? (s.db_stats.main_label || '') : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '" data-folder="' + (s.db_stats && s.db_stats.is_folder ? '1' : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
