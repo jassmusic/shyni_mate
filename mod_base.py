@@ -27,6 +27,14 @@ class ModuleBase(PluginModuleBase):
             f'{self.name}_db_user' : 'shyni_ro',
             f'{self.name}_db_password' : '',
             f'{self.name}_db_ok_hash' : '',
+            # 고급 설정 — 시간 제한 (초). 응답이 늦으면 그 주기는 건너뛰고 다음 주기에 다시 시도한다
+            f'{self.name}_timeout_query' : '15',
+            f'{self.name}_timeout_send' : '30',
+            f'{self.name}_timeout_poll' : '15',
+            f'{self.name}_timeout_callback' : '10',
+            f'{self.name}_timeout_vfs_rc' : '600',
+            # 현황·건강도 — 휴지통 개수 자동 갱신 주기 (시간). 0이면 통계 때마다 읽는다
+            f'{self.name}_trash_counts_refresh_hours' : '12',
         }
 
 
@@ -134,6 +142,7 @@ class ModuleBase(PluginModuleBase):
         logger.info(f"[Base] DB 연결 테스트 성공: {params['host']}:{params['port']} "
                     f"db={params['dbname']} user={params['user']} 미디어 총 {albums}개")
         return {'ret': 'success', 'title': 'PostgreSQL Relay 연결 테스트',
-                'modal': (f"연결에 성공했습니다. 전체 미디어 {albums:,}개가 조회됩니다.<br>"
-                          '현황에서 라이브러리별 미디어 수·항목 수·메타 없음 수를 확인할 수 있습니다.<br>'
+                'modal': (f"연결에 성공했습니다. 전체 미디어 {albums:,}개가 조회됩니다. "
+                          '에피소드·트랙까지 읽어오지 않고, 미디어 하나하나만 읽어 온 수입니다.<br>'
+                          '대시보드에서 라이브러리별 미디어 수·항목 수·메타 없음 수를 확인할 수 있습니다.<br>'
                           '설정을 저장해 두시면, 설정을 바꾸기 전까지 이 연결 정보를 활용합니다.')}

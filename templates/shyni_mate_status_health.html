@@ -5,6 +5,14 @@
   <div class="row show-grid">
     <span class="col-md-12">
       <strong>건강도</strong>
+    </span>
+  </div>
+  <div id="health_progress_wrap" style="display:none; margin:2px 0 10px 0">
+    <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden"><div id="health_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .4s ease"></div></div>
+    <div id="health_progress_text" style="font-size:12px; color:#888; margin-top:3px">불러오는 중… 0%</div>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12">
       <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
         <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
         <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
@@ -23,16 +31,19 @@
     </span>
   </div>
 </div>
-<div id="health_progress_wrap" style="display:none; margin:2px 0 10px 0">
-  <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden"><div id="health_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .4s ease"></div></div>
-  <div id="health_progress_text" style="font-size:12px; color:#888; margin-top:3px">불러오는 중… 0%</div>
-</div>
 <style>
-.sm-health-libs { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }
-@media (max-width: 1150px) { .sm-health-libs { grid-template-columns:repeat(2, 1fr); } }
-@media (max-width: 720px) { .sm-health-libs { grid-template-columns:1fr; } }
+.sm-health-libs { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
+@media (max-width: 1400px) { .sm-health-libs { grid-template-columns:repeat(3, 1fr); } }
+@media (max-width: 1050px) { .sm-health-libs { grid-template-columns:repeat(2, 1fr); } }
+@media (max-width: 620px) { .sm-health-libs { grid-template-columns:1fr; } }
+.sm-donut-row { display:grid; gap:10px; }
+.sm-donut-row.cols-2 { grid-template-columns:repeat(2, 1fr); }
+.sm-donut-row.cols-3 { grid-template-columns:repeat(3, 1fr); }
+.sm-donut-row.cols-4 { grid-template-columns:repeat(4, 1fr); }
+@media (max-width: 1050px) { .sm-donut-row.cols-3, .sm-donut-row.cols-4 { grid-template-columns:repeat(2, 1fr); } }
+@media (max-width: 600px) { .sm-donut-row.cols-2, .sm-donut-row.cols-3, .sm-donut-row.cols-4 { grid-template-columns:1fr; } }
 </style>
-<div id="health_head_div" style="margin-bottom:6px; display:none"><strong>라이브러리 건강도</strong> <span style="font-size:12px; color:#888">데이터베이스 기준</span></div>
+<div id="health_head_div" style="margin-bottom:6px; display:none"><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></g></svg>라이브러리 건강도</strong> <span style="font-size:12px; color:#888">데이터베이스 기준</span></div>
 <div id="health_div" style="margin-bottom:16px; display:none"></div>
 <div id="health_msg_div" style="padding:24px 4px; color:#888">건강도 정보를 불러오는 중입니다. 잠시만 기다려 주세요.</div>
 
@@ -64,9 +75,33 @@ function applyRefreshUI(min) {
 }
 
 
-function healthCard(label, valueHtml, sub) {
+// 아이콘은 프레임워크 폰트(FA 4.7)에 없는 모양이 있어 SVG를 직접 심는다 — stroke는 currentColor 대신 고정 회청색
+function smIcon(name, color, size) {
+  var P = {
+    layers: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+    check: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+    alert: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>',
+    list: '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
+    users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    pie: '<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/>',
+    tag: '<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>',
+    tasks: '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8M13 12h8M13 18h8"/>',
+    film: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/>',
+    tv: '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/>',
+    music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+    book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/>',
+    listSq: '<path d="M11 6h10M11 12h10M11 18h10"/><rect x="3" y="4" width="4" height="4"/><rect x="3" y="10" width="4" height="4"/><rect x="3" y="16" width="4" height="4"/>'
+  };
+  var sz = size || 15;
+  var inner = (name == 'check' || name == 'alert') ? (P[name] || '') : '<g transform="translate(0 1.92) scale(1 0.84)">' + (P[name] || '') + '</g>';
+  return '<svg width="' + sz + '" height="' + sz + '" viewBox="0 0 24 24" fill="none" stroke="' + (color || '#4a5568') + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-right:6px">' + inner + '</svg>';
+}
+var KIND_ICONS = {'movie': 'film', 'tv': 'tv', 'show': 'tv', 'music': 'music', 'book': 'book', 'photo': 'image'};
+
+function healthCard(label, valueHtml, sub, iconName, iconColor) {
   return '<div style="flex:1 1 150px; border:1px solid #ddd; border-radius:6px; padding:10px 14px; background:#fff">'
-    + '<div style="font-size:12px; color:#888">' + label + '</div>'
+    + '<div style="font-size:12px; color:#888">' + (iconName ? smIcon(iconName, iconColor, 13) : '') + label + '</div>'
     + '<div style="font-size:22px; font-weight:bold; margin:2px 0">' + valueHtml + '</div>'
     + (sub ? '<div style="font-size:12px; color:#888">' + sub + '</div>' : '')
     + '</div>';
@@ -98,48 +133,82 @@ function libComment(c) {
 
 var KIND_LABELS = {'music': '음악', 'movie': '영화', 'tv': '쇼', 'show': '쇼', 'book': '도서', 'photo': '사진'};
 
+function statCell(label, valueHtml, extraHtml, valueStyle, plain) {
+  // 상세 카드의 라벨+수치 한 쌍 — 셀 안에서 라벨은 왼쪽, 수치는 오른쪽에 붙는 방식을 모든 쌍이 똑같이 쓴다
+  // 값이 0인 수치는 굵게 하지 않고 보통 굵기로 표시한다 (색상은 그대로, 0이 아닌 수치만 도드라지게)
+  // plain이면 값이 0이 아니어도 굵게 하지 않는다 — 색으로 이미 표현한 수치(누락 구성 등)에 쓴다
+  var isZero = String(valueHtml).replace(/,/g, '') === '0';
+  var valStyle = 'margin-left:auto; white-space:nowrap' + (valueStyle ? '; ' + valueStyle : '');
+  var valHtml = (isZero || plain)
+    ? '<span style="' + valStyle + '">' + valueHtml + '</span>'
+    : '<strong style="' + valStyle + '">' + valueHtml + '</strong>';
+  return '<div style="display:flex; align-items:baseline; gap:5px; min-width:0">'
+    + '<span style="white-space:nowrap">' + label + '</span>'
+    + (extraHtml || '')
+    + valHtml + '</div>';
+}
+function statGrid(cells, rows) {
+  // 라벨+수치 쌍들을 2열 고정 그리드에 채워 옆·위아래 열이 가지런히 맞게 한다
+  // rows를 주면 그 행 수만큼 구역 높이를 고정한다 — 종류마다 셀 수가 달라 행 수가 적은 카드에서
+  // 아래 구역이 위로 당겨져 옆 카드와 가로 줄이 어긋나는 것을 막기 위함 (한 행 = line-height 1.55em, 행 간격 2px)
+  var minH = rows ? ' min-height:calc(' + (1.55 * rows) + 'em + ' + (2 * (rows - 1)) + 'px);' : '';
+  return '<div style="display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:2px 18px; font-size:12.5px; line-height:1.55;' + minH + '">' + cells.join('') + '</div>';
+}
+
 function libCard(c) {
   var ml = c.main_label || '앨범';
   var sl = c.sub_label || '트랙';
   var mainCount = (c.main_count != null) ? c.main_count : c.albums;
   var subCount = (c.sub_count != null) ? c.sub_count : c.tracks;
-  var avgSub = (c.avg_sub != null) ? c.avg_sub : c.avg_tracks;
   var isEmpty = !(mainCount > 0);
-  var card = '<div style="display:flex; justify-content:space-between; align-items:baseline">';
-  card += '<span>' + (KIND_LABELS[c.lib_type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + KIND_LABELS[c.lib_type] + '</span>' : '') + '<strong style="font-size:15px">' + c.title + '</strong></span>';
+  // 헤더는 한 줄 높이를 고정한다 — 제목이 길어 두 줄이 되면 그 아래 구역 전체가 밀려 카드마다 라인이 어긋나므로 제목은 한 줄로 유지한다
+  var card = '<div style="display:flex; justify-content:space-between; align-items:baseline; min-height:22px">';
+  card += '<span>' + (KIND_ICONS[c.lib_type] ? smIcon(KIND_ICONS[c.lib_type], null, 16) : '') + (KIND_LABELS[c.lib_type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + KIND_LABELS[c.lib_type] + '</span>' : '') + '<strong style="font-size:15px; white-space:nowrap">' + c.title + '</strong></span>';
   if (isEmpty) card += '<span style="font-size:12px; color:#888"><strong style="color:#dd6b20; font-size:13px">비어있음</strong></span></div>';
   else card += '<span style="font-size:12px; color:#888">정상 <strong style="color:#38a169">' + pctText(c.ok || 0, c.ok_pct) + '</strong></span></div>';
-  if (isEmpty) card += '<div style="height:8px; border-radius:4px; background:#edf2f7; margin:6px 0 8px 0"></div>';
-  else card += '<div style="display:flex; height:8px; border-radius:4px; overflow:hidden; background:#dd6b20; margin:6px 0 8px 0"><div style="width:' + c.ok_pct + '%; background:#38a169"></div></div>';
-  var mainRow = ml + ' <strong style="float:right">' + fmtNum(mainCount) + '</strong>';
-  var subRow = sl + ' <strong style="float:right">' + fmtNum(subCount) + '</strong> <span style="color:#aaa; font-size:12px">(' + ml + '당 평균 ' + avgSub + ')</span>';
-  var groupRow = '';
+  if (isEmpty) card += '<div style="height:8px; border-radius:4px; background:#edf2f7; margin:4px 0 6px 0"></div>';
+  else card += '<div style="display:flex; height:8px; border-radius:4px; overflow:hidden; background:#dd6b20; margin:4px 0 6px 0"><div style="width:' + c.ok_pct + '%; background:#38a169"></div></div>';
+  var mainCell = statCell(ml, fmtNum(mainCount));
+  var subCell = statCell(sl, fmtNum(subCount));
+  var groupCell = '';
   if (c.group_label) {
     var groupCount = (c.group_count != null) ? c.group_count : c.artists;
-    groupRow = c.group_label + ' <strong style="float:right">' + fmtNum(groupCount) + '</strong>';
+    groupCell = statCell(c.group_label, fmtNum(groupCount));
   }
-  var rows = [];
-  if (c.lib_type == 'music' && groupRow) rows = [groupRow, mainRow, subRow];
-  else { rows = [mainRow, subRow]; if (groupRow) rows.push(groupRow); }
-  if (c.file_count != null) rows.push('파일 <strong style="float:right">' + fmtNum(c.file_count) + '</strong> <span style="color:#aaa; font-size:12px">(' + sl + '당 평균 ' + (c.avg_file != null ? c.avg_file : 0) + ')</span>');
-  card += '<div style="font-size:13px; line-height:1.9">' + rows.join('<br>') + '</div>';
-  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:13px; line-height:1.9">';
-  card += '정상 ' + ml + ' <strong style="float:right; color:#2f855a">' + fmtNum(c.ok) + '</strong><br>';
-  card += '점검 필요 <strong style="float:right; color:#c05621">' + fmtNum(c.judge_missing != null ? c.judge_missing : (c.missing_any != null ? c.missing_any : c.no_code)) + '</strong></div>';
-  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:13px; line-height:1.9">';
-  card += '코드 없음 <strong style="float:right">' + fmtNum(c.no_code) + '</strong><br>';
-  card += '소개 없음 <strong style="float:right">' + fmtNum(c.no_summary) + '</strong><br>';
-  card += '연도 없음 <strong style="float:right">' + fmtNum(c.no_year) + '</strong><br>';
-  card += '표지 없음 <strong style="float:right">' + fmtNum(c.no_thumb) + '</strong></div>';
-  card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:13px; line-height:1.9">';
-  card += '휴지통 <strong style="float:right">' + (c.trash != null ? fmtNum(c.trash) : '-') + '</strong></div>';
-  if (isEmpty) card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#dd6b20; font-weight:bold">라이브러리가 비어있습니다.</div>';
-  else card += '<div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:12.5px; color:#666">' + libComment(c) + '</div>';
-  return '<div style="border:1px solid #ddd; border-radius:6px; padding:10px 14px; background:#fff">' + card + '</div>';
+  var cells = [];
+  if (c.lib_type == 'music' && groupCell) cells = [groupCell, mainCell, subCell];
+  else { cells = [mainCell, subCell]; if (groupCell) cells.push(groupCell); }
+  if (c.file_count != null) cells.push(statCell('파일', fmtNum(c.file_count)));
+  // 구성 구역은 종류마다 셀 수가 달라(영화는 2개, 쇼·음악은 4개) 행 수가 1~2행으로 갈린다 — 가장 많은 2행으로 높이를 고정해
+  // 행이 적은 종류는 구역 안에서 위에 붙고 아래가 비게 하고, 그 아래 구역들의 시작 라인을 모든 카드에서 같게 맞춘다
+  card += statGrid(cells, 2);
+  card += '<div style="border-top:1px solid #eee; margin-top:4px; padding-top:4px">'
+    + statGrid([statCell('정상 ' + ml, fmtNum(c.ok), null, 'color:#2f855a'),
+                statCell('점검 필요', fmtNum(c.judge_missing != null ? c.judge_missing : (c.missing_any != null ? c.missing_any : c.no_code)), null, 'color:#c05621')], 1)
+    + '</div>';
+  // 점검 필요를 이루는 누락 숫자는 점검 필요와 같은 색으로 칠해 출처가 바로 보이게 한다.
+  // 폴더 에이전트 카드는 표지 여부로만 판단하므로 표지 없음만 칠한다.
+  // 색으로 이미 표현하므로 굵게는 하지 않는다 (plain).
+  var missStyle = function(v, judged) { return (judged && v > 0) ? 'color:#c05621' : null; };
+  var folderLib = !!c.is_folder;
+  card += '<div style="border-top:1px solid #eee; margin-top:4px; padding-top:4px">'
+    + statGrid([statCell('코드 없음', fmtNum(c.no_code), null, missStyle(c.no_code, !folderLib), true),
+                statCell('소개 없음', fmtNum(c.no_summary), null, missStyle(c.no_summary, !folderLib), true),
+                statCell('연도 없음', fmtNum(c.no_year), null, missStyle(c.no_year, !folderLib), true),
+                statCell('표지 없음', fmtNum(c.no_thumb), null, missStyle(c.no_thumb, true), true)], 2)
+    + '</div>';
+  card += '<div style="border-top:1px solid #eee; margin-top:4px; padding-top:4px">'
+    + statGrid([statCell('휴지통', c.trash != null ? fmtNum(c.trash) : '-', null, 'color:#dc3545')], 1)
+    + '</div>';
+  // 코멘트는 margin-top:auto로 카드 하단에 고정하고, 블록 높이를 3줄 분량으로 통일해 첫 줄 시작 위치를 카드마다 맞춘다
+  if (isEmpty) card += '<div style="border-top:1px solid #eee; margin-top:auto; padding-top:4px; font-size:12.5px; line-height:1.5; min-height:4.5em; color:#dd6b20; font-weight:bold">라이브러리가 비어있습니다.</div>';
+  else card += '<div style="border-top:1px solid #eee; margin-top:auto; padding-top:4px; font-size:12.5px; line-height:1.5; min-height:4.5em; color:#666">' + libComment(c) + '</div>';
+  // 카드 내부는 세로 flex — 정보 행은 위에 붙고 코멘트만 하단으로 내려가 한 행의 카드 높이가 같아진다
+  return '<div style="border:1px solid #ddd; border-radius:6px; padding:8px 10px; background:#fff; display:flex; flex-direction:column; height:100%">' + card + '</div>';
 }
 
-function donutSvg(segs, track) {
-  var svg = '<svg width="132" height="132" viewBox="0 0 140 140">';
+function donutSvg(segs, track, size) {
+  var svg = '<svg width="' + size + '" height="' + size + '" viewBox="0 0 140 140">';
   svg += '<circle cx="70" cy="70" r="58" fill="none" stroke="' + (track || '#f1f1f1') + '" stroke-width="16"></circle>';
   var start = 0;
   for (var i = 0; i < segs.length; i++) {
@@ -154,18 +223,134 @@ function donutSvg(segs, track) {
   return svg + '</svg>';
 }
 
-function donutCard(title, segs, track, centerMain, centerSub, legendHtml) {
-  var s = '<div style="flex:1 1 300px; border:1px solid #ddd; border-radius:6px; padding:12px 14px; background:#fff">';
-  s += '<div style="font-size:13px; font-weight:bold; margin-bottom:8px">' + title + '</div>';
-  s += '<div style="display:flex; gap:14px; align-items:center">';
-  s += '<div style="position:relative; width:132px; height:132px; flex:0 0 auto">' + donutSvg(segs, track)
-    + '<div style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center">'
-    + '<div style="font-size:19px; font-weight:bold">' + centerMain + '</div>'
-    + '<div style="font-size:11px; color:#888">' + centerSub + '</div></div></div>';
-  s += '<div style="flex:1; font-size:13px; line-height:2">' + legendHtml + '</div>';
+var DONUT_SIZE = 140;
+function legendItem(color, label, valueHtml) {
+  // 범례 항목 하나 — 한 항목이 정확히 한 줄이다. 색 점·항목명은 왼쪽, 수치는 오른쪽 끝에 고정한다.
+  // 예전 2열 흐름에서는 수치 길이에 따라 어떤 항목은 한 줄, 어떤 항목은 두 줄이 돼 열·행이 어긋났다 (2026-11-11).
+  return '<span style="display:flex; align-items:baseline; gap:5px; min-width:0">'
+    + '<span style="white-space:nowrap; word-break:keep-all"><span style="color:' + color + '">●</span> ' + label + '</span>'
+    + '<span style="margin-left:auto; text-align:right; white-space:nowrap">' + valueHtml + '</span></span>';
+}
+function stackBar(segs) {
+  // 가로 누적 막대 하나 — 상태별 구간을 너비 %로 이어 붙여 100%로 표시한다.
+  // 구간이 0%인 상태는 너비 0이라 자연히 사라지고, 전체가 0개면 빈 막대 껍데기만 남는다.
+  var s = '<div style="display:flex; width:100%; height:20px; background:#f1f1f1; border-radius:5px; overflow:hidden">';
+  for (var i = 0; i < segs.length; i++) {
+    if (segs[i].pct > 0) s += '<div style="width:' + segs[i].pct + '%; background:' + segs[i].color + '; height:100%"></div>';
+  }
+  return s + '</div>';
+}
+function barCard(title, segs, rightHtml, legendHtml, iconName) {
+  var s = '<div style="border:1px solid #ddd; border-radius:6px; padding:10px 12px; background:#fff; display:flex; flex-direction:column">';
+  s += '<div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px">'
+    + '<span style="font-size:13px; font-weight:bold">' + (iconName ? smIcon(iconName, null, 14) : '') + title + '</span>'
+    + '<span style="font-size:12.5px; color:#555">' + rightHtml + '</span></div>';
+  // 제목 아래 막대+범례 묶음은 남은 세로 공간의 가운데에 둔다 — 행 높이가 늘어나도 내용이 위로 쏠리지 않는다
+  s += '<div style="flex:1; display:flex; flex-direction:column; justify-content:center">';
+  s += stackBar(segs);
+  s += '<div style="display:flex; flex-direction:column; gap:3px; font-size:12.5px; line-height:1.6; margin-top:8px">' + legendHtml + '</div>';
   s += '</div></div>';
   return s;
 }
+
+function donutCard(title, segs, track, centerMain, centerSub, legendHtml, iconName) {
+  var s = '<div style="border:1px solid #ddd; border-radius:6px; padding:10px 12px; background:#fff; display:flex; flex-direction:column">';
+  s += '<div style="font-size:13px; font-weight:bold; margin-bottom:6px">' + (iconName ? smIcon(iconName, null, 14) : '') + title + '</div>';
+  // 제목 아래 도넛+범례 묶음은 남은 세로 공간의 가운데에 둔다 — 행 높이가 늘어나도 내용이 위로 쏠리지 않는다
+  s += '<div style="flex:1; display:flex; flex-direction:column; justify-content:center">';
+  s += '<div style="position:relative; width:' + DONUT_SIZE + 'px; height:' + DONUT_SIZE + 'px; margin:0 auto">' + donutSvg(segs, track, DONUT_SIZE)
+    + '<div style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center">'
+    + '<div style="font-size:19px; font-weight:bold">' + centerMain + '</div>'
+    + '<div style="font-size:11px; color:#888">' + centerSub + '</div></div></div>';
+  // 범례는 한 항목 한 줄로 쌓는다 — 라벨 왼쪽·수치 오른쪽 고정이라 열과 행이 항상 맞는다
+  s += '<div style="display:flex; flex-direction:column; gap:3px; font-size:12.5px; line-height:1.6; margin-top:8px">' + legendHtml + '</div>';
+  s += '</div></div>';
+  return s;
+}
+
+var healthLibSort = "{{ arg['status_health_sort'] or 'default' }}";
+if (['default', 'name', 'check', 'okpct', 'media', 'trash'].indexOf(healthLibSort) < 0) healthLibSort = 'default';
+var lastHealthLibs = null;
+function libJudgeCount(c) { return c.judge_missing != null ? c.judge_missing : (c.missing_any != null ? c.missing_any : (c.no_code || 0)); }
+function libMainCount(c) { return c.main_count != null ? c.main_count : (c.albums || 0); }
+function libSortOption(v, label) { return '<option value="' + v + '"' + (healthLibSort == v ? ' selected' : '') + '>' + label + '</option>'; }
+function sortedHealthLibs() {
+  // 라이브러리별 상세 정렬 — 서버에 다시 묻지 않고 받은 데이터 안에서만 즉시 재정렬한다
+  var libs = (lastHealthLibs || []).slice();
+  if (healthLibSort == 'name') libs.sort(function(a, b) { return String(a.title || '').localeCompare(String(b.title || ''), 'ko'); });
+  else if (healthLibSort == 'check') libs.sort(function(a, b) { return libJudgeCount(b) - libJudgeCount(a); });
+  else if (healthLibSort == 'okpct') libs.sort(function(a, b) { return (a.ok_pct || 0) - (b.ok_pct || 0); });
+  else if (healthLibSort == 'media') libs.sort(function(a, b) { return libMainCount(b) - libMainCount(a); });
+  else if (healthLibSort == 'trash') libs.sort(function(a, b) { return (b.trash || 0) - (a.trash || 0); });
+  return libs;
+}
+function libCardsHtml() {
+  var libs = sortedHealthLibs().filter(function (c) { return !healthHiddenLibs[String(c.key)]; });
+  if ((lastHealthLibs || []).length && !libs.length) return '<div style="color:#888; font-size:13px; padding:14px 4px">표시할 라이브러리가 없습니다. 위쪽 표시에서 라이브러리를 선택해 주세요.</div>';
+  return libs.map(function(c) { return libCard(c); }).join('');
+}
+function setHealthLibSort(v) {
+  healthLibSort = v;
+  $.ajax({type: 'POST', url: API_BASE + 'set_lib_sort', data: {which: 'health', value: v}, global: false});
+  if (lastHealthLibs) $('#health_libs_div').html(libCardsHtml());
+}
+
+// 라이브러리 표시 선택 — 건강도 화면만의 숨김 목록을 서버 설정에 기억한다
+var healthHiddenLibs = {};
+String("{{ arg['status_health_hidden_libs'] or '' }}").split(',').forEach(function (x) { x = x.trim(); if (x) healthHiddenLibs[x] = true; });
+var healthShowSig = '';
+function hEscT(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+function saveHealthHiddenLibs() {
+  var keys = Object.keys(healthHiddenLibs).filter(function (k) { return healthHiddenLibs[k]; }).join(',');
+  $.ajax({type: 'POST', url: API_BASE + 'set_hidden_libs', data: {keys: keys, which: 'health'}, global: false});
+}
+function paintHealthShowBtn() {
+  var libs = lastHealthLibs || [], hidden = 0;
+  libs.forEach(function (c) { if (healthHiddenLibs[String(c.key)]) hidden++; });
+  $('#hlib_show_btn').text(hidden == 0 ? '전체 ▾' : '일부 (' + (libs.length - hidden) + '/' + libs.length + ') ▾');
+  $('#hlib_show_all').prop('checked', hidden == 0);
+}
+function buildHealthShowPanel() {
+  var libs = lastHealthLibs || [];
+  var sig = libs.map(function (c) { return c.key; }).join(',');
+  if (sig != healthShowSig) {
+    healthShowSig = sig;
+    var str = '';
+    libs.forEach(function (c) {
+      str += '<label class="hlib-show-row" data-title="' + hEscT(c.title) + '" style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:normal; padding:3px 2px; margin:0; cursor:pointer"><input type="checkbox" class="hlib-show-chk" data-key="' + c.key + '"' + (healthHiddenLibs[String(c.key)] ? '' : ' checked') + '> ' + hEscT(c.title) + '</label>';
+    });
+    $('#hlib_show_rows').html(str);
+  }
+  paintHealthShowBtn();
+}
+$("body").on('click', '#hlib_show_btn', function (e) {
+  e.stopPropagation();
+  $('#hlib_show_panel').toggle();
+});
+$(document).on('click', function (e) {
+  if (!$(e.target).closest('#hlib_show_panel, #hlib_show_btn').length) $('#hlib_show_panel').hide();
+});
+$("body").on('change', '.hlib-show-chk', function () {
+  var k = String($(this).data('key'));
+  if (this.checked) delete healthHiddenLibs[k]; else healthHiddenLibs[k] = true;
+  saveHealthHiddenLibs();
+  paintHealthShowBtn();
+  if (lastHealthLibs) $('#health_libs_div').html(libCardsHtml());
+});
+$("body").on('change', '#hlib_show_all', function () {
+  var show = this.checked;
+  (lastHealthLibs || []).forEach(function (c) {
+    if (show) delete healthHiddenLibs[String(c.key)]; else healthHiddenLibs[String(c.key)] = true;
+  });
+  $('.hlib-show-chk').prop('checked', show);
+  saveHealthHiddenLibs();
+  paintHealthShowBtn();
+  if (lastHealthLibs) $('#health_libs_div').html(libCardsHtml());
+});
+$("body").on('input', '#hlib_show_search', function () {
+  var q = $(this).val().toLowerCase();
+  $('.hlib-show-row').each(function () { $(this).toggle(!q || $(this).data('title').toLowerCase().indexOf(q) >= 0); });
+});
 
 function renderHealth(h) {
   if (!h || !h.totals) { $('#health_head_div, #health_div').hide(); return; }
@@ -173,22 +358,23 @@ function renderHealth(h) {
   var ml = t.main_label || '앨범';
   var sl = t.sub_label || '트랙';
   var str = '<div style="display:flex; flex-wrap:wrap; gap:10px">';
-  str += healthCard('전체 ' + ml, fmtNum(t.works != null ? t.works : t.albums));
-  str += healthCard('정상 ' + ml, fmtNum(t.ok), pctText(t.ok, t.ok_pct));
-  str += healthCard('점검 필요', fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), pctText((t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), t.check_pct) + ' · 누락 항목 기준');
-  str += healthCard('전체 ' + sl, fmtNum(t.subs != null ? t.subs : t.tracks));
-  if (t.all_music || t.all_music == null) str += healthCard('아티스트', fmtNum(t.artists));
+  str += healthCard('전체 ' + ml, fmtNum(t.works != null ? t.works : t.albums), ml + ' 하나하나를 읽어 온 수', 'layers');
+  str += healthCard('정상 ' + ml, fmtNum(t.ok), pctText(t.ok, t.ok_pct) + ' · 전체 중 정상 비율', 'check', '#38a169');
+  str += healthCard('점검 필요', fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), pctText((t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), t.check_pct) + ' · 전체 중 하나라도 빠진 비율', 'alert', '#dd6b20');
+  str += healthCard('전체 ' + sl, fmtNum(t.subs != null ? t.subs : t.tracks), sl == '항목' ? '에피소드·트랙까지 전부 읽어 온 수' : sl + ' 하나하나까지 전부 읽어 온 수', 'list');
+  if (t.all_music || t.all_music == null) str += healthCard('아티스트', fmtNum(t.artists), null, 'users');
   str += '</div>';
-  // 도넛 차트 3개: 건강도 · 누락 구성 · 스캔 상태
+  // 차트 카드: (구성) · 건강도 · 누락 구성은 도넛, 스캔 상태는 가로 누적 막대 (높이를 줄이기 위함)
   var sc = h.scan || {};
-  var sDone = sc.done || 0, sFail = sc.failed || 0, sRun = sc.running || 0;
-  var sQueue = sc.queued || 0, sAsm = sc.assembling || 0, sReady = sc.ready || 0, sHeld = sc.held || 0;
-  var sTot = sc.total || (sDone + sFail + sRun + sQueue + sAsm + sReady + sHeld);
+  var sDone = sc.done || 0, sFail = sc.failed || 0, sRun = sc.running || 0, sAnz = sc.analyzing || 0;
+  var sAsm = sc.assembling || 0, sReady = sc.ready || 0, sHeld = sc.held || 0;
+  var sQue = sc.queued || 0;
+  var sTot = sc.total || (sDone + sFail + sRun + sAnz + sAsm + sQue + sReady + sHeld);
   var missTot = t.no_code + t.no_summary + t.no_year + t.no_thumb;
   function pctOf(v, tot) { return tot ? Math.round(v * 1000 / tot) / 10 : 0; }
   var judgeNote = '코드·소개·연도·표지 중 하나라도 누락된 항목이 점검 필요입니다.';
   if (h.libs && h.libs.some(function(c){ return c.is_folder; })) judgeNote += ' 폴더 에이전트 라이브러리는 표지 여부로만 판단합니다.';
-  str += '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px">';
+  var donutCards = [];
   var LIB_TYPE_DONUT = [['movie', '영화', '#3182ce'], ['tv', '쇼', '#805ad5'], ['show', '쇼', '#805ad5'], ['music', '음악', '#38a169'], ['book', '도서', '#d69e2e'], ['photo', '사진', '#718096']];
   var lt = t.lib_types || {};
   var ltKinds = LIB_TYPE_DONUT.filter(function(d){ return lt[d[0]]; });
@@ -197,52 +383,62 @@ function renderHealth(h) {
     for (var li = 0; li < ltKinds.length; li++) {
       var lp = pctOf(lt[ltKinds[li][0]], t.lib_count);
       ltSegs.push({pct: lp, color: ltKinds[li][2]});
-      ltLegend += '<span style="color:' + ltKinds[li][2] + '">●</span> ' + ltKinds[li][1] + ' <strong>' + fmtNum(lt[ltKinds[li][0]]) + '</strong> (' + pctText(lt[ltKinds[li][0]], lp) + ')' + (li < ltKinds.length - 1 ? '<br>' : '');
+      ltLegend += legendItem(ltKinds[li][2], ltKinds[li][1], '<strong>' + fmtNum(lt[ltKinds[li][0]]) + '</strong> (' + pctText(lt[ltKinds[li][0]], lp) + ')');
     }
-    str += donutCard('라이브러리 구성', ltSegs, null, fmtNum(t.lib_count), '라이브러리', ltLegend);
+    donutCards.push(donutCard('라이브러리 구성', ltSegs, null, fmtNum(t.lib_count), '라이브러리', ltLegend, 'pie'));
   }
-  str += donutCard('라이브러리 건강도',
-    [{pct: t.ok_pct, color: '#38a169'}], '#fde3cf',
+  donutCards.push(donutCard('라이브러리 건강도',
+    [{pct: t.ok_pct, color: '#38a169'}], '#dd6b20',
     t.ok_pct + '%', '건강도',
-    '<span style="color:#38a169">●</span> 정상 ' + ml + ' <strong>' + fmtNum(t.ok) + '</strong> (' + pctText(t.ok, t.ok_pct) + ')<br>'
-    + '<span style="color:#dd6b20">●</span> 점검 필요 <strong>' + fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)) + '</strong> (' + pctText((t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), t.check_pct) + ')<br>'
-    + '<span style="color:#888; font-size:12px">' + judgeNote + '</span>');
-  str += donutCard('메타데이터 누락',
+    legendItem('#38a169', '정상 ' + ml, '<strong>' + fmtNum(t.ok) + '</strong> (' + pctText(t.ok, t.ok_pct) + ')')
+    + legendItem('#dd6b20', '점검 필요', '<strong>' + fmtNum(t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)) + '</strong> (' + pctText((t.judge_missing != null ? t.judge_missing : (t.missing_any != null ? t.missing_any : t.no_code)), t.check_pct) + ')')
+    + '<div style="color:#888; font-size:12px; line-height:1.6">' + judgeNote + '</div>', 'pie'));
+  donutCards.push(donutCard('메타데이터 누락',
     [{pct: pctOf(t.no_code, missTot), color: '#dd6b20'},
      {pct: pctOf(t.no_summary, missTot), color: '#3182ce'},
      {pct: pctOf(t.no_year, missTot), color: '#805ad5'},
      {pct: pctOf(t.no_thumb, missTot), color: '#d69e2e'}], null,
     fmtNum(missTot), '누락 합계',
-    '<span style="color:#dd6b20">●</span> 코드 없음 <strong>' + fmtNum(t.no_code) + '</strong> (' + pctText(t.no_code, pctOf(t.no_code, missTot)) + ')<br>'
-    + '<span style="color:#3182ce">●</span> 소개 없음 <strong>' + fmtNum(t.no_summary) + '</strong> (' + pctText(t.no_summary, pctOf(t.no_summary, missTot)) + ')<br>'
-    + '<span style="color:#805ad5">●</span> 연도 없음 <strong>' + fmtNum(t.no_year) + '</strong> (' + pctText(t.no_year, pctOf(t.no_year, missTot)) + ')<br>'
-    + '<span style="color:#d69e2e">●</span> 표지 없음 <strong>' + fmtNum(t.no_thumb) + '</strong> (' + pctText(t.no_thumb, pctOf(t.no_thumb, missTot)) + ')');
-  str += donutCard('스캔 상태',
+    legendItem('#dd6b20', '코드 없음', '<strong>' + fmtNum(t.no_code) + '</strong> (' + pctText(t.no_code, pctOf(t.no_code, missTot)) + ')')
+    + legendItem('#3182ce', '소개 없음', '<strong>' + fmtNum(t.no_summary) + '</strong> (' + pctText(t.no_summary, pctOf(t.no_summary, missTot)) + ')')
+    + legendItem('#805ad5', '연도 없음', '<strong>' + fmtNum(t.no_year) + '</strong> (' + pctText(t.no_year, pctOf(t.no_year, missTot)) + ')')
+    + legendItem('#d69e2e', '표지 없음', '<strong>' + fmtNum(t.no_thumb) + '</strong> (' + pctText(t.no_thumb, pctOf(t.no_thumb, missTot)) + ')'), 'tag'));
+  donutCards.push(barCard('스캔 상태',
     sTot ? [{pct: pctOf(sDone, sTot), color: '#38a169'},
             {pct: pctOf(sRun, sTot), color: '#3182ce'},
-            {pct: pctOf(sQueue, sTot), color: '#63b3ed'},
+            {pct: pctOf(sAnz, sTot), color: '#319795'},
             {pct: pctOf(sAsm, sTot), color: '#805ad5'},
+            {pct: pctOf(sQue, sTot), color: '#d69e2e'},
             {pct: pctOf(sReady, sTot), color: '#a0aec0'},
             {pct: pctOf(sFail, sTot), color: '#e53e3e'},
-            {pct: pctOf(sHeld, sTot), color: '#dd6b20'}] : [], null,
-    sTot ? pctText(sDone, pctOf(sDone, sTot)) : '-', '완료율',
-    '<span style="color:#38a169">●</span> 완료 <strong>' + fmtNum(sDone) + '</strong> (' + pctText(sDone, pctOf(sDone, sTot)) + ')<br>'
-    + '<span style="color:#3182ce">●</span> 진행중 <strong>' + fmtNum(sRun) + '</strong> (' + pctText(sRun, pctOf(sRun, sTot)) + ')<br>'
-    + '<span style="color:#63b3ed">●</span> 스캔 대기 중 <strong>' + fmtNum(sQueue) + '</strong> (' + pctText(sQueue, pctOf(sQueue, sTot)) + ')<br>'
-    + '<span style="color:#805ad5">●</span> ffprobe 대기 중 <strong>' + fmtNum(sAsm) + '</strong> (' + pctText(sAsm, pctOf(sAsm, sTot)) + ')<br>'
-    + '<span style="color:#a0aec0">●</span> 준비 <strong>' + fmtNum(sReady) + '</strong> (' + pctText(sReady, pctOf(sReady, sTot)) + ')<br>'
-    + '<span style="color:#e53e3e">●</span> 실패 <strong>' + fmtNum(sFail) + '</strong> (' + pctText(sFail, pctOf(sFail, sTot)) + ')<br>'
-    + '<span style="color:#dd6b20">●</span> 보류 <strong>' + fmtNum(sHeld) + '</strong> (' + pctText(sHeld, pctOf(sHeld, sTot)) + ')<br>'
-    + '<span style="color:#888; font-size:12px">전체 항목 ' + fmtNum(sTot) + '개 · 주기적 스캔: ' + (sc.periodic_running ? '진행 중' : '대기') + '</span>');
-  str += '</div>';
+            {pct: pctOf(sHeld, sTot), color: '#dd6b20'}] : [],
+    '완료율 <strong>' + (sTot ? pctText(sDone, pctOf(sDone, sTot)) : '-') + '</strong>',
+    legendItem('#38a169', '완료', '<strong>' + fmtNum(sDone) + '</strong> (' + pctText(sDone, pctOf(sDone, sTot)) + ')')
+    + legendItem('#3182ce', '진행중', '<strong>' + fmtNum(sRun) + '</strong> (' + pctText(sRun, pctOf(sRun, sTot)) + ')')
+    + legendItem('#319795', '분석중', '<strong>' + fmtNum(sAnz) + '</strong> (' + pctText(sAnz, pctOf(sAnz, sTot)) + ')')
+    + legendItem('#805ad5', 'ffprobe 대기 중', '<strong>' + fmtNum(sAsm) + '</strong> (' + pctText(sAsm, pctOf(sAsm, sTot)) + ')')
+    + legendItem('#d69e2e', '스캔 대기 중', '<strong>' + fmtNum(sQue) + '</strong> (' + pctText(sQue, pctOf(sQue, sTot)) + ')')
+    + legendItem('#a0aec0', '준비', '<strong>' + fmtNum(sReady) + '</strong> (' + pctText(sReady, pctOf(sReady, sTot)) + ')')
+    + legendItem('#e53e3e', '실패', '<strong>' + fmtNum(sFail) + '</strong> (' + pctText(sFail, pctOf(sFail, sTot)) + ')')
+    + legendItem('#dd6b20', '보류', '<strong>' + fmtNum(sHeld) + '</strong> (' + pctText(sHeld, pctOf(sHeld, sTot)) + ')')
+    + '<div style="color:#888; font-size:12px; line-height:1.6">전체 항목 ' + fmtNum(sTot) + '개 · 주기적 스캔: ' + (sc.periodic_running ? '진행 중' : '대기') + '</div>', 'tasks'));
+  str += '<div class="sm-donut-row cols-' + donutCards.length + '" style="margin-top:10px">' + donutCards.join('') + '</div>';
   // 라이브러리별 상세 카드
   if (h.libs && h.libs.length) {
-    str += '<div style="font-size:13px; font-weight:bold; margin:14px 0 6px 0">라이브러리별 상세</div>';
-    str += '<div class="sm-health-libs">';
-    for (var j = 0; j < h.libs.length; j++) {
-      str += libCard(h.libs[j]);
-    }
-    str += '</div>';
+    lastHealthLibs = h.libs;
+    str += '<div style="display:flex; justify-content:space-between; align-items:center; margin:14px 0 6px 0">'
+      + '<span style="font-size:13px; font-weight:bold">' + smIcon('listSq', null, 14) + '라이브러리별 상세</span>'
+      + '<span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888; margin-left:auto; margin-right:10px">표시 <button type="button" id="hlib_show_btn" class="btn btn-default" style="height:26px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="hlib_show_panel" style="display:none; position:absolute; right:0; top:30px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="hlib_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="hlib_show_all" checked> 전체</label><span id="hlib_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span>'
+      + '<label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 '
+      + '<select onchange="setHealthLibSort(this.value)" style="display:inline-block; width:auto; height:26px; padding:2px 6px; font-size:12px; vertical-align:middle">'
+      + libSortOption('default', '기본')
+      + libSortOption('name', '이름')
+      + libSortOption('check', '점검')
+      + libSortOption('okpct', '정상률')
+      + libSortOption('media', '미디어')
+      + libSortOption('trash', '휴지통')
+      + '</select></label></div>';
+    str += '<div class="sm-health-libs" id="health_libs_div">' + libCardsHtml() + '</div>';
   }
   str += '<div style="font-size:13px; color:#888; margin-top:14px; line-height:1.8">'
     + '<div style="font-weight:bold; color:#666; cursor:pointer" onclick="toggleHealthGuide()">건강도 안내 <span id="health_guide_arrow" style="font-weight:normal; font-size:12px; color:#999">' + (healthGuideOpen ? '▾ 접기' : '▸ 펼치기') + '</span></div>'
@@ -251,10 +447,11 @@ function renderHealth(h) {
     + '<div>- <strong style="color:#666">소개</strong> — 미디어 설명글이 채워져 있는지입니다.</div>'
     + '<div>- <strong style="color:#666">연도</strong> — 미디어의 연도(발매·개봉·출간)가 입력돼 있는지입니다.</div>'
     + '<div>- <strong style="color:#666">표지</strong> — 표지(포스터·커버) 이미지가 있는지입니다.</div>'
-    + '<div style="margin-top:6px">네 가지 중 하나라도 없으면 점검 필요로 셉니다. 코드가 있어도 소개·연도·표지 중 하나가 없으면 점검 필요에 포함됩니다. 단, 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라 표지 여부로만 건강도를 판단합니다.</div></div></div>';
+    + '<div style="margin-top:6px">네 가지 중 하나라도 없으면 점검 필요로 읽어옵니다. 코드가 있어도 소개·연도·표지 중 하나가 없으면 점검 필요에 포함됩니다. 단, 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라 표지 여부로만 건강도를 판단합니다.</div></div></div>';
   str += '<div style="font-size:13px; color:#888; margin-top:10px">미디어·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.</div>';
   $('#health_div').html(str);
   $('#health_head_div, #health_div').show();
+  buildHealthShowPanel();
 }
 
 var healthPollCount = 0;
@@ -273,10 +470,18 @@ function fmtHealthElapsed(ms) {
 var healthProgressValue = 0;
 var healthProgressTimer = null;
 var healthDoneOnce = false;
+// 단계 표시는 서버가 보고한 진행률(healthStepValue) 기준이다
+var healthStepValue = 0;
+function statusStepText(p) {
+  if (p < 15) return '휴지통 개수 읽는 중';
+  if (p < 80) return '라이브러리 정보 읽는 중';
+  if (p < 90) return '전체 통계 묶는 중';
+  return '결과 저장 중';
+}
 function paintHealthProgress() {
   $('#health_progress_wrap').show();
   $('#health_progress_bar').css('width', healthProgressValue + '%');
-  $('#health_progress_text').text('불러오는 중… ' + healthProgressValue + '%');
+  $('#health_progress_text').text(statusStepText(healthStepValue) + '… ' + healthProgressValue + '%');
 }
 function startHealthCreep(cap) {
   if (healthProgressTimer) clearInterval(healthProgressTimer);
@@ -292,7 +497,9 @@ function stopHealthCreep() {
 }
 function setHealthProgress(p) {
   if (p === null || p === undefined) return;
+  healthStepValue = p;
   if (p > healthProgressValue) { healthProgressValue = p; paintHealthProgress(); }
+  else paintHealthProgress();
 }
 function finishHealthProgress(ret) {
   stopHealthCreep();
@@ -300,7 +507,7 @@ function finishHealthProgress(ret) {
   $('#health_progress_wrap').show();
   $('#health_progress_bar').css('width', '100%');
   var el = healthLoadStartAt ? fmtHealthElapsed(Date.now() - healthLoadStartAt) : '';
-  var txt = '불러오기 완료 · 100%' + (el ? ' · 소요시간 ' + el : '');
+  var txt = '불러오기 완료' + (el ? ' · 소요시간 ' + el : '');
   if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + ' 기준';
   $('#health_progress_text').text(txt);
   healthDoneOnce = true;
@@ -308,15 +515,16 @@ function finishHealthProgress(ret) {
 
 function load_health(force) {
   if (!healthPollCount) healthLoadStartAt = Date.now();
-  if ((force || !healthDoneOnce) && !healthProgressTimer) { healthProgressValue = 0; paintHealthProgress(); startHealthCreep(40); }
+  if ((force || !healthDoneOnce) && !healthProgressTimer) { healthProgressValue = 0; healthStepValue = 0; paintHealthProgress(); startHealthCreep(40); }
   $.ajax({
+    global: false,
     type: 'POST',
     url: API_BASE + 'list',
     data: force ? {force: '1'} : {},
     timeout: 120000,
     success: function (ret) {
       if (ret.ret != 'success') { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('건강도 정보를 불러오지 못했습니다.'); return; }
-      if (ret.need_config) { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('현황을 보기 위해 설정에서 정보를 입력해 주세요.'); return; }
+      if (ret.need_config) { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('건강도를 보기 위해 설정에서 정보를 입력해 주세요.'); return; }
       if (ret.db_loading && !ret.health) {
         $('#health_msg_div').show().text('건강도 정보를 불러오는 중입니다. 잠시만 기다려 주세요.');
         setHealthProgress(ret.progress);
@@ -325,7 +533,7 @@ function load_health(force) {
         return;
       }
       healthPollCount = 0;
-      if (!ret.health) { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('고급 설정에서 PostgreSQL Relay 연결 테스트를 통과하면 데이터베이스 기준 건강도를 보여 드립니다.'); return; }
+      if (!ret.health) { stopHealthCreep(); $('#health_progress_wrap').hide(); $('#health_msg_div').show().text('Relay에서 연결 테스트를 통과하면 데이터베이스 기준 건강도를 보여 드립니다.'); return; }
       finishHealthProgress(ret);
       $('#health_msg_div').hide();
       renderHealth(ret.health);
@@ -350,6 +558,7 @@ $(document).ready(function() {
     var min = parseInt($('#refreshMinInput').val(), 10);
     if (use && !(min >= 1 && min <= 120)) { alert('주기는 1~120분으로 입력해 주세요.'); return; }
     $.ajax({
+      global: false,
       type: 'POST',
       url: API_BASE + 'set_refresh',
       data: {min: use ? min : 0},

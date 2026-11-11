@@ -1,3 +1,6 @@
+import json
+import time
+
 from sqlalchemy import or_
 
 from .extensions import vfs_refresh
@@ -12,6 +15,29 @@ logger = P.logger
 class Task:
     filecheck_thread = None
 
+    # 디스크 양보 임계값 — /proc/pressure/io의 full avg10(%)이 이 값 이상이면
+    # 신규 전송을 한 주기 미룬다. FF 웹이 10초 넘게 늦어졌던 사고 때 실측이
+    # 60%였고, 평소 스캔 부하에서는 그 아래에 머무는 값으로 잡았다.
+    IO_YIELD_THRESHOLD = 40.0
+
+    @staticmethod
+    def _io_pressure_full_avg10():
+        """디스크 대기 pressure의 full avg10(%) — 읽지 못하면 None.
+
+        컨테이너 안에서 읽어도 호스트 전체 값이다 (pressure는 네임스페이스로
+        나뉘지 않는다). full은 모든 스레드가 멈춰 있던 비율이라, 디스크가
+        포화해 다른 작업까지 줄 서는 정도를 그대로 보여 준다."""
+        try:
+            with open('/proc/pressure/io') as f:
+                for line in f:
+                    if line.startswith('full'):
+                        for part in line.split():
+                            if part.startswith('avg10='):
+                                return float(part.split('=', 1)[1])
+        except Exception:
+            pass
+        return None
+
     @F.celery.task
     def start():
         ModelScanItem.set_status_incompleted_to_ready()
@@ -22,17 +48,41 @@ class Task:
             P.logger.info("SHYNI SCAN 대기")
 
 
+    # 직전 호출에서 정체로 제외한 항목 id — 제외 로그를 상태가 바뀔 때만 남기기 위함
+    _stall_excluded_ids = None
+
     @staticmethod
     def running_shyni_count():
         # 동시 스캔 수 게이트가 세는 실행 중 개수.
         # ffprobe 대기 중(probe_assembling)인 job은 shyni가 남은 데이터를 기다리며
         # 실제로는 스캔하지 않는 상태라 세지 않는다 (예외 — 그래야 그 사이에
         # 다음 스캔이 진행된다).
+        # analyze 대기 시간(scan_analyze_wait_min)을 넘겨 실행 중인 항목도 세지 않는다 —
+        # analyze 단계에서 멈춘 job이 슬롯을 계속 차지하면 큐 전체가 막힌다.
+        # 항목 자체의 상태는 바꾸지 않고 게이트 계산에서만 빼며, shyni가 스캔을
+        # 끝내면 폴링이 확정해 정상적으로 완료 처리된다.
+        # 설정값이 0이면 이 제외를 하지 않는다 (기능 끔).
+        # REFRESH 등록 대기(refresh-scan:)는 실제 등록 스캔이 도는 구간을 포함하므로
+        # 종전대로 계속 센다.
+        wait_min = P.ModelSetting.get_int('scan_analyze_wait_min')
+        now = datetime.now()
         with F.app.app_context():
-            return F.db.session.query(ModelScanItem).filter(
+            base = F.db.session.query(ModelScanItem).filter(
                 ModelScanItem.shyni_status == 'RUNNING',
                 or_(ModelScanItem.shyni_phase.is_(None),
-                    ModelScanItem.shyni_phase != 'probe_assembling')).count()
+                    ModelScanItem.shyni_phase != 'probe_assembling'))
+            if wait_min <= 0:
+                return base.count()
+            # 제외 판정은 스캔 목록의 '분석중' 분류와 같은 조건을 공유한다
+            # (ModelScanItem.analyze_overdue_condition — 기준 시각·REFRESH 예외 포함).
+            excluded = [r[0] for r in base.filter(
+                ModelScanItem.analyze_overdue_condition(wait_min, now)
+            ).with_entities(ModelScanItem.id).all()]
+            if excluded != Task._stall_excluded_ids:
+                Task._stall_excluded_ids = excluded
+                if excluded:
+                    logger.info(f'[Scan] analyze 대기 시간({wait_min}분) 초과로 동시 스캔 수에서 제외: items={excluded}')
+            return base.count() - len(excluded)
 
 
     @staticmethod
@@ -64,17 +114,41 @@ class Task:
 
 
     @staticmethod
+    def save_summary_cache():
+        """스캔 진행현황 집계를 워커(Celery) 쪽에서 미리 계산해 설정에 캐시한다.
+
+        웹 화면의 진행현황 조회는 이 캐시만 읽는다 — 예전에는 새로고침할 때마다
+        웹 프로세스가 분류 쿼리 6개를 직접 돌렸고, 파일체크 쓰기와 겹치면
+        DB 연결 대기·잠금으로 FF 화면 전체가 멈추는 일이 있었다 (2026-11-11).
+        캐시 시각(ts)도 함께 남겨 화면이 캐시 기준 경과를 표시할 수 있게 한다."""
+        try:
+            summary = ModelScanItem.summary_counts()
+            summary['ts'] = time.time()
+            P.ModelSetting.set('scan_summary_cache', json.dumps(summary))
+        except Exception as e:
+            logger.error(f'[Scan] 진행현황 캐시 저장 실패: {e}')
+
+    @staticmethod
     def filecheck_thread_function():
         while True:
+            cycle_started = time.time()
             try:
+                Task.save_summary_cache()
                 items = ModelScanItem.get_list_by_status('READY')
                 max_scan_count = max(P.ModelSetting.get_int('scan_max_scan_count'), 1)
                 running = Task.running_shyni_count()
                 assembling = Task.assembling_shyni_count()
                 pending_groups = Task.running_probe_groups()
+                # 디스크 양보 판단은 주기당 한 번만 한다 — 켜져 있을 때만 읽는다
+                io_pressure = (Task._io_pressure_full_avg10()
+                               if P.ModelSetting.get_bool('scan_io_yield_use') else None)
+                io_yield = io_pressure is not None and io_pressure >= Task.IO_YIELD_THRESHOLD
+                if io_yield:
+                    logger.info(f'[Scan] 디스크 대기가 높아 신규 전송을 한 주기 미룹니다 '
+                                f'(io pressure full avg10={io_pressure:.0f}%)')
                 for item in items:
+                    dirty = False
                     try:
-                        item.filecheck_count += 1
                         group = None
                         continuation = False
                         if item.shyni_status:
@@ -101,6 +175,23 @@ class Task:
                             continuation = bool(group) and pending_groups.get(group['id'], 0) > 0
                             if not continuation:
                                 continue
+                        # 디스크 양보 — 대기가 높으면 신규 전송만 한 주기 미룬다.
+                        # 게이트 대기와 마찬가지로 파일체크 횟수는 올리지 않고,
+                        # 이미 전송된 항목의 확정과 probe 이어지는 데이터는 막지 않는다.
+                        if io_yield and not hold_send and not continuation:
+                            continue
+                        # 여기서부터 항목이 실제로 바뀌므로 이번 주기 끝에 저장한다.
+                        # 게이트·보류로 건너뛴 항목까지 매주기 전부 저장하면 쓰기
+                        # 잠금이 상시 걸려 웹 화면 조회가 함께 멈춘다 (2026-11-11).
+                        dirty = True
+                        # 여기까지 통과한 항목만 이번 주기에 실제로 파일을 확인한다.
+                        # 파일체크는 항목당 한 번만 한다 (사용자 확정 규칙): 보류·게이트
+                        # 대기로 건너뛴 주기는 세지 않고, 이미 한 번 체크한 항목은 어떤
+                        # 이유로 다시 진입해도 횟수를 올리지 않는다 — filecheck_count는
+                        # 1에서 멈춘다. 전송된 항목의 job 확정 확인(probe 조립 대기의
+                        # 데이터 수신 확인 포함)은 poll_running이 매 주기 그대로 수행한다.
+                        if not item.filecheck_count:
+                            item.filecheck_count = 1
                         if item.filecheck_time is None:
                             item.filecheck_time = datetime.now()
                         if item.mode == 'ADD' and P.ModelSetting.get_bool('scan_use_vfs_refresh') and not item.vfs_done:
@@ -146,9 +237,23 @@ class Task:
                         logger.error(f"Exception:{str(e)}")
                         logger.error(traceback.format_exc())
                     finally:
-                        item.save()
+                        if dirty:
+                            item.save()
+                # 전송까지 끝난 시점의 숫자를 먼저 캐시에 남긴다 — 폴링이 긴
+                # 주기에도 진행현황 캐시가 이 시점보다 오래되지 않게 하기 위함
+                Task.save_summary_cache()
                 # 샤이니 job 상태 확정 — 주기당 1회 폴링
                 ShyniBackend.poll_running()
+                Task.save_summary_cache()
+                # 분석시간 초과로 실패 표시한 항목의 뒤늦은 종료 확인 (주기당 소수만)
+                ShyniBackend.poll_late_completions()
+                # 완료됐는데 앨범 정보가 없는 기존 항목의 메타 정보 갱신 (주기당 소수만)
+                ShyniBackend.backfill_meta_notes()
+                Task.save_summary_cache()
+                cycle_sec = time.time() - cycle_started
+                if cycle_sec > 90:
+                    # 주기가 비정상적으로 길면 다음 정체 때 위치를 가늠할 수 있게 남긴다
+                    logger.warning(f'[Scan] 파일체크 주기 장기 실행: {cycle_sec:.0f}초')
             except Exception as e:
                 logger.error(f"Exception:{str(e)}")
                 logger.error(traceback.format_exc())

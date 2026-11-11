@@ -18,7 +18,10 @@ class ModulePeriodic(PluginModuleBase):
         self.db_default = {
             f'{self.name}_db_version': '1',
             f'{self.name}_jobs': '[]',
+            f'{self.name}_db_delete_day': '30',
+            f'{self.name}_db_auto_delete': 'True',
         }
+        self.web_list_model = ModelPeriodicItem
 
     def plugin_load(self):
         ModelPeriodicItem.set_terminated()
@@ -164,7 +167,11 @@ class ModulePeriodic(PluginModuleBase):
         if sub == 'current':
             return jsonify({'ret': 'success', 'data': get_current()})
         if sub == 'history':
-            return jsonify({'ret': 'success', 'data': ModelPeriodicItem.get_recent(10)})
+            try:
+                page = int(req.form.get('page') or 1)
+            except Exception:
+                page = 1
+            return jsonify({'ret': 'success', 'data': ModelPeriodicItem.get_page(page)})
         return jsonify({'ret': 'fail', 'msg': '알 수 없는 요청입니다.'})
 
     def process_api(self, sub, req):

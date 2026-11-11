@@ -1,81 +1,935 @@
 {% extends "base.html" %}
 {% block content %}
-{{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장'], ['trashSectionsSaveBtn', '대상 저장']])}}
-{{ macros.m_row_start('5') }}
-{{ macros.m_row_end() }}
 
 <div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12">
+      <strong>휴지통</strong>
+    </span>
+  </div>
   <div class="row show-grid">
     <span class="col-md-12" style="font-size:13px; color:#888">
-      스캔으로 생긴 missing 항목은 휴지통을 비워야 정리됩니다. 기준 경로가 하나라도 보이지 않으면 안전을 위해 실행하지 않습니다.
+      휴지통에 들어간 항목을 작품 단위로 묶어 보여 드립니다.
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:12px; color:#a0aec0">
+      상세 항목은 샤이니 데이터베이스에서 직접 조회합니다. 전체 파일 수가 많아 조회에 시간이 걸릴 수 있습니다. 한 번 불러온 결과는 저장해 두어, 다음에는 캐시 데이터로 바로 보여 드립니다.
     </span>
   </div>
 </div>
 
-<form id='setting'>
-  {{ macros.setting_checkbox('scan_trash_schedule_enable', '휴지통 비우기 주기 실행', value=arg['scan_trash_schedule_enable'], desc=['켜 두면 아래 cron 시각에 휴지통 비우기를 자동으로 실행합니다.']) }}
-  {{ macros.setting_input_text('scan_trash_cron', 'cron', value=arg['scan_trash_cron'], desc=['예: 0 5 * * * (매일 새벽 5시)']) }}
-  {{ macros.setting_input_textarea('scan_trash_schedule_anchors', '기준 경로', col='9', row='3', value=arg['scan_trash_schedule_anchors'], desc=['이 경로들이 모두 실제로 보여야 휴지통 비우기를 실행합니다. 마운트가 깨진 상태에서 비우는 사고를 막기 위한 안전장치입니다.', '한 줄에 하나씩 적어 주세요. 비워 두면 경로 확인 없이 실행됩니다.']) }}
-</form>
+<div id="trash_progress_wrap" style="display:none; margin-top:10px">
+  <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden">
+    <div id="trash_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .3s ease"></div>
+  </div>
+  <div id="trash_progress_text" style="font-size:12.5px; color:#666; margin-top:4px">조회를 준비하고 있습니다…</div>
+</div>
 
-{{ macros.m_hr() }}
-<div class="container-fluid">
-  <div class="row show-grid">
-    <span class="col-md-12">
-      <strong>대상 라이브러리</strong>
-      <span style="font-size:12px; color:#888">하나도 고르지 않으면 전체 라이브러리가 대상입니다.</span>
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" id="trash_sections_div" style="display:flex; flex-wrap:wrap; gap:4px 14px"></span>
-  </div>
-  <div class="row show-grid" style="margin-top:8px">
-    <span class="col-md-12">
-      <button type="button" class="btn btn-sm btn-danger" id="trashExecuteBtn">지금 휴지통 비우기</button>
-    </span>
+<div style="display:flex; gap:6px; margin:10px 0 0">
+  <div id="trash_lib_pick" class="form-control" style="flex:1; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#888">라이브러리를 선택해 주세요</div>
+  <input type="hidden" id="trash_lib" value="">
+  <button type="button" class="btn btn-primary" id="trash_query_btn" style="flex:0 0 auto">조회</button>
+  <button type="button" class="btn btn-default" id="trash_query_all_btn" title="전체 조회" style="flex:0 0 auto; padding:6px 10px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><path d="M9 6h12M9 12h12M9 18h12"/><path d="M3.5 6l1.2 1.2L7 5M3.5 12l1.2 1.2L7 10.8M3.5 18l1.2 1.2L7 16.8"/></svg></button>
+</div>
+
+<div id="trash_bulk_toast" style="display:none; position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#2d3748; color:#fff; font-size:13.5px; padding:10px 20px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.25); z-index:3000; white-space:nowrap"></div>
+
+<div id="trashLibModal" style="display:none; position:fixed; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.45); z-index:2000">
+  <div style="background:#fff; max-width:520px; margin:48px auto; border-radius:8px; padding:16px 18px; max-height:82vh; display:flex; flex-direction:column">
+    <div style="display:flex; justify-content:space-between; align-items:center">
+      <strong style="font-size:15px">라이브러리 선택</strong>
+    </div>
+    <input type="text" id="trashLibSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="margin:10px 0 8px">
+    <div id="trashLibList" style="overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:6px 10px; min-height:80px"></div>
+    <div style="margin-top:12px; text-align:right">
+      <button type="button" class="btn btn-sm btn-default" id="trashLibCancel">취소</button>
+    </div>
   </div>
 </div>
 
-{{ macros.m_hr() }}
-<div class="container-fluid">
-  <div class="row show-grid">
-    <span class="col-md-12"><strong>마지막 실행 결과</strong></span>
+<div id="trash_summary" style="font-size:13px; color:#555; margin-top:10px"></div>
+
+<div id="trash_tools" style="display:none">
+  <div style="display:flex; gap:6px; margin-top:8px">
+    <input type="text" id="trash_search" class="form-control" placeholder="제목·경로 검색" style="flex:1; min-width:0">
+    <select id="trash_order" class="form-control" style="flex:0 0 auto; width:auto">
+      <option value="old">삭제 오래된 순</option>
+      <option value="new">삭제 최근 순</option>
+      <option value="files">파일 많은 순</option>
+      <option value="name">이름순</option>
+    </select>
   </div>
-  <div class="row show-grid">
-    <span class="col-md-12">
-      <pre id="trash_result_pre" style="font-size:12px; white-space:pre-wrap">{{ arg['scan_trash_last_result'] or '아직 실행 기록이 없습니다.' }}</pre>
-    </span>
+  <div style="margin-top:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+    <button type="button" class="btn btn-outline-danger" id="trash_empty_all_btn" style="font-size:13px">이 라이브러리 전체 비우기</button>
+    <span style="font-size:12.5px; color:#888">개별 삭제는 shyni API에서 제공하지 않아, 비우기는 라이브러리 전체 단위로만 할 수 있습니다.</span>
+  </div>
+  <div id="trash_sel_bar" style="margin-top:10px; border-top:1px solid #edf2f7; padding-top:8px">
+    <label style="font-size:12.5px; color:#666; font-weight:normal; margin:0"><input type="checkbox" id="trash_check_all"> 현재 페이지 전체 선택</label>
+    <span id="trash_sel_count" style="font-size:12.5px; color:#555; margin-left:8px">선택 0개</span>
+    <div style="display:flex; gap:6px; margin-top:6px">
+      <button type="button" class="btn btn-outline-primary trash-sel-act" id="trash_act_refresh" data-mode="refresh" style="font-size:13px" disabled>새로고침</button>
+      <button type="button" class="btn btn-outline-primary trash-sel-act" id="trash_act_scan" data-mode="scan" style="font-size:13px" disabled>스캔</button>
+      <button type="button" class="btn btn-outline-primary trash-sel-act" id="trash_act_refresh_scan" data-mode="refresh_scan" style="font-size:13px" disabled>새로고침 후 스캔</button>
+    </div>
+    <div id="trash_sel_status" style="display:none; font-size:12.5px; color:#555; margin-top:6px"></div>
   </div>
 </div>
+
+<div id="trash_basis" style="display:none; font-size:12.5px; color:#888; margin-top:10px"></div>
+
+<div id="trash_list_div" style="margin-top:10px"></div>
+
+<div id="trash_pager" style="display:none; margin-top:12px; text-align:center">
+  <button type="button" class="btn btn-sm btn-outline-secondary" id="trash_prev_btn">‹ 이전</button>
+  <span id="trash_page_info" style="font-size:12.5px; color:#666; margin:0 10px"></span>
+  <button type="button" class="btn btn-sm btn-outline-secondary" id="trash_next_btn">다음 ›</button>
+</div>
+
+<div id="trash_bottom_spacer" style="height:30px"></div>
 
 <script type="text/javascript">
 var LIBS = {{ arg['library_list']|tojson }};
-var SELECTED = {{ arg['scan_trash_sections']|safe }};
+var PRESELECT = {{ arg['trash_preselect']|default('')|tojson }};
+var trashPage = 1;
+var trashData = null;
 
-function renderSections() {
-  var str = '';
-  for (var i = 0; i < LIBS.length; i++) {
-    var lib = LIBS[i];
-    var checked = (SELECTED || []).map(String).indexOf(String(lib.key)) >= 0;
-    str += '<label style="font-weight:normal"><input type="checkbox" class="trash-sec" value="' + lib.key + '"' + (checked ? ' checked' : '') + '> ' + lib.title + '</label>';
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+function fmtNum(n) {
+  if (n === null || n === undefined) return '-';
+  return Number(n).toLocaleString();
+}
+function reasonLabel(r) {
+  if (r == 'scan_missing') return '스캔에서 못 찾음';
+  return r;
+}
+function daysSince(dtStr) {
+  if (!dtStr) return null;
+  var t = new Date(String(dtStr).replace(' ', 'T'));
+  if (isNaN(t.getTime())) return null;
+  var d = Math.floor((Date.now() - t.getTime()) / 86400000);
+  return d >= 0 ? d : null;
+}
+
+var trashCounts = {{ arg['trash_counts_init']|tojson }};
+
+function libByKey(key) {
+  for (var i = 0; i < LIBS.length; i++) if (String(LIBS[i].key) === String(key)) return LIBS[i];
+  return null;
+}
+
+// 선택 칸 표시 갱신 — 값은 hidden input(#trash_lib)이 들고 있고, 칸에는
+// 선택된 라이브러리 이름과 휴지통 개수를 보여 준다. 처음에는 현황에서
+// 넘어온 라이브러리(PRESELECT)만 선택돼 있고, 그 외에는 아무것도
+// 선택되지 않은 상태로 '라이브러리를 선택해 주세요'를 보여 준다.
+function renderLibOptions(counts) {
+  if (counts) trashCounts = counts;
+  var el = $('#trash_lib_pick');
+  if (!LIBS.length) {
+    $('#trash_lib').val('');
+    el.text('라이브러리 목록을 가져오지 못했습니다').css('color', '#c0392b');
+    return;
   }
-  if (!LIBS.length) str = '<span style="color:#c0392b">라이브러리 목록을 가져오지 못했습니다. 기본 설정의 shyni 연결을 확인해 주세요.</span>';
-  $('#trash_sections_div').html(str);
+  var cur = $('#trash_lib').val();
+  if (cur && !libByKey(cur)) cur = '';
+  if (!cur && PRESELECT && libByKey(PRESELECT)) {
+    cur = String(PRESELECT);
+    $('#trash_lib').val(cur);
+  }
+  if (!cur) {
+    $('#trash_lib').val('');
+    el.text('라이브러리를 선택해 주세요').css('color', '#888');
+    return;
+  }
+  var lib = libByKey(cur);
+  var c = trashCounts ? trashCounts[lib.key] : null;
+  el.text(lib.title + (c != null ? ' (' + fmtNum(c) + '개)' : '')).css('color', '');
+}
+
+// 라이브러리별 캐시 저장 시각 {키: epoch} — 팝업의 '캐시 있음' 표시용.
+// 첫 값은 페이지가 뜰 때 서버가 함께 실어 보낸 것이라, 응답을 기다리지
+// 않고 처음부터 표시된다. 이후 trash_state 응답으로 갱신된다.
+var trashCacheTimes = {{ arg['trash_cache_times']|tojson }};
+
+function fmtAgo(ts) {
+  if (!ts) return '';
+  var sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (sec < 60) return sec + '초 전';
+  var min = Math.floor(sec / 60);
+  if (min < 60) return min + '분 전';
+  var hour = Math.floor(min / 60);
+  if (hour < 24) return hour + '시간 전';
+  return Math.floor(hour / 24) + '일 전';
+}
+
+function renderTrashLibList() {
+  var q = ($('#trashLibSearch').val() || '').trim().toLowerCase();
+  var cur = $('#trash_lib').val();
+  var str = '';
+  var shown = 0;
+  for (var k = 0; k < LIBS.length; k++) {
+    var lib = LIBS[k];
+    if (q && String(lib.title).toLowerCase().indexOf(q) < 0) continue;
+    shown++;
+    var c = trashCounts ? trashCounts[lib.key] : null;
+    var sel = String(lib.key) === String(cur);
+    var cat = trashCacheTimes[String(lib.key)] || 0;
+    str += '<div class="trash-lib-row" data-key="' + lib.key + '" style="padding:6px 4px; cursor:pointer; border-radius:4px' + (sel ? '; background:#ebf4ff' : '') + '">' + esc(lib.title)
+      + (c != null ? ' <span style="color:#888; font-size:12px">(' + fmtNum(c) + '개)</span>' : '')
+      + (cat ? ' <span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#ebf8ff; color:#2b6cb0; border:1px solid #bee3f8">캐시 있음 (' + fmtAgo(cat) + ')</span>' : '')
+      + '</div>';
+  }
+  if (!shown) str = '<div style="color:#888; padding:4px 2px">검색 결과가 없습니다.</div>';
+  $('#trashLibList').html(str);
+}
+
+function openTrashLibPicker() {
+  $('#trashLibSearch').val('');
+  renderTrashLibList();
+  $('#trashLibModal').show();
+  // 캐시 현황을 가져와 '캐시 있음' 표시를 갱신한다
+  quietCommand('trash_state', null, null, function (ret) {
+    if (ret && ret.ret == 'success' && ret.data) {
+      trashCacheTimes = ret.data.cache_times || {};
+      renderTrashLibList();
+    }
+  });
+}
+
+function closeTrashLibPicker() {
+  $('#trashLibModal').hide();
+}
+
+// 라이브러리를 고르면 기존 select 변경 때와 똑같이 화면을 비우고 닫는다.
+// 이미 선택된 라이브러리를 다시 골라도, 아직 아무것도 표시되지 않았으면
+// 선택을 반영한다 (그대로 두면 골라도 반응이 없어 버그로 보인다).
+function onTrashLibPicked(key) {
+  closeTrashLibPicker();
+  if (String($('#trash_lib').val()) === String(key) && (trashData || trashPollLib)) return;
+  $('#trash_lib').val(key);
+  renderLibOptions(null);
+  stopTrashPolling();
+  $('#trash_summary').text('');
+  $('#trash_tools').hide();
+  $('#trash_pager').hide();
+  $('#trash_list_div').html('');
+  trashData = null;
+  trashSel = {};
+  $('#trash_sel_status').hide();
+  clearBasis();
+  // 저장된 캐시가 있으면 기다리지 않고 캐시로 먼저 보여 주고,
+  // 없으면 그 사실을 목록 자리에 알려 준다. 확인 자체가 실패한
+  // 경우(재시작 중 등)는 '없음'과 구분해 알린다
+  tryShowCache(key, function (shown) {
+    if (shown === false) $('#trash_list_div').html('<div style="padding:16px 4px; color:#888">캐시된 데이터가 없습니다. 조회를 눌러 불러와 주세요.</div>');
+    else if (shown === null) $('#trash_list_div').html('<div style="padding:16px 4px; color:#888">캐시를 확인하지 못했습니다. 잠시 후 다시 선택하시거나, 조회를 눌러 불러와 주세요.</div>');
+  });
+}
+
+function loadCounts(thenQuery) {
+  quietCommand('trash_counts', null, null, function (ret) {
+    if (ret && ret.ret == 'success') renderLibOptions(ret.data || {});
+    else renderLibOptions(null);
+    if (thenQuery && $('#trash_lib').val()) {
+      // 현황에서 넘어온 경우 — 저장된 캐시가 있으면 캐시로 먼저 보여 주고,
+      // 없을 때만 DB 조회를 시작한다.
+      tryShowCache($('#trash_lib').val(), function (shown) { if (!shown) startQuery(); });
+    }
+  });
+}
+
+// 표시 중인 결과의 기준(캐시/Shyni 조회)과 그 시각 — renderTrash가 표시한다
+var trashBasisKind = null;
+var trashBasisAt = 0;
+
+function fmtElapsedMs(ms) {
+  var s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + '초';
+  return Math.floor(s / 60) + '분 ' + Math.round(s % 60) + '초';
+}
+
+// 완료 문구 — 대시보드·건강도와 같은 형식: 불러오기 완료 · 소요시간 · 기준 시각
+function trashDoneText(startedAt, finishedAt) {
+  var txt = '불러오기 완료';
+  if (startedAt && finishedAt && finishedAt >= startedAt) {
+    txt += ' · 소요시간 ' + fmtElapsedMs((finishedAt - startedAt) * 1000);
+  }
+  var t = fmtBasisTime(finishedAt);
+  if (t) txt += ' · ' + t + ' 기준';
+  return txt;
+}
+
+function fmtBasisTime(ts) {
+  if (!ts) return '';
+  var d = new Date(ts * 1000);
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function paintBasis() {
+  var el = $('#trash_basis');
+  if (!trashData || !trashBasisKind) { el.hide(); return; }
+  var t = fmtBasisTime(trashBasisAt);
+  if (trashBasisKind == 'cache') el.text('캐시 데이터 기준' + (t ? ' · ' + t + '에 불러온 결과입니다' : ''));
+  else el.text('Shyni에서 조회한 결과' + (t ? ' · ' + t + ' 기준' : ''));
+  el.show();
+}
+
+function updateQueryBtn() {
+  $('#trash_query_btn').text(trashData ? '최신으로 조회' : '조회');
+}
+
+function clearBasis() {
+  trashBasisKind = null;
+  trashBasisAt = 0;
+  $('#trash_basis').hide();
+  updateQueryBtn();
+}
+
+// 저장된 캐시가 있으면 목록을 캐시로 보여 준다 — 결과는 cb로 알린다:
+// true=캐시로 보여 줌, false=서버가 확인한 '캐시 없음',
+// null=확인 요청 자체가 실패(재시작 중 등)해 알 수 없음.
+// 확인 실패를 '캐시 없음'으로 잘못 알리지 않기 위해 구분한다.
+// 같은 라이브러리의 계산이 돌고 있거나 접수돼 있으면, 캐시를 먼저
+// 보여 준 채로 완료를 지켜보다가 끝나면 목록을 새 결과로 바꾼다.
+function tryShowCache(lib, cb) {
+  var attempt = function (retried) {
+    quietCommand('trash_state', null, null, function (ret) {
+      if (!ret || ret.ret != 'success' || !ret.data) {
+        if (!retried) { setTimeout(function () { attempt(true); }, 800); return; }
+        if (cb) cb(null);
+        return;
+      }
+      trashCacheTimes = ret.data.cache_times || trashCacheTimes;
+      var libs = (ret.data.cache_libs || []).map(function (x) { return String(x); });
+      if (libs.indexOf(String(lib)) < 0) { if (cb) cb(false); return; }
+      trashBasisKind = 'cache';
+      trashBasisAt = (ret.data.cache_times || {})[String(lib)] || 0;
+      resetProgressCounters();
+      loadTrash(1);
+      var st0 = ret.data.state || {};
+      if (String(st0.lib) === String(lib)
+          && (st0.busy || (st0.requested_at || 0) > (st0.finished_at || 0))) {
+        watchCacheRefresh(lib);
+      } else {
+        // 계산이 돌고 있지 않으면 캐시를 불러온 것으로 완료 표시한다
+        setProgress(100, trashDoneText(0, trashBasisAt));
+      }
+      if (cb) cb(true);
+    });
+  };
+  attempt(false);
+}
+
+var trashWatchTimer = null;
+var trashWatchLib = null;
+var trashWatchSince = 0;
+
+function stopCacheWatch() {
+  clearTimeout(trashWatchTimer);
+  trashWatchTimer = null;
+  trashWatchLib = null;
+}
+
+// 캐시를 보여 준 상태에서 계산 완료를 지켜본다 — 도는 동안은 진척률을
+// 보여 주고, 끝나면(진척률 100%) 목록을 새 결과로 다시 그린다.
+function watchCacheRefresh(lib) {
+  stopCacheWatch();
+  trashWatchLib = String(lib);
+  trashWatchSince = Date.now();
+  var baseCacheAt = trashCacheTimes[trashWatchLib] || 0;
+  var finishWith = function (at, st) {
+    stopCacheWatch();
+    var started = (st && String(st.lib) === trashWatchLib) ? st.started_at : 0;
+    trashBasisKind = 'db';
+    trashBasisAt = at || Math.floor(Date.now() / 1000);
+    setProgress(100, trashDoneText(started, trashBasisAt));
+    loadCounts(false);
+    loadTrash(trashPage || 1);
+  };
+  var tick = function () {
+    if (!trashWatchLib) return;
+    if (Date.now() - trashWatchSince > 10 * 60 * 1000) { stopCacheWatch(); return; }
+    quietCommand('trash_state', null, null, function (ret) {
+      if (!trashWatchLib) return;
+      if (!ret || ret.ret != 'success' || !ret.data) { trashWatchTimer = setTimeout(tick, 2000); return; }
+      trashCacheTimes = ret.data.cache_times || trashCacheTimes;
+      // 그 사이 캐시가 새것으로 바뀌었으면(다른 계산이 먼저 끝난 경우
+      // 포함) 완료로 본다
+      if ((trashCacheTimes[trashWatchLib] || 0) > baseCacheAt) {
+        finishWith(trashCacheTimes[trashWatchLib], ret.data.state);
+        return;
+      }
+      var st = ret.data.state || {};
+      if (String(st.lib) != trashWatchLib) { trashWatchTimer = setTimeout(tick, 2000); return; }
+      if (st.busy) {
+        setProgress(st.progress || 0, trashStepText(st.progress || 0));
+        trashWatchTimer = setTimeout(tick, 2000);
+        return;
+      }
+      if ((st.requested_at || 0) > (st.finished_at || 0)) { trashWatchTimer = setTimeout(tick, 2000); return; }
+      // 계산이 끝났는데 캐시 시각이 그대로면 실패로 끝난 것이다 —
+      // 보여 준 캐시와 진척률 표시는 그대로 둔다
+      stopCacheWatch();
+    });
+  };
+  trashWatchTimer = setTimeout(tick, 1200);
+}
+
+var trashPollTimer = null;
+var trashPollLib = null;
+var trashMyReq = 0;
+var trashPollSince = 0;
+var CMD_URL = '/' + location.pathname.split('/')[1] + '/ajax/scan/command';
+
+// 폴링 전용 조용한 명령 — globalSendCommand는 호출할 때마다 프레임워크
+// 로딩 표시가 떠서, 0.7초 간격 폴링에서는 화면이 계속 깜빡인다.
+function quietCommand(command, arg1, arg2, cb) {
+  $.ajax({
+    type: 'POST', url: CMD_URL, global: false,
+    data: {command: command, arg1: arg1 == null ? '' : arg1, arg2: arg2 == null ? '' : arg2, arg3: ''},
+    success: function (ret) { cb(ret); },
+    error: function () { cb(null); }
+  });
+}
+
+// 계산 단계 표시 — 워커가 보고하는 진행률 구간이 곧 단계 경계다:
+// 파일 읽기(0~15) · 항목 정보 읽기(15~45) · 작품별 묶기(45~95) · 저장(95~)
+function trashStepText(p) {
+  if (p < 15) return '삭제된 파일 목록 읽는 중… {P}%';
+  if (p < 45) return '항목 정보 읽는 중… {P}%';
+  if (p < 95) return '작품별로 묶는 중… {P}%';
+  return '결과 저장 중… {P}%';
+}
+
+// 서버 진행률은 첫 쿼리가 끝날 때까지 한참 멈춰 있을 수 있어(파일 목록을
+// 읽는 동안은 콜백이 없다), 현황 화면처럼 표시값을 천천히 올려 보여 준다.
+// 실제값이 표시값보다 커지면 그때부터 실제값을 따라간다.
+var trashCreepTimer = null;
+var trashShownPct = 0;
+var trashServerPct = 0;
+var trashPctText = '';
+
+function paintTrashProgress() {
+  $('#trash_progress_bar').css('width', trashShownPct + '%');
+  if (trashPctText) $('#trash_progress_text').text(trashPctText.replace('{P}', Math.round(trashShownPct)));
+}
+
+function setProgress(pct, text) {
+  $('#trash_progress_wrap').show();
+  trashServerPct = Math.max(0, Math.min(100, pct || 0));
+  if (trashServerPct >= 100) trashShownPct = 100;
+  else if (trashServerPct > trashShownPct) trashShownPct = trashServerPct;
+  if (text) trashPctText = text;
+  paintTrashProgress();
+}
+
+function startTrashCreep() {
+  stopTrashCreep();
+  trashCreepTimer = setInterval(function () {
+    if (trashShownPct < 90) {
+      trashShownPct = Math.min(90, trashShownPct + Math.max(1, Math.round((90 - trashShownPct) * 0.02)));
+      paintTrashProgress();
+    }
+  }, 400);
+}
+
+function stopTrashCreep() {
+  if (trashCreepTimer) { clearInterval(trashCreepTimer); trashCreepTimer = null; }
+}
+
+// 진척률은 현황·건강도처럼 지우지 않고 마지막 상태를 계속 보여 준다.
+// 여기서는 다음 표시를 위해 카운터만 되돌리고, 막대 자체는 건드리지 않는다.
+function resetProgressCounters() {
+  trashShownPct = 0;
+  trashServerPct = 0;
+  trashPctText = '';
+}
+
+function stopTrashPolling() {
+  clearTimeout(trashPollTimer);
+  trashPollTimer = null;
+  trashPollLib = null;
+  trashMyReq = 0;
+  stopTrashCreep();
+  stopCacheWatch();
+  if (!trashBulkActive) $('#trash_query_btn').prop('disabled', false);
+  resetProgressCounters();
+}
+
+// 전체 조회 — 모든 라이브러리를 순서대로 조회해 캐시를 채운다.
+// 진행 상황은 서버 상태(trash_bulk_state)를 폴링해 토스트로 보여 준다.
+var trashBulkActive = false;
+var trashBulkTimer = null;
+var trashAllBtnHtml = null;
+function showBulkToast(text, holdMs) {
+  var t = $('#trash_bulk_toast');
+  t.stop(true, true).text(text).show();
+  if (holdMs) setTimeout(function () { if (!trashBulkActive) t.fadeOut(300); }, holdMs);
+}
+function paintBulkRunning(bulk) {
+  var btn = $('#trash_query_all_btn');
+  if (trashAllBtnHtml == null) trashAllBtnHtml = btn.html();
+  btn.removeClass('btn-default').addClass('btn-outline-danger').text('조회 취소');
+  $('#trash_query_btn').prop('disabled', true);
+  var n = (bulk.done || 0) + (bulk.current ? 1 : 0);
+  showBulkToast('휴지통을 조회 중입니다. (' + n + '/' + (bulk.total || 0) + ')');
+}
+function paintBulkStopped() {
+  var btn = $('#trash_query_all_btn');
+  btn.removeClass('btn-outline-danger').addClass('btn-default').html(trashAllBtnHtml);
+  $('#trash_query_btn').prop('disabled', false);
+}
+function pollBulk() {
+  clearTimeout(trashBulkTimer);
+  quietCommand('trash_state', null, null, function (ret) {
+    if (!ret || ret.ret != 'success' || !ret.data) { trashBulkTimer = setTimeout(pollBulk, 2000); return; }
+    trashCacheTimes = ret.data.cache_times || trashCacheTimes;
+    var bulk = ret.data.bulk || {};
+    if (bulk.active) { paintBulkRunning(bulk); trashBulkTimer = setTimeout(pollBulk, 1500); return; }
+    if (trashBulkActive) {
+      trashBulkActive = false;
+      paintBulkStopped();
+      loadCounts(false);
+      if (bulk.cancelled) showBulkToast('휴지통 조회가 취소되었습니다.', 3500);
+      else if (bulk.errors) showBulkToast('휴지통 조회가 완료되었습니다. (' + bulk.errors + '개 라이브러리는 조회에 실패했습니다)', 5000);
+      else showBulkToast('휴지통 조회가 완료되었습니다.', 4000);
+    }
+  });
+}
+
+var trashQueryForce = '';
+
+function sendTrashQuery() {
+  quietCommand('trash_query', trashPollLib, trashQueryForce, function (ret) {
+    if (ret && ret.ret == 'success' && ret.data && ret.data.from_cache) {
+      // 서버가 캐시를 확인해 계산을 시작하지 않았다 — 캐시로 보여 준다
+      var lib2 = trashPollLib;
+      stopTrashPolling();
+      tryShowCache(lib2, function (shown) {
+        if (shown === null) setTimeout(function () { tryShowCache(lib2, function () {}); }, 1500);
+      });
+      return;
+    }
+    if (ret && ret.ret == 'success' && ret.data && String(ret.data.lib) == trashPollLib) {
+      trashMyReq = ret.data.requested_at || 0;
+    }
+    pollTrashState();
+  });
+}
+
+function startQuery(force) {
+  // 전체 조회 중에는 새 조회를 시작하지 않는다 — 캐시된 것만 볼 수 있다
+  if (trashBulkActive) return;
+  var lib = $('#trash_lib').val();
+  if (!lib) return;
+  // 캐시 확인보다 조회가 먼저 눌린 경우의 방어 — '최신으로 조회'가
+  // 아닌데 캐시가 이미 있으면, 계산하지 않고 캐시를 보여 준다
+  if (!force && trashCacheTimes[String(lib)]) {
+    tryShowCache(lib, function (shown) {
+      if (shown === false) startQuery(true);
+      else if (shown === null) {
+        // 확인이 실패한 경우 — 잠시 뒤 캐시 확인부터 다시 한다
+        setTimeout(function () {
+          if ($('#trash_lib').val() === String(lib) && !trashData && !trashPollLib) startQuery(false);
+        }, 3000);
+      }
+    });
+    return;
+  }
+  trashQueryForce = force ? '1' : '';
+  // 같은 라이브러리 조회가 이미 진행 중이면 다시 시작하지 않는다.
+  // (자동 조회가 늦게 겹치면 진척률이 0으로 되돌아가는 문제 방지)
+  if (trashPollLib && trashPollLib === String(lib)) return;
+  stopTrashPolling();
+  trashPollLib = String(lib);
+  trashPollSince = Date.now();
+  // 새 조회는 새 목록이므로 이전 선택은 비운다
+  trashSel = {};
+  $('#trash_sel_status').hide();
+  $('#trash_query_btn').prop('disabled', true);
+  $('#trash_summary').text('');
+  $('#trash_tools').hide();
+  $('#trash_pager').hide();
+  $('#trash_list_div').html('');
+  trashData = null;
+  clearBasis();
+  trashShownPct = 0;
+  trashServerPct = 0;
+  setProgress(0, trashStepText(0));
+  startTrashCreep();
+  sendTrashQuery();
+}
+
+function pollTrashState() {
+  clearTimeout(trashPollTimer);
+  trashPollTimer = setTimeout(function () {
+    if (!trashPollLib) return;
+    quietCommand('trash_state', null, null, function (ret) {
+      if (!trashPollLib) return;
+      if (!ret || ret.ret != 'success' || !ret.data) { pollTrashState(); return; }
+      var st = ret.data.state || {};
+      if (Date.now() - trashPollSince > 10 * 60 * 1000) {
+        stopTrashPolling();
+        $('#trash_list_div').html('<div style="padding:16px 4px; color:#c0392b">조회가 너무 오래 걸립니다. 잠시 뒤 다시 시도해 주세요.</div>');
+        return;
+      }
+      if (st.busy) {
+        if (String(st.lib) == trashPollLib) {
+          setProgress(st.progress || 0, trashStepText(st.progress || 0));
+        } else {
+          setProgress(st.progress || 0, '다른 라이브러리를 불러오는 중입니다… {P}%');
+        }
+        pollTrashState();
+        return;
+      }
+      if (!trashMyReq) {
+        // 다른 라이브러리 계산이 막 끝난 경우 등, 내 요청이 아직 접수되지
+        // 않았으면 다시 요청하고 계속 기다린다.
+        sendTrashQuery();
+        return;
+      }
+      var finished = (st.finished_at || 0) >= trashMyReq;
+      if (finished && st.error && String(st.lib) == trashPollLib) {
+        stopTrashPolling();
+        $('#trash_list_div').html('<div style="padding:16px 4px; color:#c0392b">휴지통을 조회하지 못했습니다: ' + esc(st.error) + '</div>');
+        return;
+      }
+      var cacheLibs = (ret.data.cache_libs || []).map(function (x) { return String(x); });
+      if (finished && cacheLibs.indexOf(trashPollLib) >= 0) {
+        stopTrashCreep();
+        clearTimeout(trashPollTimer);
+        trashPollTimer = null;
+        trashPollLib = null;
+        trashMyReq = 0;
+        $('#trash_query_btn').prop('disabled', false);
+        trashBasisKind = 'db';
+        trashBasisAt = st.finished_at || Math.floor(Date.now() / 1000);
+        setProgress(100, trashDoneText(st.started_at, trashBasisAt));
+        // 새 계산이 끝났으니 선택 칸의 개수도 서버 값으로 다시 맞춘다
+        loadCounts(false);
+        loadTrash(1);
+            return;
+      }
+      pollTrashState();
+    });
+  }, 700);
+}
+
+function loadTrash(page) {
+  var lib = $('#trash_lib').val();
+  if (!lib) return;
+  trashPage = page || 1;
+  $('#trash_list_div').html('<div style="padding:16px 4px; color:#888">불러오는 중입니다…</div>');
+  var opts = {
+    page: trashPage,
+    search: $('#trash_search').val() || '',
+    order: $('#trash_order').val() || 'old'
+  };
+  quietCommand('trash_list', lib, JSON.stringify(opts), function (ret) {
+    if (!ret || ret.ret != 'success') {
+      $('#trash_summary').text('');
+      $('#trash_tools').hide();
+      $('#trash_pager').hide();
+      clearBasis();
+      $('#trash_list_div').html('<div style="padding:16px 4px; color:#c0392b">' + esc((ret && ret.msg) || '조회에 실패했습니다.') + '</div>');
+      return;
+    }
+    trashData = ret.data;
+    renderTrash();
+  });
+}
+
+function renderTrash() {
+  var d = trashData;
+  if (!d) return;
+  var s = d.summary || {};
+  $('#trash_summary').html('파일 <strong>' + fmtNum(s.files) + '개</strong> · ' + esc(d.main_label) + ' <strong>' + fmtNum(s.groups) + '개</strong>');
+  $('#trash_tools').show();
+  paintBasis();
+  updateQueryBtn();
+  var str = '';
+  var groups = d.groups || [];
+  if (!groups.length) {
+    str = '<div style="padding:16px 4px; color:#888">조건에 맞는 항목이 없습니다.</div>';
+  }
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i];
+    var title = (g.parent_title ? g.parent_title + ' — ' : '') + (g.title || '(제목 없음)') + (g.year ? ' (' + g.year + ')' : '');
+    str += '<div style="border:1px solid #e2e8f0; border-radius:8px; padding:10px 8px; margin-top:8px">';
+    str += '<div style="display:flex; gap:8px; align-items:flex-start">';
+    if (g.folder) {
+      str += '<input type="checkbox" class="trash-check" data-folder="' + esc(g.folder) + '"' + (trashSel[g.folder] ? ' checked' : '') + (trashSelBusy ? ' disabled' : '') + ' style="margin-top:3px; flex:0 0 auto">';
+    }
+    str += '<div style="flex:1; min-width:0"><div><strong>' + esc(title) + '</strong></div>';
+    var keptDays = (g.first_days_ago != null ? g.first_days_ago : g.days_ago);
+    str += '<div style="font-size:12.5px; color:#666; margin-top:2px">파일 ' + fmtNum(g.file_count) + '개 · 삭제 ' + esc((g.last_deleted || '').substring(0, 10)) + (keptDays != null ? ' · 삭제된 지 ' + keptDays + '일째 · 보관 기간 ' + (d.retention_days || 7) + '일' : '');
+    if (g.subs && g.subs.length) {
+      var subsTxt = g.subs.length > 4 ? g.subs.slice(0, 4).join('·') + ' 외 ' + (g.subs.length - 4) + '곳' : g.subs.join('·');
+      str += ' · 하위 폴더 ' + esc(subsTxt);
+    }
+    for (var r = 0; r < (g.reasons || []).length; r++) {
+      str += ' <span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#fff5f5; color:#c53030; border:1px solid #fed7d7">' + esc(reasonLabel(g.reasons[r])) + '</span>';
+    }
+    str += '</div>';
+    if (g.folder) str += '<div style="font-size:12px; color:#888; word-break:break-all; margin-top:2px">' + esc(g.folder) + '</div>';
+    str += '</div>';
+    str += '<button type="button" class="btn btn-sm btn-outline-secondary trash-toggle" data-root="' + g.root_id + '" style="flex:0 0 auto">▾</button>';
+    str += '</div>';
+    str += '<div class="trash-files" id="trash_files_' + g.root_id + '" style="display:none; margin-top:6px"></div>';
+    str += '</div>';
+  }
+  $('#trash_list_div').html(str);
+  if (d.pages > 1 || d.total_groups > 0) {
+    $('#trash_pager').show();
+    $('#trash_page_info').text(d.page + ' / ' + d.pages + ' 페이지 · 전체 ' + fmtNum(d.total_groups) + '개');
+    $('#trash_prev_btn').prop('disabled', d.page <= 1);
+    $('#trash_next_btn').prop('disabled', d.page >= d.pages);
+  } else {
+    $('#trash_pager').hide();
+  }
+  updateSelUi();
+}
+
+// ---- 작품 선택 실행 (새로고침·스캔·새로고침 후 스캔) ----
+// 선택은 폴더 경로(작품 공통 폴더)를 키로 페이지가 바뀌어도 유지한다.
+// 실행은 워커가 전담하고, 화면은 trash_selected_state를 조용한 ajax로
+// 폴링해 진행(완료 수/전체 · 현재 폴더)과 결과를 표시한다.
+var trashSel = {};
+var trashSelBusy = false;
+var trashSelTimer = null;
+var trashSelMyReq = 0;
+var trashSelPendingSince = 0;
+var SEL_MODE_LABEL = {refresh: '새로고침', scan: '스캔', refresh_scan: '새로고침 후 스캔'};
+
+function selCount() { return Object.keys(trashSel).length; }
+
+function updateSelUi() {
+  var n = selCount();
+  $('#trash_sel_count').text('선택 ' + n + '개');
+  $('.trash-sel-act').prop('disabled', n === 0 || trashSelBusy);
+  var boxes = $('.trash-check');
+  var checked = boxes.filter(':checked').length;
+  $('#trash_check_all').prop('checked', boxes.length > 0 && checked === boxes.length);
+  $('#trash_check_all').prop('disabled', trashSelBusy || boxes.length === 0);
+}
+
+function setSelBusy(busy) {
+  trashSelBusy = busy;
+  $('.trash-check').prop('disabled', busy);
+  updateSelUi();
+}
+
+function showSelStatus(html) {
+  $('#trash_sel_status').html(html).show();
+}
+
+function startSelectedAction(mode) {
+  var lib = $('#trash_lib').val();
+  var folders = Object.keys(trashSel);
+  if (!lib || !folders.length || trashSelBusy) return;
+  if (folders.length > 100) {
+    showSelStatus('<span style="color:#c0392b">한 번에 최대 100개까지 실행할 수 있습니다. 선택을 줄여 주세요.</span>');
+    return;
+  }
+  setSelBusy(true);
+  trashSelMyReq = 0;
+  trashSelPendingSince = 0;
+  showSelStatus(esc(SEL_MODE_LABEL[mode] || mode) + '을(를) 시작하고 있습니다…');
+  quietCommand('trash_selected_action', lib, JSON.stringify({mode: mode, folders: folders}), function (ret) {
+    if (!ret || ret.ret != 'success') {
+      setSelBusy(false);
+      showSelStatus('<span style="color:#c0392b">' + esc((ret && ret.msg) || '실행을 시작하지 못했습니다.') + '</span>');
+      return;
+    }
+    trashSelMyReq = (ret.data && ret.data.requested_at) || Date.now() / 1000;
+    pollSelState(mode);
+  });
+}
+
+function pollSelState(mode) {
+  clearTimeout(trashSelTimer);
+  trashSelTimer = setTimeout(function () {
+    quietCommand('trash_selected_state', null, null, function (ret) {
+      if (!ret || ret.ret != 'success' || !ret.data) { pollSelState(mode); return; }
+      var st = ret.data;
+      var label = SEL_MODE_LABEL[st.mode || mode] || '';
+      if (st.busy) {
+        trashSelPendingSince = 0;
+        var cur = st.current ? '<br><span style="color:#888; word-break:break-all">현재: ' + esc(st.current) + '</span>' : '';
+        showSelStatus(esc(label) + ' 진행 중 · ' + (st.done || 0) + '/' + (st.total || 0) + '개 완료' + cur);
+        pollSelState(mode);
+        return;
+      }
+      if ((st.finished_at || 0) >= trashSelMyReq && st.requested_at == trashSelMyReq) {
+        finishSelAction(st, label);
+        return;
+      }
+      // 요청은 접수됐는데 워커가 아직 집지 않은 상태 — 이 상태가 1분 넘게
+      // 이어지면 워커 무응답으로 보고 안내한다 (잠깐의 간격은 계속 기다린다).
+      if (!trashSelPendingSince) trashSelPendingSince = Date.now();
+      if (Date.now() - trashSelPendingSince > 60 * 1000) {
+        setSelBusy(false);
+        showSelStatus('<span style="color:#c0392b">작업이 시작되지 않았습니다. 잠시 뒤 다시 시도해 주세요.</span>');
+        return;
+      }
+      pollSelState(mode);
+    });
+  }, 1000);
+}
+
+function finishSelAction(st, label) {
+  clearTimeout(trashSelTimer);
+  trashSelTimer = null;
+  setSelBusy(false);
+  var results = st.results || [];
+  var ok = 0, fails = '';
+  for (var i = 0; i < results.length; i++) {
+    if (results[i].ok) ok++;
+    else fails += '<br><span style="color:#c0392b; word-break:break-all">실패: ' + esc(results[i].folder) + ' — ' + esc(results[i].error || '') + '</span>';
+  }
+  var html = esc(label) + '이(가) 끝났습니다. ' + ok + '/' + results.length + '개 성공.';
+  if (st.error) html += '<br><span style="color:#c0392b">' + esc(st.error) + '</span>';
+  html += fails;
+  html += '<br><span style="color:#888">휴지통 내용이 바뀌었을 수 있습니다. 조회 버튼을 눌러 다시 불러와 주세요.</span>';
+  showSelStatus(html);
+}
+
+// 화면을 다시 열었을 때 실행 중인 선택 작업이 있으면 진행 표시를 이어간다
+function resumeSelPolling() {
+  quietCommand('trash_selected_state', null, null, function (ret) {
+    if (!ret || ret.ret != 'success' || !ret.data) return;
+    var st = ret.data;
+    if (st.busy) {
+      trashSelMyReq = st.requested_at || 0;
+      trashSelPendingSince = 0;
+      setSelBusy(true);
+      showSelStatus('선택 작업이 진행 중입니다…');
+      pollSelState(st.mode);
+    }
+  });
+}
+
+function toggleFiles(btn) {
+  var root = btn.data('root');
+  var box = $('#trash_files_' + root);
+  if (box.is(':visible')) { box.hide(); btn.text('▾'); return; }
+  btn.text('▴');
+  if (box.data('loaded')) { box.show(); return; }
+  box.html('<div style="color:#888; font-size:12.5px; padding:4px 0">불러오는 중입니다…</div>').show();
+  quietCommand('trash_files', $('#trash_lib').val(), String(root), function (ret) {
+    if (!ret || ret.ret != 'success') {
+      box.html('<div style="color:#c0392b; font-size:12.5px; padding:4px 0">' + esc((ret && ret.msg) || '읽지 못했습니다.') + '</div>');
+      return;
+    }
+    var files = (ret.data && ret.data.files) || [];
+    var str = '';
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      var fdays = daysSince(f.deleted_at);
+      str += '<div style="font-size:12.5px; color:#555; padding:5px 0 5px 10px; border-top:1px dashed #edf2f7; word-break:break-all">' + esc(f.name) + ' <span style="color:#aaa">' + esc((f.deleted_at || '').substring(0, 10)) + (fdays != null ? ' · ' + fdays + '일째' : '') + '</span></div>';
+    }
+    if (ret.data && ret.data.total > files.length) {
+      str += '<div style="font-size:12px; color:#999; padding:4px 0 0 10px">외 ' + fmtNum(ret.data.total - files.length) + '개 파일</div>';
+    }
+    if (!files.length) str = '<div style="font-size:12.5px; color:#888; padding:4px 0">파일이 없습니다.</div>';
+    box.html(str);
+    box.data('loaded', true);
+  });
 }
 
 $(document).ready(function () {
-  if (!Array.isArray(SELECTED)) SELECTED = [];
-  renderSections();
-
-  $('#trashSectionsSaveBtn').off('click').on('click', function () {
-    var secs = [];
-    $('.trash-sec:checked').each(function () { secs.push($(this).val()); });
-    globalSendCommand('trash_save_sections', JSON.stringify(secs));
+  renderLibOptions(null);
+  loadCounts(!!PRESELECT);
+  // 캐시 시각을 미리 받아 둔다 — 선택 팝업을 열면 '캐시 있음' 표시가
+  // 서버 응답을 기다리지 않고 바로 보인다. 화면 표시 뒤에 조용히
+  // 물어보는 것이라 처음 뜨는 속도에 영향을 주지 않는다.
+  quietCommand('trash_state', null, null, function (ret) {
+    if (ret && ret.ret == 'success' && ret.data) {
+      trashCacheTimes = ret.data.cache_times || {};
+    }
   });
 
-  $('#trashExecuteBtn').off('click').on('click', function () {
-    if (!confirm('선택한 라이브러리의 휴지통을 비웁니다. missing 항목이 실제로 삭제됩니다. 계속하시겠습니까?')) return;
-    globalSendCommand('trash_execute', null);
+  $('#trash_query_btn').off('click').on('click', function () {
+    if (!$('#trash_lib').val()) { openTrashLibPicker(); return; }
+    // 목록이 떠 있는 상태의 버튼은 '최신으로 조회' — 캐시가 있어도
+    // 다시 계산한다. 목록이 없으면 캐시 먼저 보기 대상이다
+    startQuery(!!trashData);
+  });
+  $('#trash_query_all_btn').off('click').on('click', function () {
+    if (trashBulkActive) {
+      quietCommand('trash_query_all_cancel', null, null, function () {});
+      showBulkToast('휴지통 조회를 취소하는 중입니다…');
+      return;
+    }
+    if (!confirm('라이브러리 별로 모든 휴지통을 조회합니다. 파일 수가 많은 경우 조회에 시간이 걸릴 수 있습니다. 진행하시겠습니까?')) return;
+    var keys = LIBS.map(function (l) { return l.key; });
+    quietCommand('trash_query_all', JSON.stringify(keys), null, function (ret) {
+      if (ret && ret.ret == 'success') {
+        trashBulkActive = true;
+        paintBulkRunning({done: 0, total: keys.length, current: keys[0]});
+        pollBulk();
+      } else {
+        // 이미 다른 곳에서 전체 조회가 돌고 있을 수 있다 — 상태를 맞춰 본다
+        pollBulk();
+      }
+    });
+  });
+  // 전체 조회가 돌고 있는 채로 화면에 들어오면 진행 표시를 이어받는다
+  quietCommand('trash_state', null, null, function (ret) {
+    if (ret && ret.ret == 'success' && ret.data && ret.data.bulk && ret.data.bulk.active) {
+      trashBulkActive = true;
+      paintBulkRunning(ret.data.bulk);
+      pollBulk();
+    }
+  });
+  $('#trash_lib_pick').off('click').on('click', function () { openTrashLibPicker(); });
+  $('#trashLibSearch').off('input').on('input', renderTrashLibList);
+  $('#trashLibCancel').off('click').on('click', function () { closeTrashLibPicker(); });
+  $('#trashLibModal').off('click').on('click', function (e) { if (e.target === this) closeTrashLibPicker(); });
+  $(document).off('click', '.trash-lib-row').on('click', '.trash-lib-row', function () { onTrashLibPicked($(this).data('key')); });
+  $('#trash_order').off('change').on('change', function () { if (trashData) loadTrash(1); });
+  var searchTimer = null;
+  $('#trash_search').off('input').on('input', function () {
+    if (!trashData) return;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () { loadTrash(1); }, 400);
+  });
+  $('#trash_prev_btn').off('click').on('click', function () { if (trashData && trashData.page > 1) loadTrash(trashData.page - 1); });
+  $('#trash_next_btn').off('click').on('click', function () { if (trashData && trashData.page < trashData.pages) loadTrash(trashData.page + 1); });
+  $(document).off('click', '.trash-toggle').on('click', '.trash-toggle', function () { toggleFiles($(this)); });
+
+  $(document).off('change', '.trash-check').on('change', '.trash-check', function () {
+    var folder = $(this).data('folder');
+    if (!folder) return;
+    if ($(this).is(':checked')) trashSel[folder] = true;
+    else delete trashSel[folder];
+    updateSelUi();
+  });
+  $('#trash_check_all').off('change').on('change', function () {
+    var on = $(this).is(':checked');
+    $('.trash-check').each(function () {
+      var folder = $(this).data('folder');
+      if (!folder) return;
+      $(this).prop('checked', on);
+      if (on) trashSel[folder] = true;
+      else delete trashSel[folder];
+    });
+    updateSelUi();
+  });
+  $('.trash-sel-act').off('click').on('click', function () { startSelectedAction($(this).data('mode')); });
+  resumeSelPolling();
+
+  $('#trash_empty_all_btn').off('click').on('click', function () {
+    var lib = $('#trash_lib').val();
+    var title = $('#trash_lib option:selected').text();
+    if (!lib) return;
+    if (!confirm(title + ' 휴지통을 전부 비웁니다. 되돌릴 수 없습니다. 계속하시겠습니까?')) return;
+    globalSendCommand('trash_empty_all', lib, null, null, function (ret) {
+      if (ret && ret.ret == 'success') { loadCounts(false); startQuery(); }
+    });
   });
 });
 </script>

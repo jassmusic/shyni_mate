@@ -13,15 +13,14 @@ setting = {
                 'name': '설정',
                 'list': [
                     {'uri': 'setting', 'name': '설정'},
-                    {'uri': 'advanced', 'name': '고급 설정'},
-                    {'uri': 'relay_manual', 'name': 'Relay 매뉴얼'},
+                    {'uri': 'advanced', 'name': 'Relay'},
                 ]
             },
             {
                 'uri': 'status',
-                'name': '현황',
+                'name': '대시보드',
                 'list': [
-                    {'uri': 'list', 'name': '현황'},
+                    {'uri': 'list', 'name': '대시보드'},
                     {'uri': 'health', 'name': '건강도'},
                 ]
             },
@@ -31,7 +30,7 @@ setting = {
                 'list': [
                     {'uri': 'setting', 'name': '설정'},
                     {'uri': 'list', 'name': '스캔 목록'},
-                    {'uri': 'trash', 'name': '휴지통 스캔'},
+                    {'uri': 'trash', 'name': '휴지통'},
                     {'uri': 'browser', 'name': '탐색'},
                     {'uri': 'manual/files/스캔.md', 'name': '매뉴얼'},
                 ]
@@ -39,6 +38,20 @@ setting = {
             {
                 'uri': 'periodic',
                 'name': '주기적 스캔',
+                'list': [
+                    {'uri': 'setting', 'name': '설정'},
+                ]
+            },
+            {
+                'uri': 'trash',
+                'name': '휴지통 작업',
+                'list': [
+                    {'uri': 'setting', 'name': '설정'},
+                ]
+            },
+            {
+                'uri': 'webhook',
+                'name': '웹훅',
                 'list': [
                     {'uri': 'setting', 'name': '설정'},
                 ]
@@ -71,8 +84,11 @@ try:
     from .mod_status import ModuleStatus
     from .mod_periodic import ModulePeriodic
     from .model_periodic import ModelPeriodicItem
+    from .mod_trash import ModuleTrash
+    from .model_trash import ModelTrashItem
+    from .mod_webhook import ModuleWebhook
 
-    P.set_module_list([ModuleBase, ModuleScan, ModuleStatus, ModulePeriodic])
+    P.set_module_list([ModuleBase, ModuleScan, ModuleStatus, ModulePeriodic, ModuleTrash, ModuleWebhook])
 
     # 외부 호출
     P.ModelScanItem = ModelScanItem

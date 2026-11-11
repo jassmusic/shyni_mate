@@ -20,6 +20,7 @@ logger = P.logger
 # 라이브러리 전체 메타 새로고침 실행 스레드 (key -> Thread). 같은 프로세스에서만 유효하다.
 _meta_refresh_threads = {}
 _vfs_scan_threads = {}
+_trash_chain_threads = {}
 
 
 class ModuleStatus(PluginModuleBase):
@@ -46,9 +47,22 @@ class ModuleStatus(PluginModuleBase):
         self.db_default = {
             f"{self.name}_db_version": "1",
             f"{self.name}_auto_refresh_min": "30",
+            f"{self.name}_hidden_libs": "",
+            f"{self.name}_health_hidden_libs": "",
+            f"{self.name}_lib_sort": "default",
+            f"{self.name}_health_sort": "default",
         }
 
     def plugin_load(self):
+        # '표시' 숨김 목록을 대시보드·건강도 개별 저장으로 나누는 1회 이전:
+        # 지금까지 함께 쓰던 목록을 건강도 쪽에도 복사해 두 화면의 현재 선택을 그대로 잇는다.
+        try:
+            if P.ModelSetting.get('status_hidden_split') != '1':
+                P.ModelSetting.set('status_health_hidden_libs',
+                                   P.ModelSetting.get('status_hidden_libs') or '')
+                P.ModelSetting.set('status_hidden_split', '1')
+        except Exception:
+            pass
         # DB 통계 계산은 Celery 워커(task_status)가 전담한다 — 웹은 요청만 남긴다
         def func():
             self.start_celery(TaskStatus.start)
@@ -423,6 +437,15 @@ class ModuleStatus(PluginModuleBase):
             meta['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             logger.warning(f'[현황] 메타 새로고침 중단 상태로 표시: 섹션 {key}')
             changed = True
+        trash = state.get('trash')
+        if trash and trash.get('status') == 'running' \
+                and trash.get('mode') == 'refresh_scan_empty' \
+                and str(key) not in _trash_chain_threads:
+            # 이어서 비우기를 맡은 스레드가 없으면 재시작 등으로 끊긴 것이다
+            trash['status'] = 'interrupted'
+            trash['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            logger.warning(f'[현황] 휴지통 비우기(연결 실행) 중단 상태로 표시: 섹션 {key}')
+            changed = True
         scan = state.get('scan')
         if scan and scan.get('status') == 'running' and scan.get('job') is not None:
             url, token = ShyniBackend.get_config()
@@ -438,6 +461,19 @@ class ModuleStatus(PluginModuleBase):
                             scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             logger.info(f"[현황] 스캔 완료: 섹션 {key} job {scan['job']}")
                             changed = True
+                            # 스캔으로 휴지통 구성이 바뀌었을 수 있어 상세 캐시를
+                            # 지우고, 개수 캐시는 '오래됨'으로 표시해 다음 통계
+                            # 계산 때 한 번에 읽게 한다
+                            try:
+                                from .task_trash_view import clear_cache
+                                clear_cache(key)
+                            except Exception:
+                                pass
+                            try:
+                                from .task_status import mark_trash_counts_stale
+                                mark_trash_counts_stale()
+                            except Exception:
+                                pass
                         elif job.get('status') == 'failed':
                             scan['status'] = 'failed'
                             scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -587,6 +623,20 @@ class ModuleStatus(PluginModuleBase):
                             'server': base['server'],
                             'storage': base['storage']})
 
+        if sub == 'set_lib_sort':
+            # 대시보드·건강도에서 고른 정렬을 화면별로 기억한다.
+            # 바꿀 때마다 조용히 저장하므로 성공 응답에 msg를 넣지 않는다.
+            which = req.form.get('which') or ''
+            value = (req.form.get('value') or '').strip()
+            allowed = {
+                'list': ('status_lib_sort', ('default', 'name', 'nometa', 'media', 'trash')),
+                'health': ('status_health_sort', ('default', 'name', 'check', 'okpct', 'media', 'trash')),
+            }
+            if which not in allowed or value not in allowed[which][1]:
+                return jsonify({'ret': 'fail', 'msg': '요청 값이 올바르지 않습니다.'})
+            P.ModelSetting.set(allowed[which][0], value)
+            return jsonify({'ret': 'success'})
+
         if sub == 'set_refresh':
             try:
                 minutes = int(req.form.get('min'))
@@ -598,7 +648,25 @@ class ModuleStatus(PluginModuleBase):
                 return jsonify({'ret': 'success', 'msg': '자동 업데이트를 껐습니다.'})
             return jsonify({'ret': 'success', 'msg': f'자동 업데이트 주기를 {minutes}분으로 저장했습니다.'})
 
-        if sub in ('vfs_refresh', 'scan', 'cancel', 'meta_refresh', 'vfs_scan', 'trash_empty'):
+        if sub == 'set_hidden_libs':
+            # '표시'에서 고른 숨김 라이브러리를 화면별로 따로 기억한다.
+            # 체크할 때마다 조용히 저장하므로 성공 응답에 msg를 넣지 않는다.
+            setting_key = ('status_health_hidden_libs'
+                           if (req.form.get('which') or '') == 'health'
+                           else 'status_hidden_libs')
+            keys = []
+            for part in (req.form.get('keys') or '').split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    keys.append(str(int(part)))
+                except Exception:
+                    return jsonify({'ret': 'fail', 'msg': '요청 값이 올바르지 않습니다.'})
+            P.ModelSetting.set(setting_key, ','.join(keys))
+            return jsonify({'ret': 'success'})
+
+        if sub in ('vfs_refresh', 'scan', 'cancel', 'meta_refresh', 'vfs_scan', 'trash_empty', 'trash_action'):
             try:
                 key = int(req.form.get('key'))
             except Exception:
@@ -611,6 +679,23 @@ class ModuleStatus(PluginModuleBase):
                 return jsonify({'ret': 'fail', 'msg': '해당 라이브러리를 찾지 못했습니다. shyni 연결 상태를 확인해 주세요.'})
             state = self._refresh_state(key, self._get_state(key))
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            # 휴지통 버튼의 동작 선택 — 고른 동작을 기존 시작 처리로 그대로 넘긴다.
+            # '새로고침 후 스캔 후 비우기'만 스캔 완료 뒤 비우기를 잇는 체인이 붙는다.
+            then_trash = False
+            if sub == 'trash_action':
+                mode = (req.form.get('mode') or 'empty').strip()
+                if mode == 'refresh':
+                    sub = 'vfs_refresh'
+                elif mode == 'scan':
+                    sub = 'scan'
+                elif mode == 'refresh_scan':
+                    sub = 'vfs_scan'
+                elif mode == 'refresh_scan_empty':
+                    sub = 'vfs_scan'
+                    then_trash = True
+                else:
+                    sub = 'trash_empty'
 
             if sub == 'cancel':
                 # 주기적 스캔이 이 라이브러리를 실행 중이면 그쪽 취소를 요청한다
@@ -652,7 +737,7 @@ class ModuleStatus(PluginModuleBase):
                 return jsonify({'ret': 'fail', 'msg': '지금 취소할 수 있는 진행 중 작업이 없습니다.'})
 
             # 시작 계열 — 같은 섹션에 실행 중 작업이 있으면 중복 시작 금지
-            for kind in ('vfs', 'scan', 'meta'):
+            for kind in ('vfs', 'scan', 'meta', 'trash'):
                 job = state.get(kind)
                 if job and job.get('status') == 'running':
                     return jsonify({'ret': 'fail', 'msg': f"이미 진행 중인 작업이 있습니다 ({kind}). 끝난 뒤에 다시 시도해 주세요."})
@@ -690,13 +775,25 @@ class ModuleStatus(PluginModuleBase):
                 _vfs_scan_threads[str(key)] = th
                 th.start()
                 logger.info(f"[현황] 새로고침 후 스캔 시작: {sec['title']} job {ret.get('jobid')} ({remote})")
+                if then_trash:
+                    st2 = self._get_state(key)
+                    st2['trash'] = {'job': None, 'mode': 'refresh_scan_empty',
+                                    'started_at': now, 'finished_at': None,
+                                    'status': 'running'}
+                    self._set_state(key, st2)
+                    cth = threading.Thread(target=self._run_scan_trash,
+                                           args=(key, sec['title']), daemon=True)
+                    _trash_chain_threads[str(key)] = cth
+                    cth.start()
+                    logger.info(f"[현황] 스캔 후 휴지통 비우기 연결: {sec['title']}")
+                    return jsonify({'ret': 'success', 'msg': f"{sec['title']} 새로고침을 시작했습니다. 스캔이 끝나면 휴지통을 비웁니다."})
                 return jsonify({'ret': 'success', 'msg': f"{sec['title']} 새로고침을 시작했습니다. 끝나면 스캔이 자동으로 시작됩니다."})
 
             if sub == 'meta_refresh':
                 from . import db_support
                 if not db_support.db_ready():
                     return jsonify({'ret': 'fail',
-                                    'msg': '메타 새로고침은 고급 설정에서 PostgreSQL Relay 연결 테스트를 통과해야 사용할 수 있습니다.'})
+                                    'msg': '메타 새로고침은 Relay에서 연결 테스트를 통과해야 사용할 수 있습니다.'})
                 scope = (req.form.get('scope') or 'all').strip()
                 only_no_code = scope == 'nocode'
                 is_folder = bool(only_no_code and db_support.library_is_folder(key))
@@ -756,28 +853,22 @@ class ModuleStatus(PluginModuleBase):
                 url, token = ShyniBackend.get_config()
                 if not url or not token:
                     return jsonify({'ret': 'fail', 'msg': 'Shyni 연결 설정이 비어 있습니다. 기본 설정을 확인해 주세요.'})
-                try:
-                    res = requests.get(f"{url}/library/sections/{key}/emptyTrash",
-                                       headers={'X-Plex-Token': token, 'Accept': 'application/json'},
-                                       timeout=120)
-                    res.raise_for_status()
-                except Exception as e:
-                    return jsonify({'ret': 'fail', 'msg': f'휴지통 비우기에 실패했습니다: {e}'})
+                state['trash'] = {'job': None, 'mode': 'empty',
+                                  'started_at': now, 'finished_at': None,
+                                  'status': 'running'}
+                self._set_state(key, state)
+                ok, err = self._empty_trash_now(key)
+                state = self._get_state(key)
+                tr = state.get('trash') or {}
+                tr['status'] = 'done' if ok else 'failed'
+                if err:
+                    tr['error'] = err
+                tr['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                state['trash'] = tr
+                self._set_state(key, state)
+                if not ok:
+                    return jsonify({'ret': 'fail', 'msg': f'휴지통 비우기에 실패했습니다: {err}'})
                 logger.info(f"[현황] 휴지통 비우기: {sec['title']}")
-                # 휴지통 수가 바뀌므로 DB 통계 재계산을 요청한다
-                try:
-                    st_raw = P.ModelSetting.get('status_db_stats_state')
-                    st = json.loads(st_raw) if st_raw else {}
-                    if not isinstance(st, dict):
-                        st = {}
-                except Exception:
-                    st = {}
-                st.pop('busy', None)
-                st['requested_at'] = time.time()
-                try:
-                    P.ModelSetting.set('status_db_stats_state', json.dumps(st))
-                except Exception:
-                    pass
                 return jsonify({'ret': 'success', 'msg': f"{sec['title']} 휴지통을 비웠습니다."})
 
         return jsonify({'ret': 'fail', 'msg': '알 수 없는 요청입니다.'})
@@ -873,7 +964,7 @@ class ModuleStatus(PluginModuleBase):
                                     'missing_any': missing_any})
         lib_no_code.sort(key=lambda x: -x['no_code'])
         scan = {'periodic_running': bool(periodic_current),
-                'running': 0, 'done': 0, 'failed': 0,
+                'running': 0, 'analyzing': 0, 'done': 0, 'failed': 0,
                 'queued': 0, 'assembling': 0, 'ready': 0, 'held': 0, 'total': 0}
         try:
             with F.app.app_context():
@@ -884,6 +975,7 @@ class ModuleStatus(PluginModuleBase):
             # 진행 단계별 집계는 스캔 목록 표시 상태와 같은 기준(summary_counts)을 쓴다
             counts = P.ModelScanItem.summary_counts()
             scan['running'] = len(counts.get('scanning_ids') or [])
+            scan['analyzing'] = len(counts.get('analyzing_ids') or [])
             scan['assembling'] = counts.get('assembling') or 0
             scan['queued'] = counts.get('queued') or 0
             scan['ready'] = counts.get('ready') or 0
@@ -1000,6 +1092,100 @@ class ModuleStatus(PluginModuleBase):
             logger.info(f'[현황] 새로고침 후 스캔 전송: {title} job {job_id}')
         finally:
             _vfs_scan_threads.pop(str(key), None)
+
+    def _empty_trash_now(self, key):
+        """휴지통 비우기를 바로 실행하고 DB 통계 재계산을 요청한다.
+        (성공 여부, 오류 문구)를 돌려준다."""
+        url, token = ShyniBackend.get_config()
+        if not url or not token:
+            return False, 'Shyni 연결 설정이 비어 있습니다.'
+        try:
+            res = requests.get(f"{url}/library/sections/{key}/emptyTrash",
+                               headers={'X-Plex-Token': token, 'Accept': 'application/json'},
+                               timeout=120)
+            res.raise_for_status()
+        except Exception as e:
+            return False, str(e)[:200]
+        # 휴지통 개수가 바뀌므로 개수 캐시도 바로 새로 읽어 둔다 (백그라운드)
+        try:
+            from .task_status import refresh_trash_counts_async
+            refresh_trash_counts_async()
+        except Exception:
+            pass
+        # 비운 라이브러리의 상세 캐시 목록은 낡으므로 지운다
+        try:
+            from .task_trash_view import clear_cache
+            clear_cache(key)
+        except Exception:
+            pass
+        # 휴지통 수가 바뀌므로 DB 통계 재계산을 요청한다
+        try:
+            st_raw = P.ModelSetting.get('status_db_stats_state')
+            st = json.loads(st_raw) if st_raw else {}
+            if not isinstance(st, dict):
+                st = {}
+        except Exception:
+            st = {}
+        st.pop('busy', None)
+        st['requested_at'] = time.time()
+        try:
+            P.ModelSetting.set('status_db_stats_state', json.dumps(st))
+        except Exception:
+            pass
+        return True, ''
+
+    def _run_scan_trash(self, key, title):
+        """'새로고침 후 스캔 후 비우기' — 스캔이 완료되면 이어서 휴지통을 비운다
+        (백그라운드 스레드). 스캔이 실패·중단되면 비우지 않는다."""
+        try:
+            deadline = time.time() + 12 * 3600
+            while time.time() < deadline:
+                st = self._refresh_state(key, self._get_state(key))
+                scan = (st or {}).get('scan') or {}
+                vfs = (st or {}).get('vfs') or {}
+                s_status = scan.get('status')
+                if s_status == 'done':
+                    ok, err = self._empty_trash_now(key)
+                    st = self._get_state(key)
+                    tr = st.get('trash') or {}
+                    tr['status'] = 'done' if ok else 'failed'
+                    if err:
+                        tr['error'] = err
+                    tr['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    st['trash'] = tr
+                    self._set_state(key, st)
+                    logger.info(f"[현황] 스캔 후 휴지통 비우기 {'완료' if ok else '실패'}: {title} {err}")
+                    return
+                if s_status in ('failed', 'cancelled', 'interrupted'):
+                    self._finish_trash_chain(key, '스캔이 완료되지 않아 휴지통을 비우지 않았습니다.')
+                    return
+                if s_status == 'requested' and not scan.get('job'):
+                    # job id가 없어 완료를 확인할 수 없는 상태가 오래 가면 중단한다
+                    try:
+                        started_ts = datetime.strptime(scan.get('started_at') or '',
+                                                       '%Y-%m-%d %H:%M:%S').timestamp()
+                    except Exception:
+                        started_ts = 0
+                    if started_ts and time.time() - started_ts > 1800:
+                        self._finish_trash_chain(key, '스캔 상태를 확인할 수 없어 휴지통을 비우지 않았습니다.')
+                        return
+                if not scan and vfs.get('status') in ('failed', 'cancelled', 'interrupted'):
+                    self._finish_trash_chain(key, '새로고침이 완료되지 않아 휴지통을 비우지 않았습니다.')
+                    return
+                time.sleep(20)
+            self._finish_trash_chain(key, '시간이 너무 오래 걸려 휴지통을 비우지 않았습니다.')
+        finally:
+            _trash_chain_threads.pop(str(key), None)
+
+    def _finish_trash_chain(self, key, error):
+        st = self._get_state(key)
+        tr = st.get('trash') or {}
+        tr['status'] = 'interrupted'
+        tr['error'] = error
+        tr['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        st['trash'] = tr
+        self._set_state(key, st)
+        logger.warning(f'[현황] 휴지통 비우기 연결 중단: 섹션 {key} — {error}')
 
     def _run_meta_refresh(self, key, title, ids, run_id, filled_kind=None):
         """라이브러리 전체 앨범에 메타 새로고침을 하나씩 건다 (백그라운드 스레드)."""

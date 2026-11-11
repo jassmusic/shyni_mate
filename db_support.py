@@ -118,13 +118,17 @@ TYPE_INFO = {
 TYPE_INFO['show'] = TYPE_INFO['tv']
 
 
-def library_stats():
+def library_stats(trash_map=None, progress_cb=None):
     """라이브러리별 통계를 종류(music/movie/show/book)에 맞춰 집계한다.
 
     반환: {library_id(int): {...}}
     작품(main)·하위(sub)·묶음(group) 수와, 작품 기준 메타 누락을 돌려준다.
     메타 없음은 작품 중 metadata_code와 yaml_code가 모두 없는 것이다.
     음악 라이브러리는 albums/tracks/artists 별칭도 함께 채운다.
+
+    trash_map({library_id: 개수})을 주면 휴지통 개수는 그 값을 쓰고
+    media_parts 전체를 읽는 휴지통 쿼리는 실행하지 않는다 (현황 통계가
+    캐시된 개수를 재사용하는 경로). None이면 지금처럼 직접 읽는다.
     """
     conn = connect()
     try:
@@ -155,6 +159,8 @@ def library_stats():
                 'count': int(cnt or 0), 'no_code': int(nc or 0),
                 'no_summary': int(ns or 0), 'no_year': int(ny or 0),
                 'no_thumb': int(nt or 0), 'missing_any': int(ma or 0)}
+        if progress_cb:
+            progress_cb(0.4)
         cur.execute("""
             SELECT mi.library_id, count(*)
             FROM media_parts mp
@@ -163,6 +169,8 @@ def library_stats():
             GROUP BY mi.library_id
         """)
         movie_files = {int(r[0]): int(r[1] or 0) for r in cur.fetchall()}
+        if progress_cb:
+            progress_cb(0.55)
         # 하위 항목(에피소드·책)의 파일 수 — 쇼·도서 카드의 '파일' 행용
         cur.execute("""
             SELECT mi.library_id, mi.metadata_type, count(*)
@@ -172,15 +180,23 @@ def library_stats():
             GROUP BY mi.library_id, mi.metadata_type
         """)
         sub_files = {(int(r[0]), int(r[1])): int(r[2] or 0) for r in cur.fetchall()}
-        # 휴지통 파일 수 — 삭제 표시(deleted_at)된 media_parts를 라이브러리별로 센다
-        cur.execute("""
-            SELECT mi.library_id, count(*)
-            FROM media_parts mp
-            JOIN metadata_items mi ON mi.id = mp.metadata_item_id
-            WHERE mp.deleted_at IS NOT NULL
-            GROUP BY mi.library_id
-        """)
-        trash_counts = {int(r[0]): int(r[1] or 0) for r in cur.fetchall()}
+        if progress_cb:
+            progress_cb(0.65)
+        # 휴지통 파일 수 — 삭제 표시(deleted_at)된 media_parts를 라이브러리별로 센다.
+        # trash_map이 주어지면 이 쿼리(전체 스캔)를 건너뛰고 그 값을 쓴다.
+        if trash_map is None:
+            cur.execute("""
+                SELECT mi.library_id, count(*)
+                FROM media_parts mp
+                JOIN metadata_items mi ON mi.id = mp.metadata_item_id
+                WHERE mp.deleted_at IS NOT NULL
+                GROUP BY mi.library_id
+            """)
+            trash_counts = {int(r[0]): int(r[1] or 0) for r in cur.fetchall()}
+        else:
+            trash_counts = {int(k): int(v or 0) for k, v in trash_map.items()}
+        if progress_cb:
+            progress_cb(0.8)
         stats = {}
         for lib_id, lib_type in lib_types.items():
             rows = per.get(lib_id, {})
@@ -396,3 +412,347 @@ def metadata_info(metadata_id):
                 'summary': summary, 'thumb_url': thumb_url}
     finally:
         conn.close()
+
+
+# ---- 휴지통 조회 ----
+# 휴지통은 media_parts의 deleted_at 표시다. 파일(part)이 속한 항목에서
+# 작품(main) 단위까지 parent_id를 따라 올라가 묶는다 — 음악은 앨범,
+# 영화는 영화 자체, 쇼는 쇼, 도서는 시리즈가 묶음 단위가 된다.
+
+def trash_retention_days(library_id):
+    """라이브러리 보관 기간(일) — 화면 표시 전용 정보.
+
+    보관 기간의 설정·관리는 shyni 서버가 한다. 플러그인은 판정에 쓰지 않고
+    항목별 표시용으로만 읽는다: 라이브러리별 설정이 있으면 그 값, 없으면
+    서버 전역 설정(server_settings config), 그래도 없으면 7일.
+    """
+    import json
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT trash_retention_days FROM libraries WHERE id=%s",
+                    (int(library_id),))
+        row = cur.fetchone()
+        days = int(row[0]) if row and row[0] else 0
+        if days > 0:
+            return days
+        try:
+            cur.execute("SELECT value FROM server_settings WHERE key='config'")
+            row = cur.fetchone()
+            if row and row[0]:
+                cfg = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                gdays = int(cfg.get('trash_retention_days') or 0)
+                if gdays > 0:
+                    return gdays
+        except Exception:
+            pass
+        return 7
+    finally:
+        conn.close()
+
+
+def trash_counts():
+    """라이브러리별 휴지통 파일 수 {library_id: count} — 선택 목록 표시용."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT library_id, count(*) FROM media_parts
+            WHERE deleted_at IS NOT NULL GROUP BY library_id
+        """)
+        return {int(r[0]): int(r[1] or 0) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _trash_load(library_id, progress_cb=None):
+    """휴지통 원자료: (라이브러리 종류, 파일 목록, 항목 사전).
+
+    항목 사전은 파일이 속한 항목부터 최상위(아티스트 등)까지 모두 담는다.
+    파일이 수천 개여도 쿼리는 항목 묶음 단위로 나눠 실행한다.
+    progress_cb가 있으면 읽는 단계마다 진행률(0~45)을 알린다.
+    """
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT type FROM libraries WHERE id=%s", (int(library_id),))
+        row = cur.fetchone()
+        lib_type = (row[0] or 'music') if row else 'music'
+        cur.execute("""
+            SELECT id, metadata_item_id, file_path, deleted_at, deleted_reason
+            FROM media_parts
+            WHERE library_id=%s AND deleted_at IS NOT NULL
+        """, (int(library_id),))
+        parts = [{'id': r[0], 'item_id': r[1], 'path': r[2] or '',
+                  'deleted_at': r[3], 'reason': r[4] or ''}
+                 for r in cur.fetchall()]
+        if progress_cb:
+            progress_cb(15)
+        items = {}
+        frontier = {p['item_id'] for p in parts if p['item_id']}
+        level = 0
+        while frontier:
+            level += 1
+            ids = list(frontier)
+            frontier = set()
+            cur.execute("""
+                SELECT id, title, year, metadata_type, parent_id
+                FROM metadata_items WHERE id = ANY(%s)
+            """, (ids,))
+            for r in cur.fetchall():
+                items[int(r[0])] = {'id': int(r[0]), 'title': r[1] or '',
+                                    'year': r[2], 'type': int(r[3]),
+                                    'parent_id': int(r[4]) if r[4] else None}
+                if r[4] and int(r[4]) not in items:
+                    frontier.add(int(r[4]))
+            if progress_cb:
+                progress_cb(min(45, 15 + level * 6))
+        return lib_type, parts, items
+    finally:
+        conn.close()
+
+
+def _trash_root(item_id, items, main_type):
+    """항목에서 작품(main) 단위까지 올라간다. 못 찾으면 자기 자신을 돌려준다."""
+    cur = items.get(item_id)
+    if cur is None:
+        return None
+    seen = set()
+    while (cur['type'] != main_type and cur['parent_id']
+           and cur['parent_id'] in items and cur['id'] not in seen):
+        seen.add(cur['id'])
+        cur = items[cur['parent_id']]
+    return cur
+
+
+def _trash_common_folder(paths):
+    """그룹 파일 경로들에서 공통 폴더와 하위 폴더 이름들을 구한다.
+
+    파일이 CD1/CD2 같은 하위 폴더에 나뉘어 있으면 공통 폴더는 작품
+    폴더가 된다. 파일이 전부 한 디스크 폴더 안에만 있으면 그 폴더를
+    작품 폴더로 올리고 디스크 폴더 이름은 하위 폴더로 돌려준다.
+    """
+    import os
+    import re
+    dirs = []
+    for p in paths:
+        if p and '/' in p:
+            dirs.append(p.rsplit('/', 1)[0])
+    if not dirs:
+        return '', []
+    try:
+        folder = os.path.commonpath(dirs)
+    except ValueError:
+        folder = dirs[0]
+    subs = set()
+    prefix = folder + '/'
+    for d in dirs:
+        if d == folder:
+            continue
+        rel = d[len(prefix):] if d.startswith(prefix) else ''
+        if rel:
+            subs.add(rel.split('/')[0])
+    base = os.path.basename(folder)
+    if base and re.match(r'^(cd|disc|disk)\s*[-_.]?\s*\d{1,2}$', base, re.I):
+        parent = os.path.dirname(folder)
+        if parent and parent != folder:
+            subs.add(base)
+            folder = parent
+    return folder, sorted(subs)
+
+
+def _fmt_dt(dt):
+    if dt is None:
+        return ''
+    try:
+        return dt.strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return str(dt)
+
+
+def trash_groups(library_id, page=1, per_page=30, search='', order='old'):
+    """휴지통을 작품 단위로 묶어 페이지 단위로 돌려준다.
+
+    order: old(오래된 순) | new(최근 순) | files(파일 많은 순) | name(이름순)
+    보관 기간은 shyni 서버가 관리하므로 여기서는 판정하지 않고,
+    그룹별 경과일(first_days_ago)과 보관 기간(retention_days) 표시만 한다.
+    """
+    from datetime import datetime, timezone
+    lib_type, parts, items = _trash_load(library_id)
+    info = TYPE_INFO.get(lib_type) or TYPE_INFO['music']
+    main_type = info['main']
+    days = trash_retention_days(library_id)
+    now = datetime.now(timezone.utc)
+    groups = {}
+    for p in parts:
+        root = _trash_root(p['item_id'], items, main_type)
+        rid = root['id'] if root else p['item_id']
+        g = groups.get(rid)
+        if g is None:
+            parent = items.get(root['parent_id']) if root and root['parent_id'] else None
+            g = {'root_id': rid,
+                 'title': (root['title'] if root else ''),
+                 'year': (root['year'] if root else None),
+                 'parent_title': (parent['title'] if parent else ''),
+                 'file_count': 0,
+                 'first_deleted': None, 'last_deleted': None,
+                 'reasons': set(), 'folder': '', 'subs': [], 'paths': []}
+            groups[rid] = g
+        g['file_count'] += 1
+        da = p['deleted_at']
+        if da is not None:
+            if g['first_deleted'] is None or da < g['first_deleted']:
+                g['first_deleted'] = da
+            if g['last_deleted'] is None or da > g['last_deleted']:
+                g['last_deleted'] = da
+        if p['reason']:
+            g['reasons'].add(p['reason'])
+        if p['path']:
+            g['paths'].append(p['path'])
+    for g in groups.values():
+        g['folder'], g['subs'] = _trash_common_folder(g['paths'])
+    total_files = len(parts)
+    total_groups = len(groups)
+    rows = list(groups.values())
+    if search:
+        needle = search.lower()
+        rows = [g for g in rows
+                if needle in (g['parent_title'] + ' ' + g['title']).lower()
+                or needle in g['folder'].lower()]
+    if order == 'new':
+        rows.sort(key=lambda g: g['last_deleted'] or g['first_deleted'],
+                  reverse=True)
+    elif order == 'files':
+        rows.sort(key=lambda g: (-g['file_count'], g['title']))
+    elif order == 'name':
+        rows.sort(key=lambda g: (g['parent_title'], g['title']))
+    else:
+        rows.sort(key=lambda g: g['first_deleted'] or g['last_deleted'])
+    filtered = len(rows)
+    pages = max(1, (filtered + per_page - 1) // per_page)
+    page = max(1, min(page, pages))
+    chunk = rows[(page - 1) * per_page: page * per_page]
+    out = []
+    for g in chunk:
+        last = g['last_deleted']
+        first = g['first_deleted']
+        out.append({
+            'root_id': g['root_id'], 'title': g['title'], 'year': g['year'],
+            'parent_title': g['parent_title'],
+            'file_count': g['file_count'],
+            'first_deleted': _fmt_dt(first),
+            'last_deleted': _fmt_dt(last),
+            'days_ago': (now - last).days if last else None,
+            'first_days_ago': (now - first).days if first else None,
+            'reasons': sorted(g['reasons']),
+            'folder': g['folder'],
+            'subs': g['subs'],
+        })
+    return {'lib_type': lib_type, 'main_label': info['main_label'],
+            'retention_days': days,
+            'summary': {'files': total_files, 'groups': total_groups},
+            'total_groups': filtered, 'page': page, 'pages': pages,
+            'groups': out}
+
+
+def trash_compute(library_id, progress_cb=None):
+    """휴지통 조회용 전체 계산 — 워커에서 실행해 결과를 캐시에 저장한다.
+
+    trash_groups와 같은 묶음을 만들지만 페이지로 자르지 않고 전부 돌려주며,
+    그룹별 파일 목록까지 한 번에 만든다. 웹은 이 결과를 캐시에서 읽어
+    검색·정렬·페이지만 처리하므로 조회가 가볍다.
+    그룹 행에는 정렬용 epoch(_first·_last)를 함께 넣어 둔다.
+    """
+    import os
+    from datetime import datetime, timezone
+    lib_type, parts, items = _trash_load(library_id, progress_cb=progress_cb)
+    info = TYPE_INFO.get(lib_type) or TYPE_INFO['music']
+    main_type = info['main']
+    days = trash_retention_days(library_id)
+    now = datetime.now(timezone.utc)
+    groups = {}
+    files = {}
+    total = len(parts)
+    for idx, p in enumerate(parts):
+        if progress_cb and idx % 200 == 0:
+            progress_cb(45 + int(50 * idx / max(1, total)))
+        root = _trash_root(p['item_id'], items, main_type)
+        rid = root['id'] if root else p['item_id']
+        g = groups.get(rid)
+        if g is None:
+            parent = items.get(root['parent_id']) if root and root['parent_id'] else None
+            g = {'root_id': rid,
+                 'title': (root['title'] if root else ''),
+                 'year': (root['year'] if root else None),
+                 'parent_title': (parent['title'] if parent else ''),
+                 'file_count': 0,
+                 'first_dt': None, 'last_dt': None,
+                 'reasons': set(), 'folder': '', 'subs': [], 'paths': []}
+            groups[rid] = g
+            files[rid] = []
+        g['file_count'] += 1
+        da = p['deleted_at']
+        if da is not None:
+            if g['first_dt'] is None or da < g['first_dt']:
+                g['first_dt'] = da
+            if g['last_dt'] is None or da > g['last_dt']:
+                g['last_dt'] = da
+        if p['reason']:
+            g['reasons'].add(p['reason'])
+        if p['path']:
+            g['paths'].append(p['path'])
+        item = items.get(p['item_id']) or {}
+        files[rid].append({'id': p['id'], 'name': os.path.basename(p['path']),
+                           'path': p['path'],
+                           'item_title': item.get('title') or '',
+                           'deleted_at': _fmt_dt(da),
+                           'reason': p['reason']})
+    out_groups = []
+    out_files = {}
+    for rid, g in groups.items():
+        last = g['last_dt']
+        g['folder'], g['subs'] = _trash_common_folder(g['paths'])
+        out_groups.append({
+            'root_id': rid, 'title': g['title'], 'year': g['year'],
+            'parent_title': g['parent_title'],
+            'file_count': g['file_count'],
+            'first_deleted': _fmt_dt(g['first_dt']),
+            'last_deleted': _fmt_dt(last),
+            'days_ago': (now - last).days if last else None,
+            'first_days_ago': ((now - g['first_dt']).days
+                               if g['first_dt'] else None),
+            'reasons': sorted(g['reasons']),
+            'folder': g['folder'],
+            'subs': g['subs'],
+            '_first': g['first_dt'].timestamp() if g['first_dt'] else None,
+            '_last': last.timestamp() if last else None,
+        })
+        fl = files[rid]
+        fl.sort(key=lambda x: x['path'])
+        out_files[str(rid)] = fl
+    if progress_cb:
+        progress_cb(98)
+    return {'lib_type': lib_type, 'main_label': info['main_label'],
+            'retention_days': days,
+            'summary': {'files': total, 'groups': len(groups)},
+            'groups': out_groups, 'files': out_files}
+
+
+def trash_group_files(library_id, root_id, limit=500):
+    """한 작품(묶음)에 속한 휴지통 파일 목록을 돌려준다."""
+    import os
+    lib_type, parts, items = _trash_load(library_id)
+    info = TYPE_INFO.get(lib_type) or TYPE_INFO['music']
+    out = []
+    for p in parts:
+        root = _trash_root(p['item_id'], items, info['main'])
+        rid = root['id'] if root else p['item_id']
+        if rid != int(root_id):
+            continue
+        item = items.get(p['item_id']) or {}
+        out.append({'id': p['id'], 'name': os.path.basename(p['path']),
+                    'path': p['path'], 'item_title': item.get('title') or '',
+                    'deleted_at': _fmt_dt(p['deleted_at']),
+                    'reason': p['reason']})
+    out.sort(key=lambda x: x['path'])
+    return {'files': out[:limit], 'total': len(out)}

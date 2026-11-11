@@ -18,17 +18,56 @@
   진행 상태를 불러오는 중입니다.
 </div>
 
-{{ macros.m_button_group([['jobsSaveBtn', '저장'], ['jobAddBtn', '작업 추가']]) }}
+{{ macros.m_button_group([['jobsSaveBtn', '저장'], ['jobAddBtn', '작업 추가'], ['globalSettingSaveBtn', '설정 저장']]) }}
 <div style="margin:6px 0 10px">
   <span style="font-size:12px; color:#888">저장하면 사용으로 켜진 작업이 스케줄러에 바로 반영됩니다. cron 예: <code>0 4 * * *</code> 매일 새벽 4시, <code>0 3 * * 1</code> 매주 월요일 새벽 3시</span>
 </div>
-{{ macros.m_hr_head_top() }}
-<div id="jobs_div"></div>
 
-{{ macros.m_hr() }}
-<div>
-  <strong>최근 실행 이력</strong>
-  <div id="periodic_history_div" style="margin-top:8px; font-size:13px; color:#888">불러오는 중입니다.</div>
+<nav>
+  <div class="nav nav-tabs" id="nav-tab" role="tablist">
+    {{ macros.m_tab_head_start() }}
+    {{ macros.m_tab_head('jobs', '작업 목록', true) }}
+    {{ macros.m_tab_head('db', 'DB', false) }}
+    {{ macros.m_tab_head_end() }}
+  </div>
+</nav>
+<form id='setting'>
+<div class="tab-content" id="nav-tabContent">
+    {{ macros.m_tab_content_start('jobs', true) }}
+      {{ macros.m_hr_head_top() }}
+      <div id="jobs_div"></div>
+
+      {{ macros.m_hr() }}
+      <div>
+        <strong>최근 실행 이력</strong>
+        <div id="periodic_history_div" style="margin-top:8px; font-size:13px; color:#888">불러오는 중입니다.</div>
+      </div>
+    {{ macros.m_tab_content_end() }}
+
+    {{ macros.m_tab_content_start('db', false) }}
+      {{ macros.setting_input_text_and_buttons('periodic_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','periodic_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['periodic_db_delete_day'], col='6') }}
+      {{ macros.setting_checkbox('periodic_db_auto_delete', 'DB 자동 삭제', value=arg['periodic_db_auto_delete'], desc=['켜 두시면, 설정한 기간이 지난 DB 기록을 자동으로 삭제합니다.']) }}
+    {{ macros.m_tab_content_end() }}
+</div>
+</form>
+
+<div id="libPickModal" style="display:none; position:fixed; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.45); z-index:2000">
+  <div style="background:#fff; max-width:520px; margin:48px auto; border-radius:8px; padding:16px 18px; max-height:82vh; display:flex; flex-direction:column">
+    <div style="display:flex; justify-content:space-between; align-items:center">
+      <strong style="font-size:15px">라이브러리 선택</strong>
+      <span id="libPickCount" style="color:#888; font-size:12.5px"></span>
+    </div>
+    <input type="text" id="libPickSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="margin:10px 0 8px">
+    <div style="margin-bottom:8px">
+      <button type="button" class="btn btn-xs btn-default" id="libPickAll">보이는 항목 전체 선택</button>
+      <button type="button" class="btn btn-xs btn-default" id="libPickNone">보이는 항목 전체 해제</button>
+    </div>
+    <div id="libPickList" style="overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:6px 10px; min-height:80px"></div>
+    <div style="margin-top:12px; text-align:right">
+      <button type="button" class="btn btn-sm btn-default" id="libPickCancel">취소</button>
+      <button type="button" class="btn btn-sm btn-primary" id="libPickOk">확인</button>
+    </div>
+  </div>
 </div>
 
 <script type="text/javascript">
@@ -38,6 +77,63 @@ var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/periodic/';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+
+function libTitle(key) {
+  for (var k = 0; k < LIBS.length; k++) if (String(LIBS[k].key) === String(key)) return LIBS[k].title;
+  return key;
+}
+
+function sectionChips(sections) {
+  var secs = (sections || []).map(String);
+  if (!secs.length) return '<span style="color:#c0392b; font-size:12.5px">선택된 라이브러리가 없습니다</span>';
+  var str = '';
+  var show = Math.min(secs.length, 8);
+  for (var k = 0; k < show; k++) {
+    str += '<span style="background:#edf2f7; border:1px solid #e2e8f0; border-radius:10px; padding:1px 8px; font-size:12px">' + esc(libTitle(secs[k])) + '</span>';
+  }
+  if (secs.length > show) str += '<span style="font-size:12px; color:#4a5568">외 ' + (secs.length - show) + '개</span>';
+  str += '<span style="font-size:12px; color:#888">총 ' + secs.length + '개</span>';
+  return str;
+}
+
+var pickIdx = -1;
+var pickSel = {};
+
+function updatePickCount() {
+  var cnt = Object.keys(pickSel).length;
+  $('#libPickCount').text(cnt ? cnt + '개 선택됨' : '');
+}
+
+function renderPickList() {
+  var q = ($('#libPickSearch').val() || '').trim().toLowerCase();
+  var str = '';
+  var shown = 0;
+  for (var k = 0; k < LIBS.length; k++) {
+    var lib = LIBS[k];
+    if (q && String(lib.title).toLowerCase().indexOf(q) < 0) continue;
+    shown++;
+    var checked = pickSel[String(lib.key)] ? ' checked' : '';
+    str += '<label style="display:block; font-weight:normal; padding:3px 2px; margin:0"><input type="checkbox" class="pick-sec" value="' + lib.key + '"' + checked + '> ' + esc(lib.title) + '</label>';
+  }
+  if (!shown) str = '<div style="color:#888; padding:4px 2px">검색 결과가 없습니다.</div>';
+  $('#libPickList').html(str);
+  updatePickCount();
+}
+
+function openLibPicker(idx) {
+  jobs = collectJobs();
+  pickIdx = idx;
+  pickSel = {};
+  ((jobs[idx] && jobs[idx].sections) || []).forEach(function (s) { pickSel[String(s)] = true; });
+  $('#libPickSearch').val('');
+  renderPickList();
+  $('#libPickModal').show();
+}
+
+function closeLibPicker() {
+  $('#libPickModal').hide();
+  pickIdx = -1;
 }
 
 function renderJobs() {
@@ -59,13 +155,13 @@ function renderJobs() {
     str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '">지금 실행</button> ';
     str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '">삭제</button>';
     str += '</span></div>';
-    str += '<div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px 14px">';
-    for (var k = 0; k < LIBS.length; k++) {
-      var lib = LIBS[k];
-      var checked = (j.sections || []).map(String).indexOf(String(lib.key)) >= 0;
-      str += '<label style="font-weight:normal"><input type="checkbox" class="j-sec" value="' + lib.key + '"' + (checked ? ' checked' : '') + '> ' + esc(lib.title) + '</label>';
+    str += '<div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; align-items:center">';
+    if (!LIBS.length) {
+      str += '<span style="color:#c0392b">라이브러리 목록을 가져오지 못했습니다. 기본 설정의 shyni 연결을 확인해 주세요.</span>';
+    } else {
+      str += '<button type="button" class="btn btn-sm btn-default job-libs" data-idx="' + i + '">라이브러리 선택</button>';
+      str += sectionChips(j.sections);
     }
-    if (!LIBS.length) str += '<span style="color:#c0392b">라이브러리 목록을 가져오지 못했습니다. 기본 설정의 shyni 연결을 확인해 주세요.</span>';
     str += '</div></div>';
   }
   if (!jobs.length) str = '<div style="color:#888; padding:8px 2px">아직 작업이 없습니다. 아래 작업 추가 버튼으로 만들어 보세요.</div>';
@@ -76,8 +172,8 @@ function collectJobs() {
   var out = [];
   $('.job-row').each(function () {
     var row = $(this);
-    var secs = [];
-    row.find('.j-sec:checked').each(function () { secs.push($(this).val()); });
+    var idx = parseInt(row.attr('data-idx'), 10);
+    var secs = (jobs[idx] && jobs[idx].sections) ? jobs[idx].sections.map(String) : [];
     out.push({
       name: row.find('.j-name').val().trim(),
       cron: row.find('.j-cron').val().trim(),
@@ -125,14 +221,17 @@ function statusText(s) {
   return s;
 }
 
+var histPage = 1;
 function renderHistory(data) {
-  if (!data || !data.length) {
+  if (!data || !data.count) {
     $('#periodic_history_div').html('아직 실행 이력이 없습니다.');
     return;
   }
+  histPage = data.page;
+  var rows = data.list || [];
   var str = '<table class="table table-sm" style="font-size:13px"><tbody>';
-  for (var i = 0; i < data.length; i++) {
-    var h = data[i];
+  for (var i = 0; i < rows.length; i++) {
+    var h = rows[i];
     str += '<tr><td style="width:110px">' + h.start_time + '</td>';
     str += '<td style="width:130px">' + esc(h.job_name) + '</td>';
     str += '<td>' + esc(h.section_title) + '</td>';
@@ -141,12 +240,20 @@ function renderHistory(data) {
     str += '<td style="color:#888">' + esc(h.message) + '</td></tr>';
   }
   str += '</tbody></table>';
+  str += '<div style="display:flex; justify-content:space-between; align-items:center">';
+  str += '<span style="color:#888">전체 ' + data.count + '개</span>';
+  str += '<span><button type="button" class="btn btn-xs btn-default" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
+  str += data.page + ' / ' + data.pages + ' 페이지 ';
+  str += '<button type="button" class="btn btn-xs btn-default" id="histNextBtn"' + (data.page >= data.pages ? ' disabled' : '') + '>다음</button></span></div>';
   $('#periodic_history_div').html(str);
+  $('#histPrevBtn').click(function () { loadHistory(histPage - 1); });
+  $('#histNextBtn').click(function () { loadHistory(histPage + 1); });
 }
 
-function loadHistory() {
+function loadHistory(page) {
+  if (page == null) page = histPage;
   $.ajax({
-    type: 'POST', url: API_BASE + 'history', data: {},
+    type: 'POST', url: API_BASE + 'history', data: {page: page},
     success: function (ret) { if (ret.ret == 'success') renderHistory(ret.data); }
   });
 }
@@ -186,6 +293,43 @@ $(document).ready(function () {
   $(document).off('click', '#periodicCancelBtn').on('click', '#periodicCancelBtn', function () {
     globalSendCommand('cancel_current', null);
     setTimeout(loadCurrent, 2000);
+  });
+
+  $(document).off('click', '.job-libs').on('click', '.job-libs', function () {
+    openLibPicker(parseInt($(this).data('idx'), 10));
+  });
+
+  $('#libPickSearch').off('input').on('input', renderPickList);
+
+  $(document).off('change', '.pick-sec').on('change', '.pick-sec', function () {
+    if ($(this).is(':checked')) pickSel[String($(this).val())] = true;
+    else delete pickSel[String($(this).val())];
+    updatePickCount();
+  });
+
+  $('#libPickAll').off('click').on('click', function () {
+    $('#libPickList .pick-sec').each(function () { pickSel[String($(this).val())] = true; });
+    renderPickList();
+  });
+
+  $('#libPickNone').off('click').on('click', function () {
+    $('#libPickList .pick-sec').each(function () { delete pickSel[String($(this).val())]; });
+    renderPickList();
+  });
+
+  $('#libPickOk').off('click').on('click', function () {
+    if (pickIdx < 0 || !jobs[pickIdx]) return;
+    var secs = [];
+    for (var k = 0; k < LIBS.length; k++) if (pickSel[String(LIBS[k].key)]) secs.push(String(LIBS[k].key));
+    jobs[pickIdx].sections = secs;
+    closeLibPicker();
+    renderJobs();
+  });
+
+  $('#libPickCancel').off('click').on('click', closeLibPicker);
+
+  $('#libPickModal').off('click').on('click', function (e) {
+    if (e.target === this) closeLibPicker();
   });
 });
 </script>

@@ -7,6 +7,7 @@
 <nav>
   {{ macros.m_tab_head_start() }}
     {{ macros.m_tab_head('normal', 'PostgreSQL Relay', true) }}
+    {{ macros.m_tab_head('manual', 'Relay 매뉴얼', false) }}
   {{ macros.m_tab_head_end() }}
 </nav>
 <form id='setting'>
@@ -15,25 +16,126 @@
 {{ macros.m_tab_content_start('normal', true) }}
   <div style="font-size:13px; color:#555; line-height:1.7; margin:4px 0 14px 0">
     <strong>왜 설정하나요?</strong><br>
-    shyni의 데이터베이스를 읽기 전용으로 직접 조회하기 위한 연결입니다.
-    토큰 연동만으로는 알 수 없는 정보를 데이터베이스에서 바로 읽어 옵니다.<br>
-    <strong>무엇을 확인할 수 있나요?</strong><br>
-    현황 화면에서 라이브러리별 <strong>미디어 수 · 항목 수 · 메타 없음 수</strong>를 확인할 수 있습니다.<br>
-    <strong>안전하게 쓰려면</strong><br>
-    반드시 <strong>읽기 전용 계정</strong>만 적어 주세요. 조회만 가능해서 데이터를 바꿀 수 없습니다.
-    그리고 아래 <strong>연결 테스트에 성공한 설정만</strong> 활용합니다. 설정을 하나라도 바꾸면 다시 테스트하셔야 합니다.
+    shyni 안쪽을 살짝 들여다보기 위한 연결입니다. 평소 주고받는 토큰 연동만으로는 알 수 없는 것들,
+    예를 들어 라이브러리에 미디어가 몇 개나 있는지 같은 정보를 데이터베이스에서 직접 읽어 오기 위한 것입니다.<br>
+    <strong>무엇을 볼 수 있나요?</strong><br>
+    대시보드 화면에서 라이브러리마다 미디어 수, 항목 수, 메타가 없는 수를 볼 수 있습니다.
+    라이브러리가 잘 채워져 있는지 한눈에 확인하는 데 쓰입니다.<br>
+    <strong>안전할까요?</strong><br>
+    읽는 것만 되는 계정을 쓰기 때문에, 이 연결로는 데이터를 바꾸거나 지울 수 없습니다.
+    혹시 모를 일을 막기 위해 꼭 <strong>읽기 전용 계정</strong>만 적어 주세요.
+    그리고 연결 테스트를 통과한 설정만 사용합니다. 값을 하나라도 바꾸면, 다시 연결 테스트를 통과하기 전까지는 데이터베이스 정보를 활용하지 않습니다.
   </div>
   <hr style="margin:2px 0 14px 0; border:0; border-top:1px solid #ddd">
   {{ macros.setting_checkbox('base_db_use', 'PostgreSQL Relay 사용', value=arg['base_db_use'], desc=['켜 두시면 연결 테스트에 성공한 경우에 데이터베이스 정보를 활용합니다.']) }}
-  {{ macros.setting_input_text('base_db_host', '중계 주소', value=arg['base_db_host'], desc=['shyni 데이터베이스로 연결을 중계하는 주소입니다. pgrelay 같은 중계가 먼저 준비되어 있어야 합니다.', '예: pgrelay_out']) }}
+  {{ macros.setting_input_text('base_db_host', '중계 주소', value=arg['base_db_host'], desc=['shyni 데이터베이스까지 연결을 이어 주는 중계(pgrelay)가 있는 곳의 주소입니다. 중계를 어떻게 설치했느냐에 따라 컨테이너 이름이 될 수도 있고, 서버 주소(IP)가 될 수도 있습니다.', '중계가 먼저 설치되어 사용할 준비가 되어 있어야 합니다. 예: pgrelay_out']) }}
   {{ macros.setting_input_text('base_db_port', '포트', value=arg['base_db_port'], desc=['중계가 듣고 있는 포트입니다. 보통 15432입니다.']) }}
   {{ macros.setting_input_text('base_db_name', '데이터베이스 이름', value=arg['base_db_name'], desc=['보통 shyni 입니다.']) }}
   {{ macros.setting_input_text('base_db_user', '계정', value=arg['base_db_user'], desc=['읽기 전용 계정을 적어 주세요. 예: shyni_ro']) }}
-  {{ macros.setting_input_text('base_db_password', '비밀번호', value=arg['base_db_password'], desc=['읽기 전용 계정의 비밀번호입니다. 이 플러그인의 설정 DB에만 저장됩니다.']) }}
-  {{ macros.setting_buttons([['db_test_btn', '연결 테스트']], left='연결 테스트', desc=['지금 입력하신 정보로 데이터베이스가 잘 조회되는지 확인합니다.', '성공하면 전체 미디어 수가 보이고, 이 설정을 활용하기 시작합니다.'] ) }}
+  {{ macros.setting_input_text('base_db_password', '비밀번호', value=arg['base_db_password'], desc=['읽기 전용 계정의 비밀번호입니다. 이 플러그인 안에만 저장됩니다.']) }}
+  {{ macros.setting_buttons([['db_test_btn', '연결 테스트']], left='연결 테스트', desc=['버튼을 누르면 저장한 설정값으로 데이터베이스에 접근할 수 있는지 확인합니다.', '성공하면 전체 미디어 수가 보이고, 그때부터 데이터베이스 정보를 함께 활용합니다.'] ) }}
   <div id="db_state_line" style="font-size:13px; margin-top:6px; {% if arg['db_ok'] %}color:#2f855a{% else %}color:#c05621{% endif %}">
     {% if arg['db_ok'] %}연결 테스트에 성공하여, 데이터베이스 정보를 활용합니다.{% else %}아직 연결 테스트를 통과하지 못해 데이터베이스 정보를 활용하지 않습니다.{% endif %}
   </div>
+{{ macros.m_tab_content_end() }}
+
+{{ macros.m_tab_content_start('manual', false) }}
+<div style="font-size:13.5px; line-height:1.8; max-width:980px">
+  <p>
+    이 플러그인은 대시보드 화면의 미디어 수·항목 수·메타 없음 수와 건강도 통계를 shyni 데이터베이스에서 직접 읽어 보여 줍니다.
+    그러려면 데이터베이스에 읽기로 접속할 수 있어야 하는데, shyni의 PostgreSQL은 기본 설정으로는 다른 프로그램의 접속을 받지 않는 경우가 많아
+    <strong>중계(Relay)</strong>가 필요할 수 있습니다. 아래 순서대로 따라 하시면 됩니다.
+    먼저 <strong>공통 준비</strong>로 읽기 전용 계정을 만들고, 본인의 설치 형태(<strong>Docker</strong> / <strong>직접 설치</strong>)에 맞는 절을 진행하세요.
+  </p>
+
+  <h4 style="margin-top:22px"><strong>공통 준비 — 읽기 전용 계정 만들기</strong></h4>
+  <p>
+    1. shyni의 PostgreSQL에 관리자로 접속합니다.<br>
+    · Docker: <code>docker exec -it &lt;shyni 컨테이너 이름&gt; psql -U shyni -d shyni</code><br>
+    · 직접 설치: <code>psql -U shyni -d shyni</code> (설치 환경에 따라 명령이 다를 수 있습니다)<br>
+    2. 아래 SQL을 실행합니다. <code>비밀번호</code> 부분은 직접 정한 값으로 바꾸세요.
+  </p>
+  <pre style="white-space:pre; overflow-x:auto; background:#f7f7f7; border:1px solid #e2e2e2; border-radius:6px; padding:10px 12px; font-size:12.5px">CREATE ROLE shyni_ro LOGIN PASSWORD '비밀번호';
+GRANT CONNECT ON DATABASE shyni TO shyni_ro;
+GRANT USAGE ON SCHEMA public TO shyni_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO shyni_ro;
+ALTER DEFAULT PRIVILEGES FOR ROLE shyni GRANT SELECT ON TABLES TO shyni_ro;
+ALTER ROLE shyni_ro SET default_transaction_read_only = on;</pre>
+  <p>
+    3. 만든 비밀번호는 Relay 설정에 입력해야 하니 따로 적어 두세요.
+    이 계정은 조회(SELECT)만 되고, 수정·삭제는 데이터베이스 차원에서 거부됩니다.
+  </p>
+
+  <h4 style="margin-top:22px"><strong>Docker로 설치한 경우</strong></h4>
+  <p>
+    shyni 컨테이너의 PostgreSQL은 컨테이너 안쪽(127.0.0.1)에서만 접속을 받고, 포트도 밖으로 열려 있지 않습니다.
+    그래서 socat 중계 컨테이너 두 개로 길을 만듭니다.<br>
+    · <strong>pgrelay_in</strong>: shyni 컨테이너와 네트워크를 공유해 127.0.0.1:5432에 닿는 중계<br>
+    · <strong>pgrelay_out</strong>: shyni 쪽 네트워크와, 이 플러그인이 실행되는 컨테이너(ff) 쪽 네트워크에 함께 붙어 양쪽을 이어 주는 중계
+  </p>
+  <p>1. shyni의 docker-compose에 두 서비스를 추가합니다. shyni 서비스 이름이 다르면 본인 이름으로 바꾸세요.</p>
+  <pre style="white-space:pre; overflow-x:auto; background:#f7f7f7; border:1px solid #e2e2e2; border-radius:6px; padding:10px 12px; font-size:12.5px">services:
+  pgrelay_in:
+    image: alpine/socat
+    container_name: pgrelay_in
+    network_mode: "service:shyni"
+    command: "TCP-LISTEN:15432,fork,reuseaddr TCP:127.0.0.1:5432"
+    restart: unless-stopped
+    depends_on:
+      shyni:
+        condition: service_healthy
+
+  pgrelay_out:
+    image: alpine/socat
+    container_name: pgrelay_out
+    command: "TCP-LISTEN:15432,fork,reuseaddr TCP:shyni:15432"
+    restart: unless-stopped
+    networks:
+      - default
+      - app_backend
+
+networks:
+  app_backend:
+    external: true
+    name: backend</pre>
+  <p>
+    · <code>default</code>는 shyni 컴포즈의 기본 네트워크입니다. pgrelay_out은 이 네트워크로 shyni 쪽에 닿습니다.<br>
+    · 아래 <code>networks:</code> 부분은 pgrelay_out을 <strong>플러그인 쪽 네트워크</strong>에도 붙이기 위한 것입니다. <code>app_backend</code>는 이 컴포즈 안에서만 쓰는 별칭이고, 실제로 가리키는 것은 <code>external: true</code>와 <code>name: backend</code>입니다. 여기서 <code>backend</code>는 <strong>이 플러그인이 실행되는 컨테이너(ff)가 붙어 있는 Docker 네트워크의 실제 이름</strong>입니다. 본인 환경에서 그 이름이 다르면 실제 이름으로 바꿔야 합니다.<br>
+    · 네트워크 이름은 <code>docker network ls</code>로 목록을 보거나, <code>docker inspect &lt;ff 컨테이너 이름&gt;</code>의 Networks 항목에서 확인할 수 있습니다.<br>
+    · 이렇게 두 네트워크에 함께 붙은 pgrelay_out 덕분에, 플러그인은 자기 네트워크에서 <code>pgrelay_out:15432</code>로 접속해 shyni의 PostgreSQL까지 닿을 수 있습니다.<br>
+    · pgrelay_out의 전달 대상 <code>shyni:15432</code>는 shyni 서비스 이름 기준입니다.<br>
+    · pgrelay_in은 shyni 컨테이너와 네트워크를 공유하므로, shyni를 재생성하면 중계도 함께 재생성해야 다시 붙습니다. 같은 컴포즈에 두고 함께 재배포하는 것을 권장합니다.<br>
+    · <code>depends_on</code>의 <code>service_healthy</code> 조건은 shyni의 healthcheck가 통과한 뒤에 pgrelay_in이 붙게 합니다. 이게 없으면 재부팅 때 shyni보다 먼저 뜨려다 실패해 중계가 내려간 채로 남을 수 있습니다. shyni 서비스에 healthcheck가 없는 구성이라면 이 조건은 빼고 쓰세요.<br>
+    2. 컴포즈를 재배포해 shyni와 중계가 함께 올라오게 합니다.<br>
+    3. Relay 설정에 아래처럼 입력하고 <strong>연결 테스트</strong>를 누릅니다.
+  </p>
+  <pre style="white-space:pre; overflow-x:auto; background:#f7f7f7; border:1px solid #e2e2e2; border-radius:6px; padding:10px 12px; font-size:12.5px">중계 주소: pgrelay_out
+포트: 15432
+DB 이름: shyni
+계정: shyni_ro
+비밀번호: 공통 준비에서 만든 값</pre>
+  <p>4. 성공 메시지가 나오면 그때부터 데이터베이스 정보를 활용합니다.</p>
+
+  <h4 style="margin-top:22px"><strong>직접 설치(native)한 경우</strong></h4>
+  <p>
+    PostgreSQL이 호스트에서 직접 돌고, 이 플러그인이 도는 쪽도 같은 호스트에 있으면 중계가 필요 없습니다.<br>
+    1. Relay 설정에 주소 <code>127.0.0.1</code>, 포트 <code>5432</code>, DB 이름 <code>shyni</code>, 계정 <code>shyni_ro</code>를 넣고 연결 테스트를 합니다.<br>
+    2. 실패하면 PostgreSQL 설정을 확인하세요.<br>
+    · <code>pg_hba.conf</code>에 다음 줄이 있어야 합니다. 없으면 추가하고 PostgreSQL을 다시 불러오세요(서비스 재시작 또는 reload).<br>
+    <code>host&nbsp;&nbsp;shyni&nbsp;&nbsp;shyni_ro&nbsp;&nbsp;127.0.0.1/32&nbsp;&nbsp;scram-sha-256</code><br>
+    · <code>postgresql.conf</code>의 <code>listen_addresses</code>가 접속을 허용하는지도 확인하세요.<br>
+    3. 플러그인이 다른 기기나 컨테이너에서 돌고 있으면, 그 대역을 pg_hba.conf에 허용하고 listen_addresses를 열거나,
+    Docker 절의 중계와 같은 방식으로 호스트에서 socat을 직접 실행해도 됩니다.<br>
+    <code>socat TCP-LISTEN:15432,fork,reuseaddr TCP:127.0.0.1:5432</code>
+  </p>
+
+  <h4 style="margin-top:22px"><strong>문제 해결</strong></h4>
+  <p>
+    · <strong>연결 테스트가 시간 초과로 실패</strong>: 중계 컨테이너가 떠 있는지(docker ps), 네트워크 연결이 맞는지 확인하세요.<br>
+    · <strong>비밀번호 인증 실패</strong>: 공통 준비의 SQL을 다시 실행해 비밀번호를 재설정하고, Relay 설정 값과 같은지 확인하세요.<br>
+    · <strong>설정을 바꿨는데 활용이 안 됨</strong>: 접속 정보가 하나라도 바뀌면 활용이 자동으로 해제됩니다. 연결 테스트를 다시 눌러 주세요.
+  </p>
+</div>
 {{ macros.m_tab_content_end() }}
 
 </div>

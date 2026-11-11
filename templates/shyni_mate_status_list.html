@@ -4,7 +4,15 @@
 <div class="container-fluid">
   <div class="row show-grid">
     <span class="col-md-12">
-      <strong>현황</strong>
+      <strong>대시보드</strong>
+    </span>
+  </div>
+  <div id="load_progress_wrap" style="display:none; margin:2px 0 10px 0">
+    <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden"><div id="load_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .4s ease"></div></div>
+    <div id="load_progress_text" style="font-size:12px; color:#888; margin-top:3px">불러오는 중… 0%</div>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12">
       <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
         <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
         <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
@@ -24,23 +32,31 @@
   </div>
 </div>
 <style>
-.status-act { padding:1px 8px !important; font-size:11.5px !important; line-height:1.5 !important; }
+.status-act { padding:4px 10px !important; font-size:11.5px !important; line-height:1.45 !important; white-space:nowrap !important; }
+.status-side { padding-left:2px !important; padding-right:2px !important; }
+/* 비활성 버튼은 '누를 수 없음'이 한눈에 드러나게 한다 — 부트스트랩 기본 표현은
+   색이 옅어질 뿐이라 활성 버튼(특히 휴지통 비우기와 취소의 빨간 아웃라인)과
+   구분이 모호하다. 색이 죽은 회색으로 고정하고 호버 반응을 없앤다. */
+.status-act:disabled, .status-act:disabled:hover, .status-act:disabled:focus, .status-act:disabled:active {
+  color: #9aa0a6 !important;
+  border-color: #c9ccd1 !important;
+  background-color: #f4f4f5 !important;
+  opacity: 1 !important;
+  box-shadow: none !important;
+  cursor: not-allowed !important;
+}
 @media (max-width: 860px) {
   .stats-grid { grid-template-columns: 1fr 1fr !important; }
 }
 </style>
-<div id="load_progress_wrap" style="display:none; margin:2px 0 10px 0">
-  <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden"><div id="load_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .4s ease"></div></div>
-  <div id="load_progress_text" style="font-size:12px; color:#888; margin-top:3px">불러오는 중… 0%</div>
-</div>
-<div id="server_head_div" style="margin-bottom:6px"><strong>서버 정보</strong></div>
+<div id="server_head_div" style="margin-bottom:6px"><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></g></svg>서버 정보</strong></div>
 <div id="server_card_div" style="margin-bottom:16px">
   <div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; color:#888">서버 정보를 불러오는 중입니다.</div>
 </div>
-<div id="lib_head_div" style="margin-bottom:6px"><strong>라이브러리 정보</strong><span id="info_ago" style="color:#aaa; font-size:13px; font-weight:normal; margin-left:6px"></span></div>
-<div id="type_counts_div" style="font-size:13px; color:#555; margin-bottom:8px"></div>
+<div id="lib_head_div" style="margin-bottom:6px; display:flex; justify-content:space-between; align-items:center"><span><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></g></svg>라이브러리 정보</strong></span><span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888; margin-left:auto; margin-right:10px">표시 <button type="button" id="lib_show_btn" class="btn btn-default" style="height:26px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="lib_show_panel" style="display:none; position:absolute; right:0; top:30px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="lib_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="lib_show_all" checked> 전체</label><span id="lib_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span><label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 <select id="status_lib_sort" onchange="setStatusLibSort(this.value)" style="display:inline-block; width:auto; height:26px; padding:2px 6px; font-size:12px; vertical-align:middle"><option value="default">기본</option><option value="name">이름</option><option value="nometa">메타</option><option value="media">미디어</option><option value="trash">휴지통</option></select></label></div>
+<div id="type_counts_div" style="font-size:13px; color:#555; margin-bottom:8px; display:flex; align-items:baseline"><span id="type_counts_txt"></span><span id="info_ago" style="color:#aaa; margin-left:auto"></span></div>
 <div id="status_list_div">
-  <div style="padding:24px 4px; color:#888">현황을 불러오는 중입니다. 잠시만 기다려 주세요.</div>
+  <div style="padding:24px 4px; color:#888">대시보드를 불러오는 중입니다. 잠시만 기다려 주세요.</div>
 </div>
 <div id="logwarn_div" style="display:none; margin-top:8px; font-size:13px; color:#c0392b">
   로그를 찾지 못했습니다. 폴더를 다시 확인해주세요.
@@ -51,14 +67,14 @@
   <div>- <strong style="color:#666">새로고침</strong> — rclone VFS 새로고침만 합니다. 드라이브 폴더를 다시 읽어 새 파일이 마운트에 보이게 합니다. 스캔 설정의 VFS 새로고침 규칙에 이 라이브러리 경로가 맞아야 동작합니다.</div>
   <div>- <strong style="color:#666">스캔</strong> — shyni에 이 라이브러리 전체 스캔을 전송합니다. 취소는 shyni 웹 화면에서 합니다.</div>
   <div>- <strong style="color:#666">새로고침 후 스캔</strong> — 새로고침이 끝나면 스캔이 자동으로 시작됩니다. 새로고침은 취소가 가능하나, 스캔으로 넘어간 뒤 취소는 shyni 웹 화면에서 해야 합니다.</div>
-  <div>- <strong style="color:#666">메타 새로고침</strong> — 미디어 메타데이터를 순서대로 새로고침합니다. 전체 또는 메타 없는 것만 고를 수 있고, 고급 설정의 데이터베이스 연결이 필요합니다.</div>
-  <div>- <strong style="color:#666">휴지통 비우기</strong> — 그 라이브러리의 휴지통에 있는 파일을 완전히 삭제합니다. 삭제한 파일은 되돌릴 수 없습니다.</div>
+  <div>- <strong style="color:#666">메타 새로고침</strong> — 미디어 메타데이터를 순서대로 새로고침합니다. 전체 또는 메타 없는 것만 고를 수 있고, Relay의 데이터베이스 연결이 필요합니다.</div>
+  <div>- <strong style="color:#666">휴지통</strong> — 비우기 동작(새로고침·스캔·비우기와 그 조합)을 골라 실행하거나, 휴지통 상세에서 내용을 확인한 뒤 비울 수 있습니다. 비운 파일은 되돌릴 수 없습니다.</div>
   <div>- <strong style="color:#666">취소</strong> — 진행 중인 새로고침과 메타 새로고침을 멈춥니다. 스캔 취소는 shyni 웹 화면에서 해야 합니다.</div>
   <div style="margin-top:6px">참고로 이 버튼들은 스캔 설정의 'rclone vfs/refresh 사용'과 'Shyni 연동 사용' 설정과 무관하게 동작합니다. 그 설정들은 스캔 목록의 자동 처리 전용입니다.</div>
   </div>
 </div>
 <div id="status_foot_comment" style="font-size:13px; color:#888; margin-top:10px">
-  파일수·신규·missing·마지막 스캔은 shyni 로그를 읽어서 보여 드립니다. 아직 로그에 기록이 없는 라이브러리는 스캔이 끝난 뒤에 내용이 채워집니다. 미디어 수는 로그에 기록되지 않아 표시하지 않습니다.
+  파일수·신규·missing은 shyni 로그를 읽어서 보여 드립니다. 아직 로그에 기록이 없는 라이브러리는 스캔이 끝난 뒤에 내용이 채워집니다. 미디어 수는 로그에 기록되지 않아 표시하지 않습니다.
 </div>
 <div id="meta_choice_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
   <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
@@ -81,13 +97,38 @@
     </div>
   </div>
 </div>
+<div id="refresh_confirm_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
+  <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
+    <div id="refresh_confirm_title" style="font-size:15px; font-weight:bold; margin-bottom:6px">새로고침</div>
+    <div style="font-size:13px; color:#666; margin-bottom:14px">VFS 새로고침을 시작합니다. 진행 중에는 카드의 취소 버튼으로 취소할 수 있습니다.</div>
+    <div style="display:flex; flex-direction:column; gap:8px">
+      <button type="button" class="btn btn-outline-primary" id="refresh_start_btn" style="padding:6px 10px; font-size:13px">시작</button>
+      <button type="button" class="btn btn-outline-secondary" id="refresh_back_btn" style="padding:6px 10px; font-size:13px">취소</button>
+    </div>
+  </div>
+</div>
 <div id="trash_confirm_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
   <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
-    <div style="font-size:15px; font-weight:bold; margin-bottom:6px">휴지통 비우기</div>
+    <div style="font-size:15px; font-weight:bold; margin-bottom:6px">휴지통</div>
     <div id="trash_confirm_body" style="font-size:13px; color:#666; margin-bottom:14px"></div>
-    <div style="display:flex; flex-direction:column; gap:8px">
-      <button type="button" class="btn btn-outline-danger" id="trash_empty_btn" style="padding:6px 10px; font-size:13px">비우기</button>
+    <div id="trash_step1" style="display:flex; flex-direction:column; gap:8px">
+      <button type="button" class="btn btn-outline-danger" id="trash_goto_empty_btn" style="padding:6px 10px; font-size:13px">비우기</button>
+      <button type="button" class="btn btn-outline-primary" id="trash_goto_detail_btn" style="padding:6px 10px; font-size:13px">휴지통 상세</button>
       <button type="button" class="btn btn-outline-secondary" id="trash_back_btn" style="padding:6px 10px; font-size:13px">돌아가기</button>
+    </div>
+    <div id="trash_step2" style="display:none">
+      <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:12px">
+        <label style="font-weight:normal; font-size:13.5px"><input type="radio" name="trash_mode" value="refresh"> 새로고침</label>
+        <label style="font-weight:normal; font-size:13.5px"><input type="radio" name="trash_mode" value="scan"> 스캔</label>
+        <label style="font-weight:normal; font-size:13.5px"><input type="radio" name="trash_mode" value="empty" checked> 비우기</label>
+        <label style="font-weight:normal; font-size:13.5px"><input type="radio" name="trash_mode" value="refresh_scan"> 새로고침 후 스캔</label>
+        <label style="font-weight:normal; font-size:13.5px"><input type="radio" name="trash_mode" value="refresh_scan_empty"> 새로고침 후 스캔 후 비우기</label>
+      </div>
+      <div id="trash_mode_note" style="font-size:12.5px; color:#888; margin-bottom:12px"></div>
+      <div style="display:flex; flex-direction:column; gap:8px">
+        <button type="button" class="btn btn-outline-danger" id="trash_run_btn" style="padding:6px 10px; font-size:13px">실행</button>
+        <button type="button" class="btn btn-outline-secondary" id="trash_step2_back_btn" style="padding:6px 10px; font-size:13px">돌아가기</button>
+      </div>
     </div>
   </div>
 </div>
@@ -142,7 +183,7 @@ var TYPE_LABELS = {movie: '영화', show: '쇼', artist: '음악', book: '도서
 var TYPE_ORDER = ['movie', 'show', 'artist', 'book', 'photo'];
 
 function renderTypeCounts(counts) {
-  if (!counts) { $('#type_counts_div').html(''); return; }
+  if (!counts) { $('#type_counts_txt').html(''); return; }
   var parts = [];
   var seen = {};
   for (var i = 0; i < TYPE_ORDER.length; i++) {
@@ -150,7 +191,7 @@ function renderTypeCounts(counts) {
     if (counts[t]) { parts.push(TYPE_LABELS[t] + ' ' + counts[t]); seen[t] = 1; }
   }
   for (var k in counts) if (!seen[k]) parts.push(k + ' ' + counts[k]);
-  $('#type_counts_div').html(parts.length ? '<strong style="color:#333">항목 수</strong> ' + parts.join(' / ') : '');
+  $('#type_counts_txt').html(parts.length ? '<strong style="color:#333">항목 수</strong> ' + parts.join(' / ') : '');
 }
 
 function fmtBytes(n) {
@@ -161,20 +202,40 @@ function fmtBytes(n) {
   return (i == 0 ? v : v.toFixed(1)) + ' ' + units[i];
 }
 
+// 아이콘은 프레임워크 폰트(FA 4.7)에 없는 모양이 있어 SVG를 직접 심는다
+function smIcon(name, color, size) {
+  var P = {
+    server: '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/>',
+    hdd: '<path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01M10 16h.01"/>',
+    film: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/>',
+    tv: '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/>',
+    music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+    book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/>'
+  };
+  var sz = size || 15;
+  return '<svg width="' + sz + '" height="' + sz + '" viewBox="0 0 24 24" fill="none" stroke="' + (color || '#4a5568') + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)">' + (P[name] || '') + '</g></svg>';
+}
+var CARD_TYPE_ICONS = {'movie': 'film', 'show': 'tv', 'artist': 'music', 'book': 'book', 'photo': 'image'};
+
 function renderServer(server, storage) {
-  var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; background:#fff">';
-  str += '<div style="font-size:14px; margin-bottom:8px"><strong>shyni 서버</strong>';
+  var cardStyle = 'border:1px solid #ddd; border-radius:6px; padding:12px 14px; background:#fff';
+  var str = '<div style="display:flex; flex-wrap:wrap; gap:10px">';
+  // shyni 서버 카드는 세로 flex로 두고 본문 묶음을 남은 공간의 가운데에 둔다 — 옆 데이터 용량 카드가 더 높아
+  // 행 높이가 커져도 내용이 위쪽에 붙지 않고 카드 세로 중앙에 온다 (제목 줄은 기존처럼 상단 유지)
+  str += '<div style="' + cardStyle + '; flex:1 1 0; min-width:300px; display:flex; flex-direction:column">';
+  str += '<div style="font-size:14px; margin-bottom:8px"><strong>' + smIcon('server') + 'shyni 서버</strong>';
   if (!server) {
     str += ' <span style="float:right; color:#c0392b; font-size:12px">응답 없음</span></div>';
-    str += '<div style="font-size:12px; color:#888">서버 상태를 확인하지 못했습니다. shyni가 실행 중인지, 기본 설정의 주소가 맞는지 확인해 주세요.</div>';
+    str += '<div style="font-size:12px; color:#888; flex:1; display:flex; flex-direction:column; justify-content:center">서버 상태를 확인하지 못했습니다. shyni가 실행 중인지, 기본 설정의 주소가 맞는지 확인해 주세요.</div>';
   } else {
     var checks = server.checks || {};
     var bad = Object.keys(checks).filter(function (k) { return !checks[k] || checks[k].status != 'ok'; });
     var okAll = server.status == 'ready' && bad.length == 0;
     str += ' <span style="float:right; color:' + (okAll ? '#2f855a' : '#b7791f') + '; font-size:12px">' + (okAll ? '정상' : '확인 필요') + '</span></div>';
-    str += '<div style="font-size:13px; line-height:1.9">';
+    str += '<div style="font-size:13px; line-height:1.9; flex:1; display:flex; flex-direction:column; justify-content:center">';
     str += '<div>버전 <strong>' + (server.version || '-') + '</strong>' + (server.channel ? ' <span style="color:#888">(' + server.channel + ')</span>' : '') + '</div>';
-    if (server.build_date) str += '<div>빌드 <strong>' + String(server.build_date).substring(0, 10) + '</strong></div>';
+    if (server.build_date || server.git_sha) str += '<div>빌드 <strong>' + (server.build_date ? String(server.build_date).substring(0, 10) : '-') + '</strong>' + (server.git_sha ? ' <span style="color:#888">(<span style="font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px">' + String(server.git_sha).substring(0, 8) + '</span>)</span>' : '') + '</div>';
     var compDefs = [['postgres', 'DB'], ['redis', '캐시'], ['meilisearch', '검색']];
     var chips = [];
     for (var ci = 0; ci < compDefs.length; ci++) {
@@ -190,10 +251,17 @@ function renderServer(server, storage) {
     }
     str += '</div>';
   }
+  str += '</div>';
+  if (storage) {
+    str += '<div style="' + cardStyle + '; flex:1 1 0; min-width:300px">';
+    str += '<div style="font-size:14px; margin-bottom:8px"><strong>' + smIcon('hdd') + '데이터 용량</strong>' + (storage.disk_total ? ' <strong style="font-size:13px">' + (storage.data_size ? fmtBytes(storage.data_size) : '계산 중') + '</strong>' : '') + '</div>';
+  }
   if (storage && storage.disk_total) {
     var pct = Math.round(storage.disk_used / storage.disk_total * 100);
-    str += '<div style="font-size:13px; line-height:1.9; margin-top:6px; border-top:1px solid #eee; padding-top:8px">';
-    str += '<div>데이터 용량 <strong>' + (storage.data_size ? fmtBytes(storage.data_size) : '계산 중') + '</strong></div>';
+    str += '<div style="font-size:13px; line-height:1.9">';
+    // 디스크 전체 사용량은 제목 바로 아래에 먼저 보여 준다 (큰 그림 -> 세부 구성 순서)
+    str += '<div>디스크 <strong>' + fmtBytes(storage.disk_used) + ' / ' + fmtBytes(storage.disk_total) + '</strong> <span style="color:#888">(여유 ' + fmtBytes(storage.disk_free) + ')</span></div>';
+    str += '<div style="background:#eee; border-radius:3px; height:6px; margin:4px 0 10px"><div style="background:' + (pct >= 90 ? '#c0392b' : '#2b6cb0') + '; height:6px; border-radius:3px; width:' + pct + '%"></div></div>';
     if (storage.breakdown && storage.breakdown.length && storage.data_size) {
       var BAR_COLORS = {'데이터베이스': '#2b6cb0', '검색 인덱스': '#38a169', '캐시': '#dd6b20', '기타': '#a0aec0'};
       str += '<div style="display:flex; height:10px; border-radius:3px; overflow:hidden; margin:4px 0 6px">';
@@ -209,12 +277,11 @@ function renderServer(server, storage) {
         str += '<div style="font-size:12px; color:#666"><span style="display:inline-block; width:9px; height:9px; border-radius:2px; background:' + (BAR_COLORS[it.label] || '#718096') + '; margin-right:6px"></span>' + it.label + ' <strong>' + fmtBytes(it.bytes) + '</strong> (' + ipct + '%)</div>';
       }
     }
-    str += '<div>디스크 <strong>' + fmtBytes(storage.disk_used) + ' / ' + fmtBytes(storage.disk_total) + '</strong> <span style="color:#888">(여유 ' + fmtBytes(storage.disk_free) + ')</span></div>';
-    str += '<div style="background:#eee; border-radius:3px; height:6px; margin-top:4px"><div style="background:' + (pct >= 90 ? '#c0392b' : '#2b6cb0') + '; height:6px; border-radius:3px; width:' + pct + '%"></div></div>';
     str += '</div>';
   } else if (storage) {
-    str += '<div style="font-size:12px; color:#888; margin-top:6px; border-top:1px solid #eee; padding-top:8px">데이터 폴더를 찾지 못했습니다. 기본 설정에서 shyni 데이터 폴더를 확인해 주세요.</div>';
+    str += '<div style="font-size:12px; color:#888">데이터 폴더를 찾지 못했습니다. 기본 설정에서 shyni 데이터 폴더를 확인해 주세요.</div>';
   }
+  if (storage) str += '</div>';
   str += '</div>';
   $('#server_card_div').html(str);
 }
@@ -227,6 +294,8 @@ function stateLineHtml(st) {
   if (vt) statusEntries.push({t: (st.vfs.finished_at || st.vfs.started_at || ''), status: st.vfs.status, txt: vt});
   var ct = jobText(st.scan, '스캔', '샤이니 job id');
   if (ct) statusEntries.push({t: (st.scan.finished_at || st.scan.started_at || ''), status: st.scan.status, txt: ct});
+  var tt = jobText(st.trash, '휴지통 비우기', '');
+  if (tt) statusEntries.push({t: (st.trash.finished_at || st.trash.started_at || ''), status: st.trash.status, txt: tt});
   if (st.meta) {
     var mt = st.meta;
     var mtTxt = '';
@@ -255,7 +324,7 @@ function stateLineHtml(st) {
   }).join(' <span style="color:#ccc">·</span> ');
 }
 
-// 라이브러리 정보 옆 (N초 전) — 정보를 마지막으로 불러온 시각 기준
+// 항목 수 줄 오른쪽 끝 (N초 전) — 정보를 마지막으로 불러온 시각 기준
 var infoUpdatedAt = null;
 function markInfoUpdated() { infoUpdatedAt = Date.now(); paintInfoAgo(); }
 function paintInfoAgo() {
@@ -274,6 +343,7 @@ function pollStates() {
   var keys = window.__stateKeys || [];
   if (!keys.length) return;
   $.ajax({
+    global: false,
     type: 'POST', url: API_BASE + 'states', data: {keys: keys.join(',')}, timeout: 20000,
     success: function (r) {
       if (!r || r.ret != 'success' || !r.states) return;
@@ -281,10 +351,11 @@ function pollStates() {
       for (var k in r.states) {
         var st = r.states[k] || {};
         var el = $('#state-' + k);
-        if (el.length) el.html(stateLineHtml(st));
+        if (el.length) { var sh = stateLineHtml(st); el.html(sh); var wrap = $('#statewrap-' + k); if (wrap.length) wrap.toggle(sh !== ''); }
         if ((st.vfs && st.vfs.status == 'running') ||
             (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) ||
-            (st.meta && st.meta.status == 'running')) anyRunning = true;
+            (st.meta && st.meta.status == 'running') ||
+            (st.trash && st.trash.status == 'running')) anyRunning = true;
       }
       // 화면이 모르는 사이에 시작된 작업이 있으면 전체를 한 번 다시 불러 버튼 상태까지 맞춘다
       if (anyRunning && !stateKnownRunning) { stateKnownRunning = true; load_list(false, true); }
@@ -293,36 +364,115 @@ function pollStates() {
   });
 }
 
+var statusLibSort = "{{ arg['status_lib_sort'] or 'default' }}";
+if (['default', 'name', 'nometa', 'media', 'trash'].indexOf(statusLibSort) < 0) statusLibSort = 'default';
+$('#status_lib_sort').val(statusLibSort);  // 저장된 정렬을 선택 칸에도 표시 (없으면 '기본'으로 보여 저장이 안 된 것처럼 보였다)
+var lastStatusArgs = null;
+function statusMainCount(s) { var d = s.db_stats || {}; return d.main_count != null ? d.main_count : (d.albums || 0); }
+function statusNoMeta(s) { var d = s.db_stats || {}; return d.no_meta != null ? d.no_meta : (d.no_code || 0); }
+function statusTrash(s) { var d = s.db_stats || {}; return d.trash || 0; }
+function sortedStatusLibs(data) {
+  // 라이브러리 카드 정렬 — 건강도와 같은 방식, 서버에 다시 묻지 않고 받은 데이터 안에서 즉시 재정렬한다
+  var libs = (data || []).slice();
+  if (statusLibSort == 'name') libs.sort(function(a, b) { return String(a.title || '').localeCompare(String(b.title || ''), 'ko'); });
+  else if (statusLibSort == 'nometa') libs.sort(function(a, b) { return statusNoMeta(b) - statusNoMeta(a); });
+  else if (statusLibSort == 'media') libs.sort(function(a, b) { return statusMainCount(b) - statusMainCount(a); });
+  else if (statusLibSort == 'trash') libs.sort(function(a, b) { return statusTrash(b) - statusTrash(a); });
+  return libs;
+}
+function setStatusLibSort(v) {
+  statusLibSort = v;
+  $.ajax({type: 'POST', url: API_BASE + 'set_lib_sort', data: {which: 'list', value: v}, global: false});
+  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2]);
+}
+
+// 라이브러리 표시 선택 — 사용자가 고른 숨김 목록은 서버 설정에 기억해
+// 대시보드 화면만의 목록을 서버 설정에 기억한다. 기본은 전체 표시.
+var statusHiddenLibs = {};
+String("{{ arg['status_hidden_libs'] or '' }}").split(',').forEach(function (x) { x = x.trim(); if (x) statusHiddenLibs[x] = true; });
+var statusShowSig = '';
+function smEscT(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+function saveHiddenLibs() {
+  var keys = Object.keys(statusHiddenLibs).filter(function (k) { return statusHiddenLibs[k]; }).join(',');
+  $.ajax({type: 'POST', url: API_BASE + 'set_hidden_libs', data: {keys: keys, which: 'list'}, global: false});
+}
+function paintShowBtn(libs) {
+  var hidden = 0;
+  libs.forEach(function (s) { if (statusHiddenLibs[String(s.key)]) hidden++; });
+  $('#lib_show_btn').text(hidden == 0 ? '전체 ▾' : '일부 (' + (libs.length - hidden) + '/' + libs.length + ') ▾');
+  $('#lib_show_all').prop('checked', hidden == 0);
+}
+function buildShowPanel(libs) {
+  var sig = libs.map(function (s) { return s.key; }).join(',');
+  if (sig != statusShowSig) {
+    statusShowSig = sig;
+    var str = '';
+    libs.forEach(function (s) {
+      str += '<label class="lib-show-row" data-title="' + smEscT(s.title) + '" style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:normal; padding:3px 2px; margin:0; cursor:pointer"><input type="checkbox" class="lib-show-chk" data-key="' + s.key + '"' + (statusHiddenLibs[String(s.key)] ? '' : ' checked') + '> ' + smEscT(s.title) + '</label>';
+    });
+    $('#lib_show_rows').html(str);
+  }
+  paintShowBtn(libs);
+}
+$("body").on('click', '#lib_show_btn', function (e) {
+  e.stopPropagation();
+  $('#lib_show_panel').toggle();
+});
+$(document).on('click', function (e) {
+  if (!$(e.target).closest('#lib_show_panel, #lib_show_btn').length) $('#lib_show_panel').hide();
+});
+$("body").on('change', '.lib-show-chk', function () {
+  var k = String($(this).data('key'));
+  if (this.checked) delete statusHiddenLibs[k]; else statusHiddenLibs[k] = true;
+  saveHiddenLibs();
+  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2]);
+});
+$("body").on('change', '#lib_show_all', function () {
+  var show = this.checked;
+  (lastStatusArgs ? lastStatusArgs[0] : []).forEach(function (s) {
+    if (show) delete statusHiddenLibs[String(s.key)]; else statusHiddenLibs[String(s.key)] = true;
+  });
+  $('.lib-show-chk').prop('checked', show);
+  saveHiddenLibs();
+  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2]);
+});
+$("body").on('input', '#lib_show_search', function () {
+  var q = $(this).val().toLowerCase();
+  $('.lib-show-row').each(function () { $(this).toggle(!q || $(this).data('title').toLowerCase().indexOf(q) >= 0); });
+});
+
 function render(data, logFiles, periodicCurrent) {
+  lastStatusArgs = [data, logFiles, periodicCurrent];
   window.__stateKeys = (data || []).map(function (x) { return x.key; });
   stateKnownRunning = (data || []).some(function (x) { var t = x.state || {}; return (t.vfs && t.vfs.status == 'running') || (t.scan && (t.scan.status == 'running' || t.scan.status == 'requested')) || (t.meta && t.meta.status == 'running'); });
   $('#logwarn_div').toggle(logFiles === 0);
+  buildShowPanel(data || []);
   var str = '';
-  for (var i in data) {
-    var s = data[i];
+  var sortedData = sortedStatusLibs(data).filter(function (s) { return !statusHiddenLibs[String(s.key)]; });
+  if ((data || []).length && !sortedData.length) str += '<div style="color:#888; font-size:13px; padding:14px 4px">표시할 라이브러리가 없습니다. 위쪽 표시에서 라이브러리를 선택해 주세요.</div>';
+  for (var i in sortedData) {
+    var s = sortedData[i];
     var st = s.state || {};
     var hl = periodicCurrent && String(periodicCurrent.section_key) === String(s.key);
-    var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || hl;
+    var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || (st.trash && st.trash.status == 'running') || hl;
     var ls = s.last_scan;
-    var lastScan = '-';
-    if (ls) lastScan = ls.time_text + (ls.result == 'failed' ? ' (실패)' : '');
-    else if (st.scan) lastScan = fmt(st.scan.finished_at || st.scan.started_at);
 
     str += '<div style="border:' + (running ? '2px solid #2b6cb0' : '1px solid #ddd') + '; border-radius:6px; padding:10px 14px; margin-bottom:10px; background:' + (running ? '#ebf4ff' : '#fff') + '; display:flex; flex-wrap:wrap; gap:10px 14px">';
     // 왼쪽 컬럼: 이름·상태 / 경로 / 수치 — 오른쪽 컬럼: 버튼 (좁으면 아래로 감싼다)
     str += '<div style="flex:1 1 500px; min-width:0">';
     // 1줄: 이름 + 상태
     var CARD_TYPE_LABELS = {'movie': '영화', 'show': '쇼', 'artist': '음악', 'book': '도서', 'photo': '사진'};
-    str += '<div>' + (CARD_TYPE_LABELS[s.type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + CARD_TYPE_LABELS[s.type] + '</span>' : '') + '<strong style="font-size:16px">' + s.title + '</strong>';
+    str += '<div>' + (CARD_TYPE_ICONS[s.type] ? smIcon(CARD_TYPE_ICONS[s.type], null, 18) : '') + (CARD_TYPE_LABELS[s.type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + CARD_TYPE_LABELS[s.type] + '</span>' : '') + '<strong style="font-size:16px">' + s.title + '</strong>';
     if (hl) {
       var stageTxt = periodicCurrent.stage == 'vfs' ? '새로고침 중' : '스캔 중';
       str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">주기적 스캔 진행 중 · ' + stageTxt + '</span>';
     }
-    str += ' <span id="state-' + s.key + '" style="font-size:12px">' + stateLineHtml(st) + '</span>';
     str += '</div>';
-    // 2줄: 경로 (한 줄 전체 폭)
-    str += '<div style="font-size:12px; color:#666; word-break:break-all; margin-top:3px">' + s.path + '</div>';
-    // 3줄: 스캔 기록(파일수·신규·missing)과 마지막 스캔(missing 바로 옆) — 기록이 없으면 안내 문구만
+    var stateHtml0 = stateLineHtml(st);
+    str += '<div id="statewrap-' + s.key + '" style="font-size:12px; margin-top:4px' + (stateHtml0 ? '' : '; display:none') + '"><span style="color:#8a94a6; font-weight:bold; font-size:11.5px; margin-right:6px">최근 작업</span><span id="state-' + s.key + '">' + stateHtml0 + '</span></div>';
+    // 2줄: 폴더 라벨 + 경로 (한 줄 전체 폭)
+    str += '<div style="font-size:12px; color:#666; word-break:break-all; margin-top:3px"><span style="color:#8a94a6; font-weight:bold; font-size:11.5px; margin-right:6px">폴더</span>' + s.path + '</div>';
+    // 3줄: 스캔 기록(파일수·신규·missing) — 기록이 없으면 안내 문구만
     str += '<div style="font-size:13px; margin-top:7px; display:flex; flex-wrap:wrap; gap:6px 22px">';
     if (ls && ls.result == 'done') {
       str += '<span>파일수 <strong>' + fmtNum(ls.total) + '</strong></span>';
@@ -331,7 +481,6 @@ function render(data, logFiles, periodicCurrent) {
     } else {
       str += '<span style="font-size:12px; color:#888">스캔 후 내용이 반영됩니다</span>';
     }
-    if (lastScan != '-') str += '<span style="white-space:nowrap">마지막 스캔 <strong>' + lastScan + '</strong></span>';
     str += '</div>';
     // 4줄: 앨범·트랙·메타 없음·휴지통 — 모든 카드에서 같은 열 위치, 좁은 화면에서는 2x2
     var statsCols = (s.db_stats && s.db_stats.file_count != null) ? '104px 118px 100px 112px 1fr' : '112px 118px 112px 1fr';
@@ -343,19 +492,19 @@ function render(data, logFiles, periodicCurrent) {
     } else {
       str += '<span style="grid-column:span 3"></span>';
     }
-    str += '<span style="white-space:nowrap">휴지통 <strong>' + (s.db_stats && s.db_stats.trash != null ? fmtNum(s.db_stats.trash) : '-') + '</strong></span>';
+    str += '<span id="dbtrash-' + s.key + '" style="white-space:nowrap">' + trashCountHtml(s.db_stats) + '</span>';
     str += '</div>';
     str += '</div>';
     // 오른쪽 컬럼: 왼쪽 2열(새로고침·메타 새로고침 / 스캔·새로고침 후 스캔), 오른쪽 취소(세로로 길게)
-    str += '<div style="display:flex; gap:4px; align-self:center; flex-shrink:0; max-width:100%">';
-    str += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:4px">';
+    str += '<div style="display:grid; grid-template-columns:auto 46px 46px; gap:6px; align-items:stretch; align-self:center; flex-shrink:0; max-width:100%">';
+    str += '<div style="display:grid; grid-template-columns:1fr 1.2fr; gap:6px">';
     str += '<button type="button" class="btn btn-outline-primary status-act" data-key="' + s.key + '" data-act="vfs_refresh"' + (running ? ' disabled' : '') + '>새로고침</button>';
     str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? (s.db_stats.main_count != null ? s.db_stats.main_count : s.db_stats.albums) : '') + '" data-mainlabel="' + (s.db_stats ? (s.db_stats.main_label || '') : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '" data-folder="' + (s.db_stats && s.db_stats.is_folder ? '1' : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="scan"' + (running ? ' disabled' : '') + '>스캔</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="vfs_scan" style="white-space:nowrap"' + (running ? ' disabled' : '') + '>새로고침 후 스캔</button>';
     str += '</div>';
-    str += '<button type="button" class="btn btn-outline-danger status-act" data-key="' + s.key + '" data-act="trash_empty" data-title="' + s.title + '" data-trash="' + (s.db_stats ? (s.db_stats.trash || 0) : 0) + '" style="display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.35"' + ((running || !(s.db_stats && s.db_stats.trash > 0)) ? ' disabled' : '') + '>휴지통<br>비우기</button>';
-    str += '<button type="button" class="btn btn-outline-danger status-act" data-key="' + s.key + '" data-act="cancel" style="display:flex; align-items:center; justify-content:center"' + (running ? '' : ' disabled') + '>취소</button>';
+    str += '<button type="button" class="btn btn-outline-danger status-act status-side" data-key="' + s.key + '" data-act="cancel" style="display:flex; align-items:center; justify-content:center"' + (running ? '' : ' disabled') + '>취소</button>';
+    str += '<button type="button" class="btn btn-outline-danger status-act status-side" data-key="' + s.key + '" data-act="trash_empty" data-title="' + s.title + '" data-trash="' + (s.db_stats ? (s.db_stats.trash || 0) : 0) + '" style="display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.35"' + ((running || !(s.db_stats && s.db_stats.trash > 0)) ? ' disabled' : '') + '>휴지통</button>';
     str += '</div>';
     str += '</div>';
   }
@@ -371,8 +520,16 @@ function dbStatsHtml(st) {
   var html = '<span>' + mainLabel + ' <strong>' + fmtNum(mainCount) + '</strong></span>'
     + '<span>' + subLabel + ' <strong>' + fmtNum(subCount) + '</strong></span>';
   if (st.file_count != null) html += '<span>파일 <strong>' + fmtNum(st.file_count) + '</strong></span>';
-  html += '<span>' + (st.is_folder ? '표지 없음' : '메타 없음') + ' <strong>' + fmtNum(st.no_meta != null ? st.no_meta : st.no_code) + '</strong></span>';
+  var noMeta = (st.no_meta != null ? st.no_meta : st.no_code);
+  // 메타 없음은 0보다 클 때만 진한 주황으로 — 건강도 상세 카드와 같은 색
+  html += '<span>' + (st.is_folder ? '표지 없음' : '메타 없음') + ' <strong' + (noMeta > 0 ? ' style="color:#c05621"' : '') + '>' + fmtNum(noMeta) + '</strong></span>';
   return html;
+}
+
+// 휴지통 수는 0보다 클 때만 빨강으로 — 건강도와 같은 색
+function trashCountHtml(st) {
+  if (!st || st.trash == null) return '휴지통 <strong>-</strong>';
+  return '휴지통 <strong' + (st.trash > 0 ? ' style="color:#dc3545"' : '') + '>' + fmtNum(st.trash) + '</strong>';
 }
 
 var progressActive = true;
@@ -389,10 +546,19 @@ function fmtElapsed(ms) {
 var progressValue = 0;
 var progressTimer = null;
 var progressDoneOnce = false;
+// 단계 표시는 서버가 보고한 진행률(progressStepValue) 기준이다 —
+// 막대 %는 표시용으로 천천히 따라 올라가도 단계는 실제 계산 위치를 따른다
+var progressStepValue = 0;
+function statusStepText(p) {
+  if (p < 15) return '휴지통 개수 읽는 중';
+  if (p < 80) return '라이브러리 정보 읽는 중';
+  if (p < 90) return '전체 통계 묶는 중';
+  return '결과 저장 중';
+}
 function paintProgress() {
   $('#load_progress_wrap').show();
   $('#load_progress_bar').css('width', progressValue + '%');
-  $('#load_progress_text').text('불러오는 중… ' + progressValue + '%');
+  $('#load_progress_text').text(statusStepText(progressStepValue) + '… ' + progressValue + '%');
 }
 function startProgressCreep(cap) {
   if (progressTimer) clearInterval(progressTimer);
@@ -408,7 +574,9 @@ function stopProgressCreep() {
 }
 function setProgress(p) {
   if (p === null || p === undefined) return;
+  progressStepValue = p;
   if (p > progressValue) { progressValue = p; paintProgress(); }
+  else paintProgress();
 }
 function finishProgress(ret) {
   stopProgressCreep();
@@ -416,7 +584,7 @@ function finishProgress(ret) {
   $('#load_progress_wrap').show();
   $('#load_progress_bar').css('width', '100%');
   var el = loadStartAt ? fmtElapsed(Date.now() - loadStartAt) : '';
-  var txt = '불러오기 완료 · 100%' + (el ? ' · 소요시간 ' + el : '');
+  var txt = '불러오기 완료' + (el ? ' · 소요시간 ' + el : '');
   if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + ' 기준';
   $('#load_progress_text').text(txt);
   progressDoneOnce = true;
@@ -435,6 +603,7 @@ function startDbPoll() {
     dbPollCount++;
     if (dbPollCount > 60) { stopDbPoll(); return; }
     $.ajax({
+      global: false,
       type: 'POST', url: API_BASE + 'db_stats', data: {}, timeout: 30000,
       success: function (r) {
         if (!r || r.ret != 'success') return;
@@ -445,10 +614,12 @@ function startDbPoll() {
             for (var k in r.libs) {
               var el = $('#dbstats-' + k);
               if (el.length) el.replaceWith(dbStatsHtml(r.libs[k]));
+              var tel = $('#dbtrash-' + k);
+              if (tel.length) tel.html(trashCountHtml(r.libs[k]));
             }
           }
           markInfoUpdated();
-          $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
+          $('#status_foot_comment').text('파일수·신규·missing은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
           finishProgress();
           progressActive = false;
         } else if (r.db_off) {
@@ -505,35 +676,71 @@ function runScanConfirm() {
   closeScanConfirm();
   if (key === null || key === undefined || !act) return;
   $.ajax({
+    global: false,
     type: 'POST',
     url: API_BASE + act,
     data: {key: key},
-    success: function (ret) { showMsg(ret); load_list(true); },
-    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+    success: function (ret) { showMsg(ret); load_list(false, true); },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(false, true); }
+  });
+}
+var refreshConfirmKey = null;
+function openRefreshConfirm(btn) {
+  refreshConfirmKey = btn.data('key');
+  $('#refresh_confirm_title').text(btn.text());
+  $('#refresh_confirm_modal').show();
+}
+function closeRefreshConfirm() {
+  $('#refresh_confirm_modal').hide();
+  refreshConfirmKey = null;
+}
+function runRefreshConfirm() {
+  var key = refreshConfirmKey;
+  closeRefreshConfirm();
+  if (key === null || key === undefined) return;
+  $.ajax({
+    global: false,
+    type: 'POST',
+    url: API_BASE + 'vfs_refresh',
+    data: {key: key},
+    success: function (ret) { showMsg(ret); load_list(false, true); },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(false, true); }
   });
 }
 var trashConfirmKey = null;
+var trashConfirmTitle = '';
+var trashConfirmCount = 0;
 function openTrashConfirm(btn) {
   trashConfirmKey = btn.data('key');
-  var title = btn.data('title') || '';
-  var cnt = btn.data('trash') || 0;
-  $('#trash_confirm_body').text(title + ' 휴지통에 있는 파일 ' + fmtNum(cnt) + '개를 완전히 삭제합니다. 되돌릴 수 없습니다.');
+  trashConfirmTitle = btn.data('title') || '';
+  trashConfirmCount = btn.data('trash') || 0;
+  $('#trash_confirm_body').text(trashConfirmTitle + ' 휴지통에 파일 ' + fmtNum(trashConfirmCount) + '개가 있습니다.');
+  $('#trash_step1').show();
+  $('#trash_step2').hide();
   $('#trash_confirm_modal').show();
 }
 function closeTrashConfirm() {
   $('#trash_confirm_modal').hide();
   trashConfirmKey = null;
 }
-function runTrashConfirm() {
+function trashModeNote() {
+  var mode = $('input[name=trash_mode]:checked').val();
+  if (mode == 'empty') return '휴지통에 있는 파일 ' + fmtNum(trashConfirmCount) + '개를 완전히 삭제합니다. 되돌릴 수 없습니다.';
+  if (mode == 'refresh_scan_empty') return '새로고침과 스캔이 끝난 뒤, 휴지통에 있는 파일을 완전히 삭제합니다. 스캔 결과에 따라 개수가 달라질 수 있습니다.';
+  return '고른 작업만 실행하고 휴지통은 비우지 않습니다.';
+}
+function runTrashAction() {
   var key = trashConfirmKey;
+  var mode = $('input[name=trash_mode]:checked').val() || 'empty';
   closeTrashConfirm();
   if (key === null || key === undefined) return;
   $.ajax({
+    global: false,
     type: 'POST',
-    url: API_BASE + 'trash_empty',
-    data: {key: key},
-    success: function (ret) { showMsg(ret); load_list(true); },
-    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+    url: API_BASE + 'trash_action',
+    data: {key: key, mode: mode},
+    success: function (ret) { showMsg(ret); load_list(false, true); },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(false, true); }
   });
 }
 
@@ -542,11 +749,12 @@ function runMetaChoice(scope) {
   closeMetaChoice();
   if (key === null || key === undefined) return;
   $.ajax({
+    global: false,
     type: 'POST',
     url: API_BASE + 'meta_refresh',
     data: {key: key, scope: scope},
-    success: function (ret) { showMsg(ret); load_list(true); },
-    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+    success: function (ret) { showMsg(ret); load_list(false, true); },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(false, true); }
   });
 }
 
@@ -559,7 +767,8 @@ function scheduleStatePoll(data) {
     var st = s.state || {};
     if ((st.vfs && st.vfs.status == 'running') ||
         (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) ||
-        (st.meta && st.meta.status == 'running')) active = true;
+        (st.meta && st.meta.status == 'running') ||
+        (st.trash && st.trash.status == 'running')) active = true;
   });
   if (active) statePollTimer = setTimeout(function () { load_list(false, true); }, 20000);
 }
@@ -568,9 +777,10 @@ function load_list(force, quiet) {
   if (!dbPollTimer) loadStartAt = Date.now();
   if (!quiet) {
     $('#load_progress_wrap').show();
-    if ((force || !progressDoneOnce) && !progressTimer) { progressValue = 0; paintProgress(); startProgressCreep(40); }
+    if ((force || !progressDoneOnce) && !progressTimer) { progressValue = 0; progressStepValue = 0; paintProgress(); startProgressCreep(40); }
   }
   $.ajax({
+    global: false,
     type: 'POST',
     url: API_BASE + 'list',
     data: force ? {force: '1'} : {},
@@ -583,8 +793,8 @@ function load_list(force, quiet) {
           $('#load_progress_wrap').hide();
           $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide, #logwarn_div').hide();
           $('#server_card_div').html('');
-          $('#type_counts_div').html('');
-          $('#status_list_div').html('<div style="padding:24px 4px; color:#888">현황을 보기 위해 설정에서 정보를 입력해 주세요.</div>');
+          $('#type_counts_txt').html('');
+          $('#status_list_div').html('<div style="padding:24px 4px; color:#888">대시보드를 보기 위해 설정에서 정보를 입력해 주세요.</div>');
           if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
             applyRefreshUI(ret.refresh_min);
             setupTimer(ret.refresh_min);
@@ -594,7 +804,7 @@ function load_list(force, quiet) {
         hasData = true;
         $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
-        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing·마지막 스캔은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
+        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
         render(ret.data, ret.log_files, ret.periodic_current);
         markInfoUpdated();
         scheduleStatePoll(ret.data);
@@ -619,7 +829,7 @@ function load_list(force, quiet) {
       else if (!hasData) $('#status_list_div').html('<div style="color:red">' + ret.msg + '</div>');
     },
     error: function () {
-      if (!hasData) $('#status_list_div').html('<div style="color:red">현황을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</div>');
+      if (!hasData) $('#status_list_div').html('<div style="color:red">대시보드를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</div>');
     }
   });
 }
@@ -653,6 +863,7 @@ $(document).ready(function () {
       if (isNaN(v) || v < 1 || v > 120) { showMsg({ret: 'fail', msg: '1~120 사이의 분 값을 입력해 주세요.'}); return; }
     }
     $.ajax({
+      global: false,
       type: 'POST',
       url: API_BASE + 'set_refresh',
       data: {min: v},
@@ -669,6 +880,10 @@ $(document).ready(function () {
       openMetaChoice(btn);
       return;
     }
+    if (btn.data('act') == 'vfs_refresh') {
+      openRefreshConfirm(btn);
+      return;
+    }
     if (btn.data('act') == 'vfs_scan' || btn.data('act') == 'scan') {
       openScanConfirm(btn);
       return;
@@ -679,11 +894,12 @@ $(document).ready(function () {
     }
     btn.prop('disabled', true);
     $.ajax({
+      global: false,
       type: 'POST',
       url: API_BASE + btn.data('act'),
       data: {key: btn.data('key')},
-      success: function (ret) { showMsg(ret); load_list(true); },
-      error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(true); }
+      success: function (ret) { showMsg(ret); load_list(false, true); },
+      error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(false, true); }
     });
   });
   $('#meta_all_btn').on('click', function () { runMetaChoice('all'); });
@@ -693,7 +909,28 @@ $(document).ready(function () {
   $('#scan_start_btn').on('click', function () { runScanConfirm(); });
   $('#scan_back_btn').on('click', function () { closeScanConfirm(); });
   $('#scan_confirm_modal').on('click', function (e) { if (e.target === this) closeScanConfirm(); });
-  $('#trash_empty_btn').on('click', function () { runTrashConfirm(); });
+  $('#refresh_start_btn').on('click', function () { runRefreshConfirm(); });
+  $('#refresh_back_btn').on('click', function () { closeRefreshConfirm(); });
+  $('#refresh_confirm_modal').on('click', function (e) { if (e.target === this) closeRefreshConfirm(); });
+  $('#trash_goto_empty_btn').on('click', function () {
+    $('#trash_confirm_body').text(trashConfirmTitle + ' — 실행할 동작을 고르세요.');
+    $('#trash_step1').hide();
+    $('#trash_step2').show();
+    $('#trash_mode_note').text(trashModeNote());
+  });
+  $('input[name=trash_mode]').on('change', function () { $('#trash_mode_note').text(trashModeNote()); });
+  $('#trash_goto_detail_btn').on('click', function () {
+    var key = trashConfirmKey;
+    closeTrashConfirm();
+    if (key === null || key === undefined) return;
+    location.href = '/' + location.pathname.split('/')[1] + '/scan/trash?key=' + key;
+  });
+  $('#trash_run_btn').on('click', function () { runTrashAction(); });
+  $('#trash_step2_back_btn').on('click', function () {
+    $('#trash_confirm_body').text(trashConfirmTitle + ' 휴지통에 파일 ' + fmtNum(trashConfirmCount) + '개가 있습니다.');
+    $('#trash_step2').hide();
+    $('#trash_step1').show();
+  });
   $('#trash_back_btn').on('click', function () { closeTrashConfirm(); });
   $('#trash_confirm_modal').on('click', function (e) { if (e.target === this) closeTrashConfirm(); });
 });

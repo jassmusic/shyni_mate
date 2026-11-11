@@ -80,3 +80,30 @@ class ModelPeriodicItem(ModelBase):
                     'message': r.message or '',
                 })
             return out
+
+    @classmethod
+    def get_page(cls, page=1, per=30):
+        with F.app.app_context():
+            total = F.db.session.query(cls).count()
+            pages = max(1, (total + per - 1) // per)
+            try:
+                page = int(page or 1)
+            except Exception:
+                page = 1
+            page = min(max(1, page), pages)
+            rows = (F.db.session.query(cls).order_by(desc(cls.id))
+                    .offset((page - 1) * per).limit(per).all())
+            out = []
+            for r in rows:
+                out.append({
+                    'id': r.id,
+                    'mode': r.mode,
+                    'status': r.status,
+                    'job_name': r.job_name,
+                    'section_title': r.section_title,
+                    'start_time': r.start_time.strftime('%m-%d %H:%M:%S') if r.start_time else '',
+                    'finish_time': r.finish_time.strftime('%m-%d %H:%M:%S') if r.finish_time else '',
+                    'duration': r.duration,
+                    'message': r.message or '',
+                })
+            return {'list': out, 'count': total, 'page': page, 'pages': pages}

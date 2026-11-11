@@ -94,6 +94,7 @@ class TaskPeriodic:
             logger.error(f'주기적 스캔: 섹션 조회 실패 — {err}')
             return
         sec_map = {str(s['key']): s for s in sections}
+        any_scan_done = False
         job_started = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         logger.info(f"주기적 스캔 시작: {job.get('name')} ({mode})")
         for key in job.get('sections') or []:
@@ -103,11 +104,19 @@ class TaskPeriodic:
             sec = sec_map.get(str(key))
             if sec is None:
                 continue
-            TaskPeriodic._run_section(job, idx, sec, mode, job_started)
+            if TaskPeriodic._run_section(job, idx, sec, mode, job_started):
+                any_scan_done = True
             if _cancel_requested():
                 break
         _set_current(None)
         P.ModelSetting.set(CANCEL_KEY, '')
+        if any_scan_done:
+            # 스캔으로 통계가 바뀌었을 수 있어 현황 통계 재계산을 요청한다
+            try:
+                from .task_status import request_stats
+                request_stats()
+            except Exception:
+                pass
         logger.info(f"주기적 스캔 종료: {job.get('name')}")
 
     @staticmethod
@@ -146,6 +155,19 @@ class TaskPeriodic:
                 item.finish('cancelled', msg)
             elif done:
                 item.finish('done', msg)
+                # 스캔으로 휴지통 구성이 바뀌었을 수 있어 상세 캐시를 지우고
+                # 개수 캐시는 '오래됨'으로 표시한다 (현황 수동 스캔과 같은 기준)
+                try:
+                    from .task_trash_view import clear_cache
+                    clear_cache(key)
+                except Exception:
+                    pass
+                try:
+                    from .task_status import mark_trash_counts_stale
+                    mark_trash_counts_stale()
+                except Exception:
+                    pass
+                return True
             else:
                 item.finish('failed', msg)
         except Exception as e:

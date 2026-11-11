@@ -29,12 +29,14 @@
             <option value="ASSEMBLING">ffprobe 대기 중</option>
             <option value="QUEUED">스캔 대기 중</option>
             <option value="SCANNING">진행중</option>
+            <option value="ANALYZING">분석중</option>
             <option value="FINISH_SHYNI">완료</option>
             <option value="ALREADY_IN_DB">이미 반영됨</option>
             <option value="FINISH_SHYNI_FAILED">실패</option>
             <option value="NOT_FIND_LIBRARY">라이브러리 없음</option>
             <option value="NOT_FIND_IN_LIBRARY">항목 없음</option>
             <option value="FAILED">job 실패</option>
+            <option value="ANALYZE_TIMEOUT">분석시간 초과</option>
           </select>
         </div>
       </span>
@@ -51,6 +53,7 @@
 <div style="padding:4px 2px">
   <style>
   .scan-act { padding:1px 8px !important; font-size:12px !important; line-height:1.5 !important; }
+  #scanSummaryRefreshBtn { padding:1px 8px !important; font-size:11px !important; line-height:1.4 !important; }
   #scan_summary_div strong { color:#444; }
   </style>
   <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center">
@@ -61,8 +64,16 @@
     <button type="button" class="btn btn-sm btn-outline-primary scan-act" id="metaRefreshSelectedBtn">선택 항목 메타 새로고침</button>
   </div>
   <div style="font-size:11.5px; color:#888; margin-top:3px">클릭하면 선택 항목에 대해 수행합니다. 실행 중인 항목은 건너뜁니다.</div>
-  <div id="scan_summary_div" style="font-size:13px; color:#888; margin-top:5px"></div>
+  <div style="display:flex; align-items:center; gap:6px; margin-top:5px">
+    <div id="scan_summary_div" style="font-size:13px; color:#888; flex:1; min-width:0"></div>
+    <button type="button" class="btn btn-sm btn-outline-secondary scan-act" id="scanSummaryRefreshBtn" style="flex:0 0 auto">새로고침</button>
+  </div>
+  <div id="scan_scanning_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
+  <div id="scan_analyzing_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
+  <div id="scan_queued_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
   <div id="scan_hold_notice" style="display:none; font-size:12.5px; color:#b7791f; margin-top:3px"></div>
+  <div style="margin-top:3px; font-size:13px; color:#888"><span id="scan_filter_count_div" style="display:none; cursor:pointer" title="누르면 필터를 풀고 처음 화면으로 돌아갑니다"></span><span id="scan_recent_wrap" style="display:none"> · <a href="#" id="scan_recent_toggle" style="color:inherit">최근 완료 <strong id="scan_recent_count"></strong> <span class="rcn-arrow">▾</span></a></span></div>
+  <div id="scan_recent_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
 </div>
 {{ macros.m_hr_head_top() }}
 {{ macros.m_row_start('0') }}
@@ -76,6 +87,29 @@
 <script type="text/javascript">
 var last_list_option = "{{arg['scan_item_last_list_option']}}";
 var shyni_url = "{{arg['base_shyni_url']}}";
+var analyze_wait_min = parseInt("{{arg['scan_analyze_wait_min'] or '5'}}", 10);
+if (isNaN(analyze_wait_min)) analyze_wait_min = 0;
+
+// 분석중 판정 — 서버 분류(ModelScanItem.analyze_overdue_condition)와 같은 기준:
+// job 시작(shyni_started_at, 없으면 전송 시각) 후 analyze 대기 시간 이상 경과.
+// REFRESH 등록 대기는 제외하고, 설정이 0이면 분석중은 없다.
+function isAnalyzing(d) {
+  if (!(analyze_wait_min > 0)) return false;
+  if (String(d.shyni_job_id || '').indexOf('refresh-scan:') === 0) return false;
+  var started = d.shyni_started_at || d.process_start_time;
+  if (!started) return false;
+  var t = new Date(String(started).replace(' ', 'T')).getTime();
+  if (isNaN(t)) return false;
+  return (Date.now() - t) >= analyze_wait_min * 60000;
+}
+
+// 행 표시 판정은 서버 분류(web_list가 내려주는 analyzing 플래그)를 우선한다 —
+// 진행현황 집계·상태 필터와 행 표시가 같은 항목 집합을 가리키게 하기 위해서다.
+// 플래그가 없는 응답(구버전)에서만 시작 시각 기준의 자체 판정으로 대체한다.
+function isRowAnalyzing(d) {
+  if (d.analyzing === true || d.analyzing === false) return d.analyzing;
+  return isAnalyzing(d);
+}
 
 $(document).ready(function(){
   tmp = last_list_option.split('|');
@@ -111,6 +145,26 @@ $("body").on('change', '#option3', function(e){
 });
 
 
+function failSuffix(d) {
+  // 실패 상태에 사유를 붙인다 — 어느 단계에서 실패했는지가 바로 보이게
+  if (d.shyni_status == 'ANALYZE_TIMEOUT') return ' (분석시간 초과)';
+  if (d.shyni_status == 'FAILED') return ' (스캔 실패)';
+  if (d.shyni_status == 'ERROR') return ' (전송 오류)';
+  if (d.shyni_status == 'NOT_FIND_LIBRARY') return ' (라이브러리 없음)';
+  if (d.shyni_status == 'NOT_FIND_IN_LIBRARY') return ' (항목 없음)';
+  return '';
+}
+
+function finishLabel(d) {
+  // 이력의 종료 시각 라벨 — 성공·실패와 실패 지점을 구분한다
+  if (d.status == 'FINISH_SHYNI_FAILED') {
+    if (d.shyni_status == 'ANALYZE_TIMEOUT') return '분석시간 초과';
+    if (d.shyni_status == 'FAILED') return '스캔실패';
+    return '실패 확정';
+  }
+  return '스캔완료';
+}
+
 function hms(t) {
   // 날짜까지 'MM-DD HH:MM:SS' 형식 그대로 보여준다 (연도까지 포함된 문자열이면 MM-DD부터 취한다)
   if (!t) return '';
@@ -126,7 +180,7 @@ function make_list(data) {
     str += j_row_start();
     tmp = '모드 : ';
     var idCell = '<input type="checkbox" class="item-check" value="' + data[i].id + '"> ' + data[i].id;
-    if (data[i].reset_done) idCell += ' ' + text_color('리셋', 'darkorange');
+    if (data[i].reset_done) idCell += '<br>' + text_color('리셋', 'darkorange');
     str += j_col(1, idCell);
     //tmp += (data[i].mode  == 'ADD') ? "추가" : "삭제";
     tmp += data[i].mode;
@@ -137,25 +191,27 @@ function make_list(data) {
         tmp += text_color("보류", 'orange');
       }
       else if (data[i].shyni_status == 'RUNNING' || data[i].shyni_status == 'REQUESTED') {
-        if (data[i].shyni_phase == 'probe_assembling') {
-          if (data[i].probe_expected && (data[i].probe_received || 0) >= data[i].probe_expected) {
-            // 데이터는 다 모였고 shyni 스캐너 차례를 기다리는 중
-            tmp += text_color("스캔 대기 중", 'purple');
-          } else {
-            var assembling_txt = "ffprobe 대기 중";
-            if (data[i].probe_expected) assembling_txt += " (" + (data[i].probe_received || 0) + "/" + data[i].probe_expected + ")";
-            tmp += text_color(assembling_txt, 'purple');
-          }
-        } else if (data[i].shyni_phase == 'queued') {
-          tmp += text_color("스캔 대기 중", 'purple');
+        if (data[i].shyni_phase == 'queued'
+            || (data[i].shyni_phase == 'probe_assembling' && data[i].probe_expected
+                && data[i].probe_received != null && data[i].probe_received >= data[i].probe_expected)) {
+          // 데이터는 다 모였고(또는 job이 등록만 된 상태) 스캔 시작 차례를 기다리는 중 —
+          // 분류(make_query QUEUED)와 같은 기준으로 '스캔 대기 중'으로 표시한다
+          tmp += text_color("스캔 대기 중", '#718096');
+        }
+        else if (data[i].shyni_phase == 'probe_assembling') {
+          var assembling_txt = "ffprobe 대기 중";
+          if (data[i].probe_expected) assembling_txt += " (" + (data[i].probe_received || 0) + "/" + data[i].probe_expected + ")";
+          tmp += text_color(assembling_txt, 'purple');
+        } else if (isRowAnalyzing(data[i])) {
+          tmp += text_color("분석중", 'teal');
         } else {
           tmp += text_color("진행중", 'green');
         }
       }
       else if (data[i].shyni_status == 'FINISH')
         tmp += text_color("완료", 'blue');
-      else if (data[i].shyni_status == 'FAILED' || data[i].shyni_status == 'ERROR')
-        tmp += text_color("실패", 'red');
+      else if (data[i].shyni_status == 'FAILED' || data[i].shyni_status == 'ERROR' || data[i].shyni_status == 'ANALYZE_TIMEOUT')
+        tmp += text_color("실패", 'red') + failSuffix(data[i]);
       else if (data[i].shyni_status == 'NOT_FIND_LIBRARY')
         tmp += text_color("라이브러리 폴더 ✖️", 'red');
       else if (data[i].shyni_status == 'NOT_FIND_IN_LIBRARY')
@@ -169,9 +225,11 @@ function make_list(data) {
       tmp += text_color("완료", 'blue');
       if (data[i].in_library) tmp += " (이미 반영됨)";
     }
-    else if (data[i].status == 'FINISH_SHYNI_FAILED') tmp += text_color("실패", 'red');
+    else if (data[i].status == 'FINISH_SHYNI_FAILED') {
+      if (data[i].shyni_status == 'SKIP') tmp += "설정 미완료";
+      else tmp += text_color("실패", 'red') + failSuffix(data[i]);
+    }
     else tmp += data[i].status;
-    if (data[i].in_library) tmp += '<br>라이브러리에 이미 반영된 항목';
 
 
     //str += j_col(1, data[i].mode);
@@ -208,8 +266,14 @@ function make_list(data) {
     if (data[i].process_start_time != null) {
       tmp += '<br>' + hms(data[i].process_start_time) + ' (스캔시작)';
     }
+    if (data[i].shyni_started_at != null) {
+      tmp += '<br>' + hms(data[i].shyni_started_at) + ' (분석시작)';
+    }
     if (data[i].process_finish_time != null) {
-      tmp += '<br>' + hms(data[i].process_finish_time) + ' (스캔완료)';
+      tmp += '<br>' + hms(data[i].process_finish_time) + ' (' + finishLabel(data[i]) + ')';
+    }
+    if (data[i].shyni_late_finished_at != null && (data[i].shyni_late_result == 'FINISH' || data[i].shyni_late_result == 'FAILED')) {
+      tmp += '<br>' + hms(data[i].shyni_late_finished_at) + (data[i].shyni_late_result == 'FINISH' ? ' (스캔완료)' : ' (스캔실패)');
     }
     if (data[i].process_duration != null && data[i].process_duration !== '') {
       var durStr = String(data[i].process_duration);
@@ -231,8 +295,12 @@ function make_list(data) {
     }
     if (data[i].status.startsWith('FINISH')) {
       tmp += j_button('retryScanBtn', '재시도', {'id': data[i].id}, 'secondary', true, true);
-      tmp += j_button('metaLoadBtn', '라이브러리 메타 불러오기', {'id': data[i].id}, 'info', true, true);
-      tmp += j_button('metaRefreshBtn', '메타 새로고침', {'id': data[i].id}, 'primary', true, true);
+      // 메타 버튼은 shyni에 실제로 올라간 항목에만 보인다 — 완료 항목, 또는 실패 뒤 늦게 완료가
+      // 확인된 항목(그때부터 불러올 메타가 생긴다). 그냥 실패한 항목에는 보일 필요가 없다.
+      if (data[i].status == 'FINISH_SHYNI' || data[i].shyni_late_finished_at) {
+        tmp += j_button('metaLoadBtn', '라이브러리 메타 불러오기', {'id': data[i].id}, 'info', true, true);
+        tmp += j_button('metaRefreshBtn', '메타 새로고침', {'id': data[i].id}, 'primary', true, true);
+      }
     }
     tmp = j_button_group(tmp)
     right += j_col(12, tmp)
@@ -241,28 +309,90 @@ function make_list(data) {
     str += j_row_end();
     // DB에서 불러온 제목·소개는 가운데 열(경로 시작점)부터 행 끝까지 폭으로 보여 준다.
     // 가로는 그 폭 안에서 스크롤, 세로는 3줄까지만 보이고 스크롤한다 (표지는 위 가운데 영역)
-    if (data[i].meta_info != null && data[i].meta_info.length > 0) {
-      var mi = data[i].meta_info[0];
-      if (mi.album_title || mi.summary) {
-        var infoHtml = '';
-        if (mi.album_title) {
-          if (mi.info_kind == 'artist') {
-            infoHtml += '<div>가수 : ' + mi.album_title + '</div>';
-            if (mi.album_count != null) infoHtml += '<div style="color:#888; font-size:12.5px">앨범 ' + Number(mi.album_count).toLocaleString('en-US') + ' · 트랙 ' + Number(mi.track_count).toLocaleString('en-US') + '</div>';
-          } else {
-            infoHtml += '<div>앨범 : ' + mi.album_title + (mi.album_year ? ' (' + mi.album_year + ')' : '') + '</div>';
-          }
+    var mi0 = (data[i].meta_info != null && data[i].meta_info.length > 0) ? data[i].meta_info[0] : null;
+    if (mi0 && (mi0.album_title || mi0.summary)) {
+      var mi = mi0;
+      var infoHtml = '';
+      if (mi.album_title) {
+        if (mi.info_kind == 'artist') {
+          infoHtml += '<div>가수 : ' + mi.album_title + '</div>';
+          if (mi.album_count != null) infoHtml += '<div style="color:#888; font-size:12.5px">앨범 ' + Number(mi.album_count).toLocaleString('en-US') + ' · 트랙 ' + Number(mi.track_count).toLocaleString('en-US') + '</div>';
+        } else {
+          infoHtml += '<div>앨범 : ' + mi.album_title + (mi.album_year ? ' (' + mi.album_year + ')' : '') + '</div>';
         }
-        if (mi.summary) infoHtml += '<pre style="overflow:auto; white-space:pre; max-width:100%; box-sizing:border-box; font-size:13px; line-height:20px; max-height:72px; margin:4px 0 0 0; border:1px solid #eee; border-radius:4px; padding:6px; background:#fafafa">' + mi.summary + '</pre>';
-        str += j_row_start();
-        str += j_col(3, '');
-        str += j_col(9, infoHtml);
-        str += j_row_end();
       }
+      if (mi.summary) infoHtml += '<pre style="overflow:auto; white-space:pre; max-width:100%; box-sizing:border-box; font-size:13px; line-height:20px; max-height:72px; margin:4px 0 0 0; border:1px solid #eee; border-radius:4px; padding:6px; background:#fafafa">' + mi.summary + '</pre>';
+      str += j_row_start();
+      str += j_col(3, '');
+      str += j_col(9, infoHtml);
+      str += j_row_end();
+    }
+    else if (data[i].status == 'FINISH_SHYNI' && data[i].mode == 'ADD') {
+      // 완료됐는데 앨범 정보가 없는 항목 — 이유가 확인된 경우와 구분해 표시한다
+      var noteTxt = (mi0 && mi0.no_meta_reason == 'subfolder')
+        ? '메타 정보 없음 — 하위 폴더(CD1 등) 대상이라 앨범 정보를 불러올 수 없습니다'
+        : '메타 정보 없음';
+      str += j_row_start();
+      str += j_col(3, '');
+      str += j_col(9, '<div style="color:#888; font-size:12.5px">' + noteTxt + '</div>');
+      str += j_row_end();
+    }
+    if (data[i].status == 'FINISH_SHYNI_FAILED' && data[i].fail_reason) {
+      str += j_row_start();
+      str += j_col(3, '');
+      str += j_col(9, '<div style="color:#888; font-size:12.5px">실패 사유 — ' + data[i].fail_reason + '</div>');
+      str += j_row_end();
+    }
+    if (data[i].shyni_late_result == 'FINISH') {
+      // 분석시간 초과로 실패 표시했지만 shyni에서 뒤늦게 끝난 경우의 안내
+      str += j_row_start();
+      str += j_col(3, '');
+      str += j_col(9, '<div style="color:#888; font-size:12.5px">설정한 분석시간을 초과하여 실패로 표시했지만, 이후 shyni에서 스캔이 완료됐습니다</div>');
+      str += j_row_end();
     }
     if (i != data.length -1) str += j_hr();
   }
   $("#list_div").html(str);
+  paintFilterCount();
+  // 진행현황 번호로 이동해 온 경우 그 행을 잠깐 강조하고 가운데로 스크롤한다
+  if (scanLocateHighlightId) {
+    var hlTarget = $(".item-check[value='" + scanLocateHighlightId + "']");
+    if (hlTarget.length) {
+      var hlRow = hlTarget.closest('div.row');
+      if (!hlRow.length) hlRow = hlTarget.parents().eq(3);
+      // 항목 표시는 본 행 아래에 앨범 정보 행이 이어지는 구조라, 본 행만
+      // 칠하면 강조가 중간에서 끊겨 보인다 — 구분선(<hr>) 전까지의
+      // 형제 행을 함께 강조한다
+      var hlParts = hlRow.add(hlRow.nextUntil('hr'));
+      hlParts.css('background-color', '#fff3cd');
+      if (hlRow[0] && hlRow[0].scrollIntoView) hlRow[0].scrollIntoView({block: 'center'});
+      setTimeout(function(){ hlParts.css('background-color', ''); }, 2600);
+    }
+    scanLocateHighlightId = null;
+  }
+}
+
+// 상태 필터에서 고른 항목의 이름과 전체 개수를 진행현황 아래 여백에 표시한다.
+// 개수는 목록 응답의 페이징 총개수(현재 필터·검색 기준)를 그대로 쓴다 —
+// '전체'를 골랐을 때도 같은 방식으로 전체 개수가 표시된다.
+function paintFilterCount() {
+  try {
+    var div = $('#scan_filter_count_div');
+    if (!div.length) return;
+    var count = (typeof current_data !== 'undefined' && current_data && current_data.paging)
+      ? current_data.paging.count : null;
+    if (count == null) { div.hide(); return; }
+    var sel = document.getElementById('option2');
+    var name = (sel && sel.selectedIndex >= 0) ? sel.options[sel.selectedIndex].text : '전체';
+    // 상태 필터가 걸려 있을 때는 '분석중 1개' 같은 회색 표시 대신, 누르면
+    // 전체로 돌아간다는 것이 바로 보이게 '전체로 돌아가기'로 표시한다
+    // (이 표시를 누르면 초기화되는 동작은 기존과 같다)
+    if (sel && sel.value && sel.value !== 'all') {
+      div.html('<a href="#" style="color:#666; text-decoration:underline">전체로 돌아가기</a>').show();
+      return;
+    }
+    div.html(name + ' <strong>' + Number(count).toLocaleString('en-US') + '개</strong>').show();
+  } catch (e) { /* 표시만 건너뛴다 */ }
 }
 
 
@@ -375,6 +505,8 @@ $("body").on('click', '#releaseHoldAllBtn', function(e){
 
 $("body").on('click', '#searchResetBtn', function(e){
   e.preventDefault();
+  // 전체로 돌아갈 때는 펼쳐 둔 번호 줄도 모두 접는다
+  closeOtherSummaryIds('none');
   $("#order").val('desc');
   $("#option1").val('all');
   $("#option2").val('all');
@@ -383,14 +515,25 @@ $("body").on('click', '#searchResetBtn', function(e){
   globalRequestSearch(1, false);
 });
 
-// 스캔 진행현황 한 줄 — 30초마다 숫자만 다시 읽고, (N초 전)은 1초마다 올린다
+// 스캔 진행현황 한 줄 — 자동 폴링은 하지 않는다 (집계가 DB 연결을 기다리며 화면을
+// 느리게 만들던 문제). 처음 들어올 때 1회 불러오고, 이후에는 새로고침 버튼을
+// 눌렀을 때만 다시 읽는다. (N초 전)은 마지막으로 불러온 시각 기준 경과 표시로,
+// 서버 요청 없이 1초마다 글자만 올린다.
 var scanSummaryLastAt = null;
-function scanSummaryRanges(ids) {
+// 진행중·분석중 번호 펼침 상태 — 새로고침으로 진행현황을 다시 불러와도 유지한다
+var scanScanningOpen = false;
+var scanAnalyzingOpen = false;
+var scanQueuedOpen = false;
+var scanRecentOpen = false;
+function scanSummaryRanges(ids, kind) {
   if (!ids || !ids.length) return '';
   var parts = [], s = ids[0], p = ids[0];
   for (var i = 1; i <= ids.length; i++) {
     if (i < ids.length && ids[i] == p + 1) { p = ids[i]; continue; }
-    parts.push(s == p ? '' + s : s + '~' + p);
+    var label = (s == p ? '' + s : s + '~' + p);
+    // 구간을 누르면 그 상태 필터로 바꾸고 구간 첫 번호가 있는 페이지로 이동한다
+    if (kind) label = '<a href="#" class="sm-id-link" data-kind="' + kind + '" data-id="' + s + '" style="color:#666; text-decoration:underline">' + label + '</a>';
+    parts.push(label);
     if (i < ids.length) { s = p = ids[i]; }
   }
   return parts.join(', ') + '번';
@@ -398,19 +541,60 @@ function scanSummaryRanges(ids) {
 function paintScanSummary(ret) {
   if (!ret || ret.ret != 'success' || !ret.summary) return;
   var sm = ret.summary, segs = [];
-  if (sm.scanning_ids && sm.scanning_ids.length) segs.push('진행중 <strong>' + sm.scanning_ids.length + '개 (' + scanSummaryRanges(sm.scanning_ids) + ')</strong>');
+  // 진행중·분석중 모두 수량만 보여 주고, 구간을 누르면 아래 줄에 번호 전체를
+  // 펼친다 (분석중과 같은 방식 — 개수가 늘어도 진행현황 한 줄이 유지된다).
+  if (sm.scanning_ids && sm.scanning_ids.length) segs.push('<a href="#" id="scan_scanning_toggle" style="color:inherit">진행중 <strong>' + sm.scanning_ids.length + '개</strong> <span class="scn-arrow">' + (scanScanningOpen ? '▴' : '▾') + '</span></a>');
+  if (sm.analyzing_ids && sm.analyzing_ids.length) segs.push('<a href="#" id="scan_analyzing_toggle" style="color:inherit">분석중 <strong>' + sm.analyzing_ids.length + '개</strong> <span class="anz-arrow">' + (scanAnalyzingOpen ? '▴' : '▾') + '</span></a>');
   if (sm.assembling) segs.push('ffprobe 대기 중 <strong>' + sm.assembling + '개</strong>');
-  if (sm.queued) segs.push('스캔 대기 중 <strong>' + sm.queued + '개</strong>');
+  if (sm.queued_ids && sm.queued_ids.length) segs.push('<a href="#" id="scan_queued_toggle" style="color:inherit">스캔 대기 중 <strong>' + sm.queued_ids.length + '개</strong> <span class="que-arrow">' + (scanQueuedOpen ? '▴' : '▾') + '</span></a>');
+  else if (sm.queued) segs.push('스캔 대기 중 <strong>' + sm.queued + '개</strong>');
   segs.push('준비 <strong>' + (sm.ready || 0) + '개</strong>');
   if (sm.held) segs.push('보류 <strong>' + sm.held + '개</strong>');
-  $('#scan_summary_div').html('<span style="font-weight:bold; color:#555; margin-right:8px">스캔 진행현황</span>' + segs.join(' · ') + ' <span id="scan_summary_ago" style="color:#aaa; font-size:13px"></span>');
+  $('#scan_summary_div').html(segs.join(' · ') + ' <span id="scan_summary_ago" style="color:#aaa; font-size:13px"></span>');
+  var scnDiv = $('#scan_scanning_ids_div');
+  if (sm.scanning_ids && sm.scanning_ids.length) {
+    scnDiv.html('진행중 항목: ' + scanSummaryRanges(sm.scanning_ids, 'SCANNING'));
+    scnDiv.toggle(scanScanningOpen);
+  } else {
+    scnDiv.hide().text('');
+  }
+  var anzDiv = $('#scan_analyzing_ids_div');
+  if (sm.analyzing_ids && sm.analyzing_ids.length) {
+    anzDiv.html('분석중 항목: ' + scanSummaryRanges(sm.analyzing_ids, 'ANALYZING'));
+    anzDiv.toggle(scanAnalyzingOpen);
+  } else {
+    anzDiv.hide().text('');
+  }
+  var queDiv = $('#scan_queued_ids_div');
+  if (sm.queued_ids && sm.queued_ids.length) {
+    queDiv.html('스캔 대기 중 항목: ' + scanSummaryRanges(sm.queued_ids, 'QUEUED'));
+    queDiv.toggle(scanQueuedOpen);
+  } else {
+    queDiv.hide().text('');
+  }
+  var rcDiv = $('#scan_recent_ids_div');
+  var rcWrap = $('#scan_recent_wrap');
+  if (sm.recent_done_ids && sm.recent_done_ids.length) {
+    rcWrap.show();
+    $('#scan_recent_count').text(sm.recent_done_ids.length + '개');
+    // 구간 표시는 오름차순으로 접는 기존 방식에 맞춰 정렬한 사본을 쓴다
+    var rcIds = sm.recent_done_ids.slice().sort(function(a, b){ return a - b; });
+    rcDiv.html('최근 완료 항목: ' + scanSummaryRanges(rcIds, 'FINISH_SHYNI'));
+    rcDiv.toggle(scanRecentOpen);
+    $('#scan_recent_toggle').find('.rcn-arrow').text(scanRecentOpen ? '▴' : '▾');
+  } else {
+    rcWrap.hide();
+    rcDiv.hide().text('');
+  }
   var holdNotice = $('#scan_hold_notice');
   if (sm.held) {
     holdNotice.html((sm.shyni_use ? '보류 중인 항목은 자동 처리되지 않습니다. 처리하려면 보류 해제를 해 주세요. ' : 'Shyni 연동이 꺼져 있어 항목이 보류되고 있습니다. 켜도 보류분은 자동 처리되지 않습니다. ') + '<button type="button" class="btn btn-sm btn-outline-secondary" id="releaseHoldAllBtn" style="padding:1px 8px; font-size:12px">전체 보류 해제</button>').show();
   } else {
     holdNotice.hide().html('');
   }
-  scanSummaryLastAt = Date.now();
+  // 집계는 워커가 미리 계산해 둔 캐시를 읽어 오므로, (N초 전)은 캐시가
+  // 만들어진 시각 기준으로 표시한다 (캐시 시각이 없으면 받은 시각 기준).
+  scanSummaryLastAt = sm.ts ? sm.ts * 1000 : Date.now();
   paintScanSummaryAgo();
 }
 function paintScanSummaryAgo() {
@@ -418,11 +602,98 @@ function paintScanSummaryAgo() {
   var sec = Math.max(0, Math.floor((Date.now() - scanSummaryLastAt) / 1000));
   $('#scan_summary_ago').text('(' + sec + '초 전)');
 }
-function loadScanSummary() { globalSendCommand('summary', null, null, null, paintScanSummary); }
+function loadScanSummary(force) { globalSendCommand('summary', force ? 'force' : null, null, null, paintScanSummary); }
+// 새로고침 버튼은 진행현황과 함께 스캔 목록도 다시 불러온다. 목록은 현재 페이지·필터·검색
+// 상태를 유지한 채 다시 그린다 — 현재 페이지는 목록 로드가 전부 거치는 globalRequestSearch를
+// 감싸서 기록해 둔다 (초기 로드·페이지 이동·필터 변경·항목 작업 후 재로드가 모두 이 함수를 통한다).
+var scanListPage = 1;
+function reloadScanList() {
+  if (typeof globalRequestSearch === 'function') globalRequestSearch(scanListPage, false);
+}
+$("body").on('click', '#scanSummaryRefreshBtn', function(e){
+  e.preventDefault();
+  loadScanSummary(true);
+  reloadScanList();
+});
+// 펼친 번호 줄은 한 번에 하나만 보인다 — 다른 구간을 열면 나머지는 접는다
+function closeOtherSummaryIds(keep) {
+  if (keep != 'scanning') { scanScanningOpen = false; $('#scan_scanning_ids_div').hide(); $('.scn-arrow').text('▾'); }
+  if (keep != 'analyzing') { scanAnalyzingOpen = false; $('#scan_analyzing_ids_div').hide(); $('.anz-arrow').text('▾'); }
+  if (keep != 'queued') { scanQueuedOpen = false; $('#scan_queued_ids_div').hide(); $('.que-arrow').text('▾'); }
+  if (keep != 'recent') { scanRecentOpen = false; $('#scan_recent_ids_div').hide(); $('.rcn-arrow').text('▾'); }
+}
+// 진행중 구간을 누르면 아래 번호 줄을 펼치거나 접는다 (분석중과 같은 방식)
+$("body").on('click', '#scan_scanning_toggle', function(e){
+  e.preventDefault();
+  scanScanningOpen = !scanScanningOpen;
+  if (scanScanningOpen) closeOtherSummaryIds('scanning');
+  $(this).find('.scn-arrow').text(scanScanningOpen ? '▴' : '▾');
+  $('#scan_scanning_ids_div').toggle(scanScanningOpen);
+});
+// 펼친 번호 구간을 누르면 그 상태 필터로 바꾸고, 구간 첫 번호가 있는 페이지로
+// 이동한 뒤 그 행을 강조한다. 서버에 페이지를 묻는 가벼운 건수 조회 한 번만 쓴다.
+var scanLocateHighlightId = null;
+$("body").on('click', '.sm-id-link', function(e){
+  e.preventDefault();
+  var id = parseInt($(this).data('id'), 10);
+  var kind = $(this).data('kind');
+  if (!id) return;
+  if (kind) $('#option2').val(kind);
+  var ctx = JSON.stringify({order: $('#order').val(), option1: $('#option1').val(),
+    option2: $('#option2').val(), option3: $('#option3').val(), search: ($('#keyword').val() || '')});
+  globalSendCommand('locate_item', '' + id, ctx, '', function(ret){
+    if (ret && ret.ret == 'success' && ret.page) {
+      scanLocateHighlightId = id;
+      globalRequestSearch(ret.page, false);
+    }
+  });
+});
+// 아래 '전체 N개' 표시를 누르면 필터를 모두 풀고 처음 화면(전체·1페이지)으로 돌아간다
+$("body").on('click', '#scan_filter_count_div', function(e){
+  $('#searchResetBtn').click();
+});
+// 스캔 대기 중 구간을 누르면 아래 번호 줄을 펼치거나 접는다
+$("body").on('click', '#scan_queued_toggle', function(e){
+  e.preventDefault();
+  scanQueuedOpen = !scanQueuedOpen;
+  if (scanQueuedOpen) closeOtherSummaryIds('queued');
+  $(this).find('.que-arrow').text(scanQueuedOpen ? '▴' : '▾');
+  $('#scan_queued_ids_div').toggle(scanQueuedOpen);
+});
+// 분석중 구간을 누르면 아래 번호 줄을 펼치거나 접는다
+$("body").on('click', '#scan_analyzing_toggle', function(e){
+  e.preventDefault();
+  scanAnalyzingOpen = !scanAnalyzingOpen;
+  if (scanAnalyzingOpen) closeOtherSummaryIds('analyzing');
+  $(this).find('.anz-arrow').text(scanAnalyzingOpen ? '▴' : '▾');
+  $('#scan_analyzing_ids_div').toggle(scanAnalyzingOpen);
+});
+// 최근 완료 구간을 누르면 아래 번호 줄을 펼치거나 접는다
+$("body").on('click', '#scan_recent_toggle', function(e){
+  e.preventDefault();
+  scanRecentOpen = !scanRecentOpen;
+  if (scanRecentOpen) closeOtherSummaryIds('recent');
+  $(this).find('.rcn-arrow').text(scanRecentOpen ? '▴' : '▾');
+  $('#scan_recent_ids_div').toggle(scanRecentOpen);
+});
 // ff_global1.js가 content 블록보다 뒤에서 로드되므로, 즉시 호출하면 함수가 없어 오류가 난다 — ready 이후에 시작한다
 $(document).ready(function(){
+  var savedOption = String(last_list_option || '').split('|');
+  if (savedOption.length == 6) {
+    var savedPage = parseInt(savedOption[1], 10);
+    if (!isNaN(savedPage) && savedPage > 0) scanListPage = savedPage;
+  }
+  try {
+    if (typeof globalRequestSearch === 'function') {
+      var origRequestSearch = globalRequestSearch;
+      globalRequestSearch = function(page) {
+        var p = parseInt(page, 10);
+        if (!isNaN(p) && p > 0) scanListPage = p;
+        return origRequestSearch.apply(null, arguments);
+      };
+    }
+  } catch (e) { /* 페이지 추적을 못 해도 새로고침은 저장된 페이지 값으로 동작한다 */ }
   loadScanSummary();
-  setInterval(loadScanSummary, 30000);
   setInterval(paintScanSummaryAgo, 1000);
 });
 

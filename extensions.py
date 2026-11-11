@@ -75,7 +75,18 @@ def rc_command(function: Callable) -> Callable:
         if data.get('async'):
             cmd.append('_async=true')
         #P.logger.debug(f'RC command: {cmd}')
-        result = SupportSubprocess.execute_command_return(cmd)
+        # rclone rc 자체는 --timeout=0(무제한)이라, RC 서버가 응답하지 않으면
+        # 동기 호출이 영원히 멈출 수 있다 — 실행 쪽에 상한을 둔다.
+        # 상한은 고급 설정 base_timeout_vfs_rc (기본 600초).
+        # 시간 초과 시 결과는 빈 dict로 처리돼 다음 주기에 다시 시도한다.
+        rc_timeout = 600
+        try:
+            _v = P.ModelSetting.get_int('base_timeout_vfs_rc')
+            if _v and _v > 0:
+                rc_timeout = _v
+        except Exception:
+            pass
+        result = SupportSubprocess.execute_command_return(cmd, timeout=rc_timeout)
         try:
             '''
             {'error': '', ...}

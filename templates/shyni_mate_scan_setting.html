@@ -8,16 +8,19 @@
 <nav>
   {{ macros.m_tab_head_start() }}
     {{ macros.m_tab_head('basic', '기본', true) }}
+    {{ macros.m_tab_head('timeout', '고급 설정', false) }}
     {{ macros.m_tab_head('db', 'DB', false) }}
   {{ macros.m_tab_head_end() }}
 </nav>
 <form id='setting'>
   <div class="tab-content" id="nav-tabContent">
     {{ macros.m_tab_content_start('basic', true) }}
-      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝난 뒤에 다음 항목을 시작합니다.', '서버 부하가 걱정되시면 1로 두시는 것을 권장합니다.']) }}
-      {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.']) }}
-      {{ macros.setting_input_int('scan_probe_timeout_sec', '반영 여부 확인 제한 시간', value=arg['scan_probe_timeout_sec'], desc=['단위: 초', '반영 여부 확인은 리셋한 항목을 다시 처리할 때만 전송 전에 합니다. 일반 항목은 확인 없이 바로 전송합니다.', '이미 라이브러리에 반영돼 있는지 shyni에 확인하는 조회가 끝날 때까지 기다리는 최대 시간입니다. 이 조회는 환경에 따라 수십 초 이상 걸릴 수 있습니다.']) }}
-      {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['단위: 초', '새로 들어온 항목이 있는지 확인하는 간격입니다.']) }}
+      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['기본값 2', '한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝난 뒤에 다음 항목을 시작합니다.', '서버 부하가 걱정되시면 1로 줄여서 사용하셔도 됩니다.']) }}
+      {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['기본값 5분 · 단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.']) }}
+      {{ macros.setting_input_int('scan_probe_timeout_sec', '반영 여부 확인 제한 시간', value=arg['scan_probe_timeout_sec'], desc=['기본값 60초 · 단위: 초', '반영 여부 확인은 리셋한 항목을 다시 처리할 때만 전송 전에 합니다. 일반 항목은 확인 없이 바로 전송합니다.', '이미 라이브러리에 반영돼 있는지 shyni에 확인하는 조회가 끝날 때까지 기다리는 최대 시간입니다. 이 조회는 환경에 따라 수십 초 이상 걸릴 수 있습니다.']) }}
+      {{ macros.setting_input_int('scan_analyze_wait_min', 'analyze 대기 시간', value=arg['scan_analyze_wait_min'], desc=['기본값 5분 · 단위: 분', '스캔 중 상태로 이 시간 이상 머물러 있는 항목은 정체로 보고 동시 스캔 수에서 제외합니다. 정체된 스캔 하나가 전체 큐를 막는 것을 방지합니다.', '제외된 항목의 상태는 바뀌지 않으며, shyni가 스캔을 끝내면 정상적으로 완료 처리됩니다. 0으로 두면 이 기능을 끕니다.']) }}
+      {{ macros.setting_input_int('scan_analyze_fail_min', 'analyze 후 대기 시간', value=arg['scan_analyze_fail_min'], desc=['기본값 60분 · 단위: 분', '스캔이 시작된 뒤 이 시간 이상 끝나지 않는 항목은 실패로 확정합니다. analyze 단계에서 멈춘 스캔이 분석중으로 계속 쌓이는 것을 방지합니다.', '실패로 확정된 항목은 shyni에서 나중에 끝나도 실패로 남습니다. 다시 처리하려면 스캔 목록에서 리셋해 주세요. 0으로 두면 이 기능을 끕니다.']) }}
+      {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['기본값 60초 · 단위: 초', '새로 들어온 항목이 있는지 확인하는 간격입니다.']) }}
       {{ macros.m_hr() }}
 
       {{ macros.setting_checkbox('scan_use_vfs_refresh', 'rclone vfs/refresh 사용', value=arg['scan_use_vfs_refresh'], desc=['스캔을 전송하기 전에 항목 경로를 먼저 VFS 새로고침합니다.', 'rclone 플러그인이 설치되어 있어야 합니다.']) }}
@@ -34,12 +37,45 @@
 
       {{ macros.setting_checkbox('scan_shyni_use', 'Shyni 연동 사용', value=arg['scan_shyni_use'], desc=['켜 두시면 목록에 올라온 항목을 shyni로 전송해 처리합니다.', '꺼 두시면 항목이 올라와도 shyni로 전송하지 않고 보류로 쌓입니다. 나중에 켜도 보류된 항목은 자동 처리되지 않으며, 스캔 목록에서 보류 해제를 해야 처리가 시작됩니다.', 'rclone vfs/refresh 사용이 켜져 있으면 VFS 새로고침까지는 진행합니다. 단, 리셋한 항목은 꺼져 있어도 전송합니다. 이미 전송된 항목의 완료 확인은 계속됩니다.']) }}
       {{ macros.setting_input_textarea('scan_shyni_path_rule', '샤이니 경로 매핑', col='12', row='3', value=arg['scan_shyni_path_rule'], desc=['이 플러그인이 보는 경로와 shyni 서버가 보는 경로가 다를 때만 적어 주세요. 한 줄에 하나씩, 플러그인 경로|shyni 경로 형식입니다.', '두 서버가 같은 경로를 본다면 비워 두시면 됩니다. 비워 두면 경로가 그대로 전달됩니다.', '예: /mnt/ff쪽경로|/mnt/shyni쪽경로']) }}
+      {{ macros.setting_checkbox('scan_io_yield_use', '디스크가 바쁠 때 스캔 양보', value=arg['scan_io_yield_use'], desc=['디스크 대기가 높으면 새 스캔 전송을 한 주기 미룹니다. 이미 전송된 스캔의 확인은 계속됩니다.', '웹 화면이 느려지는 순간에 스캔이 디스크를 더 붙잡지 않게 해 줍니다.']) }}
       {{ macros.m_hr() }}
 
       {{ macros.m_hr_head_bottom() }}
       {{ macros.info_text_big('', '<테스트>', '')}}
       {{ macros.setting_input_textarea('scan_manual_target', '스캔 타겟 파일 또는 폴더',  col=12, value=arg['scan_manual_target']) }}
       {{ macros.setting_buttons([['add_btn', '추가'], ['remove_file_btn', '파일 삭제'], ['remove_folder_btn', '폴더 삭제'], ['refresh_btn', '메타새로고침 모드']]) }}
+    {{ macros.m_tab_content_end() }}
+
+    {{ macros.m_tab_content_start('timeout', false) }}
+      <div style="font-size:13px; color:#555; line-height:1.7; margin:4px 0 14px 0">
+        <strong>왜 따로 있나요?</strong><br>
+        평소에 자주 수정해야 할 값은 아닙니다. 문제가 생겼을 때만 한 번 검토해 보면 되는 값들이라, 기본 설정과 나눠 따로 탭으로 뒀습니다.<br>
+        <strong>왜 생긴 설정인가요?</strong><br>
+        SHYNI MATE는 shyni에게 스캔을 보내고, 끝났는지 확인하고, 결과를 알려주는 일을 쉬지 않고 반복합니다.
+        그런데 가끔 shyni가 답을 하지 않을 때가 있습니다. shyni가 재시작 중이거나, 결과를 받는 쪽(GDS tool 등)이 멈춰 있을 때입니다.
+        답이 올 때까지 그 자리에 멈춰 서 있다 보면, 그 멈춤 하나 때문에 스캔 처리가 장시간 멈춰 버린 적도 있었습니다.
+        그래서 이제는 각 단계마다 여기까지만 허용한다는 상한을 정해 뒀고, 그 상한을 조절하는 곳이 이 탭입니다.<br>
+        <strong>시간이 지나면 어떻게 되나요?</strong><br>
+        걱정하지 않으셔도 됩니다. 실패한 것으로 처리하지 않고 이번 차례만 건너뜁니다.
+        SHYNI MATE는 항목들을 한 차례 점검하고 파일체크 주기(기본 탭, 기본 60초)만큼 쉬었다가 다음 파일체크 주기를 시작하는데, 그때 자연스럽게 다시 시도합니다.
+        파일체크 주기를 바꾸면 이 간격도 함께 바뀝니다. 값을 조금 짧게 잡아도 항목이 사라지거나 잘못 처리되는 일은 없습니다.<br>
+        <strong>굳이 바꿀 일이 있나요?</strong><br>
+        대부분 없습니다. 기본값은 실제로 오래 쓰면서 문제가 없던 값들입니다.
+        shyni가 유난히 느린 환경이거나, 확인이 너무 오래 걸린다고 느끼실 때만 조금씩 조절해 보세요.<br>
+        앨범 정보를 불러올 때의 제한 시간은 기본 탭의 '반영 여부 확인 제한 시간'을 씁니다.
+      </div>
+      <hr style="margin:2px 0 14px 0; border:0; border-top:1px solid #ddd">
+      <div style="margin:2px 0 12px 0">
+        <label style="font-size:13px; color:#555; cursor:pointer; font-weight:normal; margin:0">
+          <input type="checkbox" id="timeout_unlock" style="vertical-align:-2px"> <strong>활성화</strong>
+          <span style="color:#888; margin-left:6px">값을 변경하려면 체크하세요.</span>
+        </label>
+      </div>
+      {{ macros.setting_input_int('base_timeout_query', '조회 제한 시간', value=arg['base_timeout_query'], desc=['기본값 15초 · 단위: 초', '스캔을 보내기 전에 \'이 폴더는 어느 라이브러리 소속인가요?\'를 shyni에게 물어볼 때 적용되는 제한 시간입니다.', '이 시간 안에 답이 없으면 그 항목은 이번 차례는 쉬고, 다음 파일체크 주기에 다시 물어봅니다.']) }}
+      {{ macros.setting_input_int('base_timeout_send', '전송 제한 시간', value=arg['base_timeout_send'], desc=['기본값 30초 · 단위: 초', '스캔 시작이나 메타 새로고침을 shyni에게 실제로 보낼 때 적용되는 제한 시간입니다. 보통은 몇 초면 끝나지만 shyni가 바쁠 때는 늦어지기도 합니다.', '이 시간 안에 답이 없으면 보내지 않은 것으로 하고, 다음 파일체크 주기에 다시 보냅니다.']) }}
+      {{ macros.setting_input_int('base_timeout_poll', '작업 확인 제한 시간', value=arg['base_timeout_poll'], desc=['기본값 15초 · 단위: 초', '이미 보낸 스캔이 끝났는지 shyni에게 확인할 때 적용되는 제한 시간입니다.', '확인할 항목이 많을수록 여기에 시간이 쌓이기 때문에, shyni와 아예 연결이 안 될 때(재시작 중일 때 등)는 연속 세 번까지만 확인하고 그 차례는 멈춥니다. 다음 파일체크 주기에 이어서 확인합니다.']) }}
+      {{ macros.setting_input_int('base_timeout_callback', '콜백 제한 시간', value=arg['base_timeout_callback'], desc=['기본값 10초 · 단위: 초', '스캔이 끝나면, 스캔 요청을 보냈던 FP(GDS tool)에도 완료를 알려 줍니다. shyni에게 보내는 알림이 아니라 FP로 가는 알림입니다.', 'FP가 응답하지 않아도 스캔 처리는 끝나야 하니, 이 시간 안에 응답이 없으면 알림을 포기하고 넘어갑니다. 알림이 늦거나 못 가더라도 스캔 결과 자체에는 아무 영향이 없습니다.']) }}
+      {{ macros.setting_input_int('base_timeout_vfs_rc', 'VFS 새로고침 제한 시간', value=arg['base_timeout_vfs_rc'], desc=['기본값 600초 · 단위: 초', '스캔 전에 새 파일을 잘 찾을 수 있게, rclone에게 폴더를 한 번 새로 읽어 달라고 할 때 적용되는 제한 시간입니다.', '폴더가 클 경우를 대비하여 기본 값을 600초로 넉넉하게 지정해두었습니다.']) }}
     {{ macros.m_tab_content_end() }}
 
     {{ macros.m_tab_content_start('db', false) }}
@@ -52,6 +88,13 @@
 
 $(document).ready(function(){
   use_collapse("scan_use_vfs_refresh");
+  // 고급 설정 탭 잠금 — 활성화에 체크해야 값을 바꿀 수 있다 (실수 방지)
+  var timeoutIds = ['#base_timeout_query', '#base_timeout_send', '#base_timeout_poll', '#base_timeout_callback', '#base_timeout_vfs_rc'];
+  function lockTimeoutFields(lock){
+    timeoutIds.forEach(function(s){ $(s).prop('readonly', lock).css('background-color', lock ? '#f5f5f5' : ''); });
+  }
+  lockTimeoutFields(true);
+  $('#timeout_unlock').change(function(){ lockTimeoutFields(!this.checked); });
 });
 
 $('#scan_use_vfs_refresh').change(function() {use_collapse('scan_use_vfs_refresh');});
