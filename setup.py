@@ -39,14 +39,20 @@ setting = {
                 'uri': 'periodic',
                 'name': '주기적 스캔',
                 'list': [
+                    {'uri': 'jobs', 'name': '작업 관리'},
+                    {'uri': 'result', 'name': '스캔 결과'},
                     {'uri': 'setting', 'name': '설정'},
+                    {'uri': 'manual', 'name': '매뉴얼'},
                 ]
             },
             {
                 'uri': 'trash',
                 'name': '휴지통 작업',
                 'list': [
+                    {'uri': 'jobs', 'name': '작업 관리'},
+                    {'uri': 'result', 'name': '작업 결과'},
                     {'uri': 'setting', 'name': '설정'},
+                    {'uri': 'manual', 'name': '매뉴얼'},
                 ]
             },
             {
@@ -60,7 +66,7 @@ setting = {
                 'uri': 'manual',
                 'name': '매뉴얼',
                 'list': [
-                    {'uri': 'README.md', 'name': 'README'},
+                    {'uri': 'README.md', 'name': '매뉴얼'},
                 ]
             },
             {

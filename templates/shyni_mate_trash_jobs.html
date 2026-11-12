@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+{% block content %}
+
+{{ macros.m_button_group([['jobsSaveBtn', '저장'], ['jobAddBtn', '작업 추가'], ['jobsUseAllBtn', '전체 사용'], ['jobsUnuseAllBtn', '전체 사용 해제'], ['globalSettingSaveBtn', '설정 저장']]) }}
+<div style="margin:6px 0 10px">
+  <span style="font-size:12px; color:#888">저장하면 사용으로 켜진 작업이 스케줄러에 바로 반영됩니다. cron 예: <code>0 5 * * *</code> 매일 새벽 5시, <code>0 3 * * 1</code> 매주 월요일 새벽 3시</span>
+</div>
+
+<div id="jobs_div"></div>
+
+<form id='setting'>
+<div style="margin-top:16px; border:1px solid #ddd; border-radius:6px; padding:10px 14px">
+  <a href="#" id="anchorsToggle" style="font-size:14px; color:#333; text-decoration:none"><strong>기준 경로 (안전장치)</strong> <span id="anchorsArrow">▸</span></a>
+  <div id="anchorsBody" style="display:none; margin-top:8px">
+    {{ macros.setting_input_textarea('scan_trash_schedule_anchors', '', col='9', row='3', value=arg['scan_trash_schedule_anchors'], desc=['이 경로들이 모두 실제로 보여야 작업을 실행합니다. 마운트가 깨진 상태에서 비우는 사고를 막기 위한 안전장치로, 모든 휴지통 주기 작업에 함께 적용됩니다.', '한 줄에 하나씩 적어 주세요. 비워 두면 경로 확인 없이 실행됩니다.']) }}
+    <div style="font-size:12px; color:#888">바꾼 뒤에는 위쪽 설정 저장 버튼으로 저장해 주세요.</div>
+  </div>
+</div>
+</form>
+
+<div id="libPickModal" style="display:none; position:fixed; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.45); z-index:2000">
+  <div style="background:#fff; max-width:520px; margin:48px auto; border-radius:8px; padding:16px 18px; max-height:82vh; display:flex; flex-direction:column">
+    <div style="display:flex; justify-content:space-between; align-items:center">
+      <strong style="font-size:15px">라이브러리 선택</strong>
+      <span id="libPickCount" style="color:#888; font-size:12.5px"></span>
+    </div>
+    <input type="text" id="libPickSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="margin:10px 0 8px">
+    <div style="margin-bottom:8px">
+      <button type="button" class="btn btn-xs btn-default" id="libPickAll">보이는 항목 전체 선택</button>
+      <button type="button" class="btn btn-xs btn-default" id="libPickNone">보이는 항목 전체 해제</button>
+    </div>
+    <div id="libPickList" style="overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:6px 10px; min-height:80px"></div>
+    <div style="margin-top:12px; text-align:right">
+      <button type="button" class="btn btn-sm btn-default" id="libPickCancel">취소</button>
+      <button type="button" class="btn btn-sm btn-primary" id="libPickOk">확인</button>
+    </div>
+  </div>
+</div>
+
+<script type="text/javascript">
+var LIBS = [];
+var LIBS_STATE = 'loading'; // loading | ok | fail
+var jobs = {{ arg['trash_jobs_json']|safe }};
+var ACTIONS = [
+  ['refresh', '새로고침'],
+  ['scan', '스캔'],
+  ['empty', '비우기'],
+  ['refresh_scan', '새로고침 후 스캔'],
+  ['refresh_scan_empty', '새로고침 후 스캔 후 비우기']
+];
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+
+function libTitle(key) {
+  for (var k = 0; k < LIBS.length; k++) if (String(LIBS[k].key) === String(key)) return LIBS[k].title;
+  return key;
+}
+
+function sectionChips(sections) {
+  var secs = (sections || []).map(String);
+  if (!secs.length) return '<span style="color:#c0392b; font-size:12.5px">선택된 라이브러리가 없습니다</span>';
+  var str = '';
+  var show = Math.min(secs.length, 8);
+  for (var k = 0; k < show; k++) {
+    str += '<span style="background:#edf2f7; border:1px solid #e2e8f0; border-radius:10px; padding:1px 8px; font-size:12px">' + esc(libTitle(secs[k])) + '</span>';
+  }
+  if (secs.length > show) str += '<span style="font-size:12px; color:#4a5568">외 ' + (secs.length - show) + '개</span>';
+  str += '<span style="font-size:12px; color:#888">총 ' + secs.length + '개</span>';
+  return str;
+}
+
+var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/trash/';
+
+// 실행 중인 작업 표시 — 결과 탭과 같은 current를 15초마다 확인한다.
+// 바뀔 때만 다시 그려, 입력 중인 내용이 사라지거나 포커스가 날아가지 않게 한다.
+var runningCur = null;
+var runningSig = '';
+
+function stageLabel(stage) {
+  if (stage == 'refresh') return '새로고침 중';
+  if (stage == 'scan') return '스캔 중';
+  if (stage == 'empty') return '비우는 중';
+  return stage || '';
+}
+
+function runningIdx() {
+  return (runningCur && typeof runningCur.job_idx == 'number') ? runningCur.job_idx : -1;
+}
+
+function runningSignature(cur) {
+  if (!cur) return '';
+  return [cur.job_idx, cur.section_key, cur.stage].join('|');
+}
+
+function loadCurrent() {
+  $.ajax({
+    type: 'POST', url: API_BASE + 'current', data: {}, global: false,
+    success: function (ret) {
+      if (!ret || ret.ret != 'success') return;
+      var cur = ret.data || null;
+      var sig = runningSignature(cur);
+      if (sig === runningSig) return;
+      runningSig = sig;
+      runningCur = cur;
+      jobs = collectJobs();
+      renderJobs();
+    }
+  });
+}
+
+// 라이브러리 목록은 페이지가 뜬 뒤에 따로 불러온다 — shyni가 느려져도
+// 페이지 표시가 막히지 않게 하기 위해서다. 목록은 서버에서 5분간 캐시한다.
+function loadSections() {
+  $.ajax({
+    type: 'POST', url: API_BASE + 'sections', data: {}, global: false,
+    success: function (ret) {
+      if (ret && ret.ret == 'success' && Array.isArray(ret.data)) {
+        LIBS = ret.data;
+        LIBS_STATE = 'ok';
+      } else {
+        LIBS_STATE = 'fail';
+      }
+      jobs = collectJobs();
+      renderJobs();
+    },
+    error: function () {
+      LIBS_STATE = 'fail';
+      renderJobs();
+    }
+  });
+}
+
+var pickIdx = -1;
+var pickSel = {};
+
+function updatePickCount() {
+  var cnt = Object.keys(pickSel).length;
+  $('#libPickCount').text(cnt ? cnt + '개 선택됨' : '');
+}
+
+function renderPickList() {
+  var q = ($('#libPickSearch').val() || '').trim().toLowerCase();
+  var str = '';
+  var shown = 0;
+  for (var k = 0; k < LIBS.length; k++) {
+    var lib = LIBS[k];
+    if (q && String(lib.title).toLowerCase().indexOf(q) < 0) continue;
+    shown++;
+    var checked = pickSel[String(lib.key)] ? ' checked' : '';
+    str += '<label style="display:block; font-weight:normal; padding:3px 2px; margin:0"><input type="checkbox" class="pick-sec" name="tmp_pick_sec" value="' + lib.key + '"' + checked + '> ' + esc(lib.title) + '</label>';
+  }
+  if (!shown) str = '<div style="color:#888; padding:4px 2px">검색 결과가 없습니다.</div>';
+  $('#libPickList').html(str);
+  updatePickCount();
+}
+
+function openLibPicker(idx) {
+  jobs = collectJobs();
+  pickIdx = idx;
+  pickSel = {};
+  ((jobs[idx] && jobs[idx].sections) || []).forEach(function (s) { pickSel[String(s)] = true; });
+  $('#libPickSearch').val('');
+  renderPickList();
+  $('#libPickModal').show();
+}
+
+function closeLibPicker() {
+  $('#libPickModal').hide();
+  pickIdx = -1;
+}
+
+function renderJobs() {
+  var str = '';
+  for (var i = 0; i < jobs.length; i++) {
+    var j = jobs[i];
+    // 실행 중인 작업은 대시보드처럼 하이라이트하고, 취소 전에는 수정·삭제할 수 없게 잠근다
+    var isRunning = (i === runningIdx());
+    var dis = isRunning ? ' disabled' : '';
+    str += '<div class="job-row" data-idx="' + i + '" style="border:' + (isRunning ? '2px solid #3182ce' : '1px solid #ddd') + '; border-radius:6px; padding:8px 12px; margin-bottom:8px; background:' + (isRunning ? '#ebf4ff' : '#fff') + '">';
+    if (isRunning) str += '<div style="font-size:12.5px; color:#2b6cb0; margin-bottom:6px">🔄 <strong>진행 중</strong> — ' + esc(runningCur.section_title) + ' ' + stageLabel(runningCur.stage) + ' · 수정하려면 먼저 취소해 주세요</div>';
+    str += '<div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center">';
+    str += '<input type="text" class="form-control input-sm j-name" placeholder="작업 이름" value="' + esc(j.name) + '" style="width:150px"' + dis + '>';
+    str += '<input type="text" class="form-control input-sm j-cron" placeholder="cron 예: 0 5 * * *" value="' + esc(j.cron) + '" style="width:120px"' + dis + '>';
+    str += '<select class="form-control input-sm j-action" style="width:210px"' + dis + '>';
+    for (var a = 0; a < ACTIONS.length; a++) {
+      str += '<option value="' + ACTIONS[a][0] + '"' + (j.action == ACTIONS[a][0] ? ' selected' : '') + '>' + ACTIONS[a][1] + '</option>';
+    }
+    str += '</select>';
+    str += '<label style="font-weight:normal"><input type="checkbox" class="j-use" name="tmp_j_use"' + (j.use ? ' checked' : '') + dis + '> 사용</label>';
+    str += '<span style="margin-left:auto">';
+    if (isRunning) {
+      str += '<button type="button" class="btn btn-sm btn-danger job-cancel" data-idx="' + i + '">취소</button> ';
+    } else {
+      str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '">지금 실행</button> ';
+    }
+    str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '"' + dis + '>삭제</button>';
+    str += '</span></div>';
+    str += '<div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:6px; align-items:center">';
+    if (LIBS_STATE == 'loading') {
+      str += '<span style="color:#888; font-size:12.5px">라이브러리 목록을 불러오는 중입니다.</span>';
+    } else if (!LIBS.length) {
+      str += '<span style="color:#c0392b">라이브러리 목록을 가져오지 못했습니다. 기본 설정의 shyni 연결을 확인해 주세요.</span>';
+    } else {
+      str += '<button type="button" class="btn btn-sm btn-default job-libs" data-idx="' + i + '"' + dis + '>라이브러리 선택</button>';
+      str += sectionChips(j.sections);
+    }
+    str += '</div></div>';
+  }
+  if (!jobs.length) str = '<div style="color:#888; padding:8px 2px">아직 작업이 없습니다. 위쪽 작업 추가 버튼으로 만들어 보세요.</div>';
+  $('#jobs_div').html(str);
+}
+
+function collectJobs() {
+  var out = [];
+  $('.job-row').each(function () {
+    var row = $(this);
+    var idx = parseInt(row.attr('data-idx'), 10);
+    var secs = (jobs[idx] && jobs[idx].sections) ? jobs[idx].sections.map(String) : [];
+    out.push({
+      name: row.find('.j-name').val().trim(),
+      cron: row.find('.j-cron').val().trim(),
+      action: row.find('.j-action').val(),
+      use: row.find('.j-use').is(':checked'),
+      sections: secs
+    });
+  });
+  return out;
+}
+
+$(document).ready(function () {
+  if (!Array.isArray(jobs)) jobs = [];
+  renderJobs();
+  loadCurrent();
+  loadSections();
+  setInterval(function () { loadCurrent(); }, 15000);
+
+  $('#anchorsToggle').off('click').on('click', function (e) {
+    e.preventDefault();
+    var body = $('#anchorsBody');
+    body.toggle();
+    $('#anchorsArrow').text(body.is(':visible') ? '▾' : '▸');
+  });
+
+  $('#jobAddBtn').off('click').on('click', function () {
+    jobs = collectJobs();
+    jobs.push({name: '', cron: '0 5 * * *', action: 'refresh_scan_empty', use: true, sections: []});
+    renderJobs();
+  });
+
+  $('#jobsUseAllBtn').off('click').on('click', function () {
+    $('.job-row .j-use:not(:disabled)').prop('checked', true);
+  });
+
+  $('#jobsUnuseAllBtn').off('click').on('click', function () {
+    $('.job-row .j-use:not(:disabled)').prop('checked', false);
+  });
+
+  $(document).off('click', '.job-del').on('click', '.job-del', function () {
+    jobs = collectJobs();
+    jobs.splice(parseInt($(this).data('idx'), 10), 1);
+    renderJobs();
+  });
+
+  $(document).off('click', '.job-run').on('click', '.job-run', function () {
+    globalSendCommand('task_execute', $(this).data('idx'));
+  });
+
+  $(document).off('click', '.job-cancel').on('click', '.job-cancel', function () {
+    globalSendCommand('cancel_current', null);
+    setTimeout(loadCurrent, 2000);
+  });
+
+  $('#jobsSaveBtn').off('click').on('click', function () {
+    globalSendCommand('save_jobs', JSON.stringify(collectJobs()));
+  });
+
+  $(document).off('click', '.job-libs').on('click', '.job-libs', function () {
+    openLibPicker(parseInt($(this).data('idx'), 10));
+  });
+
+  $('#libPickSearch').off('input').on('input', renderPickList);
+
+  $(document).off('change', '.pick-sec').on('change', '.pick-sec', function () {
+    if ($(this).is(':checked')) pickSel[String($(this).val())] = true;
+    else delete pickSel[String($(this).val())];
+    updatePickCount();
+  });
+
+  $('#libPickAll').off('click').on('click', function () {
+    $('#libPickList .pick-sec').each(function () { pickSel[String($(this).val())] = true; });
+    renderPickList();
+  });
+
+  $('#libPickNone').off('click').on('click', function () {
+    $('#libPickList .pick-sec').each(function () { delete pickSel[String($(this).val())]; });
+    renderPickList();
+  });
+
+  $('#libPickOk').off('click').on('click', function () {
+    if (pickIdx < 0 || !jobs[pickIdx]) return;
+    var secs = [];
+    for (var k = 0; k < LIBS.length; k++) if (pickSel[String(LIBS[k].key)]) secs.push(String(LIBS[k].key));
+    jobs[pickIdx].sections = secs;
+    closeLibPicker();
+    renderJobs();
+  });
+
+  $('#libPickCancel').off('click').on('click', closeLibPicker);
+
+  $('#libPickModal').off('click').on('click', function (e) {
+    if (e.target === this) closeLibPicker();
+  });
+});
+</script>
+{% endblock %}

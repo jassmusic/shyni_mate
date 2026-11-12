@@ -25,7 +25,6 @@ class ModuleScan(PluginModuleBase):
     def __init__(self, P):
         super(ModuleScan, self).__init__(P, name=name, first_menu='setting')
         self.db_default = {
-            f"sacn_item_last_list_option": "",
             f"{self.name}_db_version": "1",
             f"{self.name}_max_scan_count": "2",
             #f"{self.name}_incompleted_rescan": "False",
@@ -33,6 +32,10 @@ class ModuleScan(PluginModuleBase):
             f"{self.name}_probe_timeout_sec": "60",
             f"{self.name}_analyze_wait_min": "5",
             f"{self.name}_analyze_fail_min": "60",
+            # 진행 중 표시 고착 정리 — 작업 번호를 받지 못했거나 비우기 도중
+            # 재시작되는 등 확인할 방법이 없을 때 이 시간이 지나면 '중단됨'으로
+            # 정리한다. 0이면 끈다 (값 읽기는 대시보드 쪽에서 한다)
+            f"{self.name}_stuck_timeout_min": "30",
             # 시간 제한 탭(스캔 설정)의 입력 칸 — 키는 고급 설정 시절의 base_ 이름을
             # 그대로 쓴다 (DB 값과 shyni_backend.timeout_sec이 이 키를 읽는다)
             "base_timeout_query": "15",
@@ -49,12 +52,7 @@ class ModuleScan(PluginModuleBase):
             f"{self.name}_shyni_use": "True",
             f"{self.name}_io_yield_use": "True",
             f"{self.name}_shyni_path_rule": "",
-            f"{self.name}_trash_schedule_enable": "False",
-            f"{self.name}_trash_cron": "0 5 * * *",
             f"{self.name}_trash_schedule_anchors": "",
-            f"{self.name}_trash_sections": "[]",
-            f"{self.name}_trash_last_result": "",
-            f"{self.name}_trash_running": "",
         }
         self.web_list_model = ModelScanItem
         self.set_page_list([BrowserPage])
@@ -139,8 +137,8 @@ class ModuleScan(PluginModuleBase):
             except Exception:
                 arg['trash_cache_times'] = {}
             try:
-                from .task_status import _get_json, TRASH_COUNTS_KEY
-                counts_cache = _get_json(TRASH_COUNTS_KEY) or {}
+                from .task_status import read_trash_cache
+                counts_cache = read_trash_cache() or {}
                 arg['trash_counts_init'] = counts_cache.get('data') or {}
             except Exception:
                 arg['trash_counts_init'] = {}
@@ -211,8 +209,8 @@ class ModuleScan(PluginModuleBase):
                     summary['ts'] = time.time()
                     try:
                         P.ModelSetting.set('scan_summary_cache', json.dumps(summary))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f'[Scan] 진행현황 캐시 저장 실패: {e}')
                 summary = dict(summary)
                 summary['shyni_use'] = P.ModelSetting.get_bool('scan_shyni_use')
                 ret['summary'] = summary
@@ -335,20 +333,20 @@ class ModuleScan(PluginModuleBase):
             try:
                 from .task_trash_view import clear_cache
                 clear_cache(lib_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f'[휴지통] 전체 비우기 후 상세 캐시 지우기 실패: {e}')
             try:
                 # 전부 비웠으므로 이 라이브러리 개수는 0이 확정이다 —
                 # 개수 캐시에도 바로 반영해 현황·선택 칸이 옛 값을 보지 않게 한다
                 from .task_status import set_trash_count
                 set_trash_count(lib_id, 0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f'[휴지통] 전체 비우기 후 개수 반영 실패: {e}')
             try:
                 from .task_status import request_stats
                 request_stats()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f'[휴지통] 전체 비우기 후 통계 재계산 요청 실패: {e}')
             ret['msg'] = '휴지통을 비웠습니다.'
         elif command == 'trash_selected_action':
             # 선택한 작품 폴더에 새로고침·스캔·새로고침 후 스캔을 실행한다.
@@ -402,6 +400,8 @@ class ModuleScan(PluginModuleBase):
             from .task_trash_selected import read_sel_state
             ret['data'] = read_sel_state()
         elif command == 'manual':
+            if not (arg2 or '').strip():
+                return jsonify({'ret': 'warning', 'msg': '스캔할 파일이나 폴더 경로를 입력해 주세요.'})
             P.ModelSetting.set(f"{self.name}_manual_target", arg2)
             ModelScanItem(arg2, mode=arg1).save()
             logger.info(f'[Scan] 수동 추가: mode={arg1} target={arg2}')
@@ -424,6 +424,9 @@ class ModuleScan(PluginModuleBase):
                 item.in_library = None
                 item.shyni_job_id = None
                 item.shyni_started_at = None
+                item.shyni_phase = None
+                item.probe_received = None
+                item.probe_expected = None
                 item.section_id = None
                 item.section_type = None
                 item.meta_info = None
@@ -457,25 +460,28 @@ class ModuleScan(PluginModuleBase):
                 ret['msg'] += f' (실행 중이라 건너뜀 {skipped}개)'
         elif command == 'retry_scan':
             item = ModelScanItem.get_by_id(arg1)
-            if item.mode == 'REFRESH':
-                # 이전 404/실패 결과가 재요청을 가로막지 않도록 초기화한다.
-                # 이미 실행 중인 샤이니 job은 중복 발사하지 않는다.
-                item.section_id = None
-                item.section_type = None
+            if item is None:
+                ret = {'ret': 'warning', 'msg': '항목을 찾지 못했습니다.'}
+            else:
+                if item.mode == 'REFRESH':
+                    # 이전 404/실패 결과가 재요청을 가로막지 않도록 초기화한다.
+                    # 이미 실행 중인 샤이니 job은 중복 발사하지 않는다.
+                    item.section_id = None
+                    item.section_type = None
+                    if item.shyni_status != 'RUNNING':
+                        item.shyni_status = None
+                        item.shyni_job_id = None
+                        item.shyni_started_at = None
                 if item.shyni_status != 'RUNNING':
-                    item.shyni_status = None
-                    item.shyni_job_id = None
-                    item.shyni_started_at = None
-            if item.shyni_status != 'RUNNING':
-                # 전송 오류 횟수와 뒤늦은 결과 기록은 새 시도와 함께 지운다
-                item.fail_reason = None
-                item.send_error_count = 0
-                item.shyni_late_result = None
-                item.shyni_late_finished_at = None
-                item.shyni_late_checked_at = None
-            item.set_status('READY', save=True)
-            logger.info(f'[Scan] 재시도(READY로 변경): item={arg1} mode={item.mode}')
-            ret['msg'] = 'READY 상태로 변경했습니다.'
+                    # 전송 오류 횟수와 뒤늦은 결과 기록은 새 시도와 함께 지운다
+                    item.fail_reason = None
+                    item.send_error_count = 0
+                    item.shyni_late_result = None
+                    item.shyni_late_finished_at = None
+                    item.shyni_late_checked_at = None
+                item.set_status('READY', save=True)
+                logger.info(f'[Scan] 재시도(READY로 변경): item={arg1} mode={item.mode}')
+                ret['msg'] = 'READY 상태로 변경했습니다.'
         elif command == 'release_hold':
             ids = [int(x) for x in (arg1 or '').split(',') if x.strip().isdigit()]
             done = 0
@@ -540,7 +546,9 @@ class ModuleScan(PluginModuleBase):
     def process_api(self, sub, req):
         ret = {'ret':'success'}
         if sub == 'do_scan':
-            target = req.form['target']
+            target = req.form.get('target')
+            if not target:
+                return jsonify({'ret': 'fail', 'msg': '스캔할 대상(target)이 없습니다.'})
             target_section_id = req.form.get('target_section_id') or 0
             mode = req.form.get('mode') or 'ADD'
             callback_id = req.form.get('callback_id')
@@ -575,7 +583,11 @@ class ModuleScan(PluginModuleBase):
             target = req.form.get('target')
             recursive = (req.form.get('recursive') == 'true') or False
             async_ = (req.form.get('async') == 'true') or False
-            result = vfs_refresh(target, recursive, async_)
+            try:
+                result = vfs_refresh(target, recursive, async_)
+            except Exception as e:
+                logger.error(f'[Scan] VFS 새로고침 실패: {target} {e}')
+                return jsonify({'ret': 'fail', 'msg': f'VFS 새로고침에 실패했습니다: {e}'})
             ret.update(result)
             ret.update({
                 'recursive': recursive,

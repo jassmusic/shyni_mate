@@ -183,8 +183,10 @@ function listDirectory(result) {
     E_BROWSER_PARENT.empty();
     E_BROWSER_TBODY.empty();
     let linkClasses
-    let nameIClasses = 'fa-folder pr-2';
     for (let index in result) {
+        // 행마다 아이콘을 다시 계산한다 — 파일 행을 만난 뒤 폴더 아이콘으로
+        // 돌아오지 않던 문제를 막는다
+        let nameIClasses = 'fa-folder pr-2';
         if (index == 0) {
             linkClasses = 'dir-folder no-context restrict-context';
             result[index].size = '';

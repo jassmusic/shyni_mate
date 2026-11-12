@@ -71,8 +71,8 @@ def write_sel_state(**kwargs):
     state.update(kwargs)
     try:
         P.ModelSetting.set(STATE_KEY, json.dumps(state, ensure_ascii=False))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'[Trash] 선택 실행 상태 저장 실패: {e}')
     return state
 
 
@@ -160,7 +160,7 @@ def _do_scan(lib_id, folder, seq):
     if not url or not token:
         raise RuntimeError('기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.')
     shyni_path = ShyniBackend.map_path(folder)
-    wait = max(P.ModelSetting.get_int('scan_max_wait_time'), 1) * 60
+    wait = max(P.ModelSetting.get_int('scan_max_wait_time') or 5, 1) * 60
     body = {'path': shyni_path, 'mode': 'add', 'wait': wait}
     res = requests.post(
         f'{url}/library/sections/{lib_id}/refresh', json=body,
@@ -224,8 +224,15 @@ def run_selected_action(state):
         try:
             from .task_trash_view import clear_cache
             clear_cache(lib_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'[Trash] 선택 실행 후 상세 캐시 지우기 실패: {e}')
+        # 개수 캐시도 오래됨으로 표시해 다음 통계 계산 때 새로 읽게 한다
+        # (스캔으로 파일이 복원되면 휴지통 개수가 바뀐다)
+        try:
+            from .task_status import mark_trash_counts_stale
+            mark_trash_counts_stale()
+        except Exception as e:
+            logger.warning(f'[Trash] 선택 실행 후 개수 캐시 오래됨 표시 실패: {e}')
         write_sel_state(busy=False, current='', finished_at=time.time())
 
 

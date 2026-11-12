@@ -61,8 +61,8 @@ class ModuleStatus(PluginModuleBase):
                 P.ModelSetting.set('status_health_hidden_libs',
                                    P.ModelSetting.get('status_hidden_libs') or '')
                 P.ModelSetting.set('status_hidden_split', '1')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'[Status] 숨김 목록 이전 실패: {e}')
         # DB 통계 계산은 Celery 워커(task_status)가 전담한다 — 웹은 요청만 남긴다
         def func():
             self.start_celery(TaskStatus.start)
@@ -86,15 +86,34 @@ class ModuleStatus(PluginModuleBase):
         return None
 
     _size_lock = threading.Lock()
+    # 용량 측정 중 표시 — 측정 스레드가 돌고 있는 동안 참이다.
+    _size_measuring = False
+
+    @classmethod
+    def _start_measure_data_size(cls, path):
+        """데이터 폴더 용량 측정을 시작한다. 이미 측정 중이면 False를 돌려준다."""
+        if not cls._size_lock.acquire(False):
+            return False
+        cls._size_measuring = True
+        try:
+            threading.Thread(target=cls._measure_data_size,
+                             args=(path,), daemon=True).start()
+        except Exception:
+            cls._size_measuring = False
+            cls._size_lock.release()
+            raise
+        return True
 
     @classmethod
     def _storage(cls):
         """데이터 폴더가 있는 디스크의 사용량 + 데이터 폴더 용량(캐시).
 
-        폴더 용량 측정은 비싸서 30분 캐시하고, 오래되면 백그라운드로 다시 잰다.
+        폴더 용량 측정은 du 전체 순회라 디스크를 오래 붙잡으므로, 자동
+        측정은 캐시된 용량이 아예 없을 때(최초 1회)만 하고, 그 이후에는
+        사용자가 새로고침 아이콘을 눌렀을 때만 잰다.
         """
         path = (P.ModelSetting.get('base_shyni_data_path') or '').strip()
-        info = {'path': path}
+        info = {'path': path, 'measuring': cls._size_measuring}
         if not path or not os.path.isdir(path):
             return info
         try:
@@ -117,11 +136,8 @@ class ModuleStatus(PluginModuleBase):
                     info['breakdown'] = bd
             except Exception:
                 pass
-        if (time.time() - (info['data_size_at'] or 0) > 1800
-                or not raw_bd) \
-                and cls._size_lock.acquire(False):
-            threading.Thread(target=cls._measure_data_size,
-                             args=(path,), daemon=True).start()
+        if info.get('data_size') is None:
+            cls._start_measure_data_size(path)
         return info
 
     # 데이터 폴더 하위 폴더를 유형별로 묶는 규칙 (라벨, 폴더 이름들)
@@ -165,6 +181,7 @@ class ModuleStatus(PluginModuleBase):
         except Exception as e:
             logger.error(f'데이터 폴더 용량 측정 실패: {e}')
         finally:
+            cls._size_measuring = False
             cls._size_lock.release()
 
     @staticmethod
@@ -196,8 +213,32 @@ class ModuleStatus(PluginModuleBase):
         P.ModelSetting.set(cls._state_key(key), json.dumps(state, ensure_ascii=False))
 
     # ---------- shyni 섹션 ----------
+    # 라이브러리 목록 캐시 — 목록은 자주 바뀌지 않으니 5분간 재사용해
+    # 페이지가 열릴 때마다 shyni API를 기다리지 않게 한다. 캐시는
+    # ModelSetting에 두어 웹·Celery 프로세스가 함께 쓴다.
+    SECTIONS_CACHE_KEY = 'status_sections_cache'
+    SECTIONS_CACHE_TTL = 300
+
+    @staticmethod
+    def _sections_cache_read():
+        try:
+            raw = P.ModelSetting.get(ModuleStatus.SECTIONS_CACHE_KEY)
+            if not raw:
+                return None, 0
+            data = json.loads(raw)
+            cached = data.get('data')
+            ts = data.get('ts') or 0
+            if isinstance(cached, list):
+                return cached, ts
+        except Exception:
+            pass
+        return None, 0
+
     @staticmethod
     def _sections():
+        cached, ts = ModuleStatus._sections_cache_read()
+        if cached is not None and time.time() - ts < ModuleStatus.SECTIONS_CACHE_TTL:
+            return cached, None
         url, token = ShyniBackend.get_config()
         if not url or not token:
             return None, '기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.'
@@ -208,6 +249,10 @@ class ModuleStatus(PluginModuleBase):
             res.raise_for_status()
             dirs = res.json().get('MediaContainer', {}).get('Directory', [])
         except Exception as e:
+            # 새로 읽지 못해도 낡은 목록이 있으면 그걸 쓴다 — 목록이
+            # 잠깐 안 뜬다고 페이지를 막을 이유가 없다.
+            if cached is not None:
+                return cached, None
             return None, f'shyni 라이브러리 목록을 가져오지 못했습니다: {e}'
         out = []
         for d in dirs:
@@ -218,6 +263,11 @@ class ModuleStatus(PluginModuleBase):
                 'type': d.get('type'),
                 'path': locs[0].get('path') if locs else '',
             })
+        try:
+            P.ModelSetting.set(ModuleStatus.SECTIONS_CACHE_KEY,
+                               json.dumps({'ts': time.time(), 'data': out}, ensure_ascii=False))
+        except Exception:
+            pass
         return out, None
 
     # ---------- shyni 로그에서 스캔 이력 읽기 ----------
@@ -398,6 +448,39 @@ class ModuleStatus(PluginModuleBase):
         return res.json()
 
     # ---------- 실행 중 작업 상태 갱신 ----------
+    @staticmethod
+    def _stuck_timeout_min(record):
+        """진행 중 표시의 시간 제한(분) — 기록의 source별로 설정을 읽는다.
+
+        source가 'periodic'이면 periodic_stuck_timeout_min, 'trash'이면
+        trash_stuck_timeout_min, 없거나 그 외면 scan_stuck_timeout_min을
+        읽는다. 설정이 비어 get_int이 None을 돌려주면 기본값 30분을 쓴다.
+        0이면 시간 제한을 끈다.
+        """
+        source = (record or {}).get('source')
+        key = {'periodic': 'periodic_stuck_timeout_min',
+               'trash': 'trash_stuck_timeout_min'}.get(source, 'scan_stuck_timeout_min')
+        try:
+            val = P.ModelSetting.get_int(key)
+        except Exception:
+            val = None
+        if val is None:
+            return 30
+        return val
+
+    @staticmethod
+    def _started_over_min(record, minutes):
+        """started_at이 minutes분보다 오래됐으면 True. 0 이하면 끔,
+        시각을 읽을 수 없으면 False를 돌려준다."""
+        if not minutes or minutes <= 0:
+            return False
+        try:
+            started_ts = datetime.strptime(record.get('started_at') or '',
+                                           '%Y-%m-%d %H:%M:%S').timestamp()
+        except Exception:
+            return False
+        return bool(started_ts) and time.time() - started_ts > minutes * 60
+
     def _refresh_state(self, key, state):
         changed = False
         vfs = state.get('vfs')
@@ -439,15 +522,44 @@ class ModuleStatus(PluginModuleBase):
             changed = True
         trash = state.get('trash')
         if trash and trash.get('status') == 'running' \
-                and trash.get('mode') == 'refresh_scan_empty' \
                 and str(key) not in _trash_chain_threads:
-            # 이어서 비우기를 맡은 스레드가 없으면 재시작 등으로 끊긴 것이다
-            trash['status'] = 'interrupted'
-            trash['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            logger.warning(f'[현황] 휴지통 비우기(연결 실행) 중단 상태로 표시: 섹션 {key}')
-            changed = True
+            # 실행 스레드가 없는데 running으로 남아 있으면 재시작 등으로
+            # 끊긴 것이다. 단, 워커(주기·휴지통)가 남긴 표시는 워커가 지금
+            # 이 라이브러리를 실행 중인지 먼저 본다 — 워커는 진행 상태를
+            # *_current에 남기므로, 살아 있는 워커의 표시는 건드리지 않고
+            # 워커가 없을 때만 설정 시간 뒤에 정리한다. 워커의 비우기
+            # 표시는 mode가 동작 이름(예: refresh_scan_empty)이라, 이
+            # 구분이 없으면 실행 중인 비우기가 1분 만에 중단으로 찍힌다.
+            # 연결 실행(refresh_scan_empty)은 스레드가 살아 있는 동안만
+            # running이므로, 시작 1분이 지나도 스레드가 없으면 바로
+            # 정리한다 (1분 유예는 스레드 등록 직전의 찰나를 피하기 위함).
+            # 단독 비우기는 동기 실행이라 스레드가 없으므로 시작 후 설정
+            # 시간(기본값 30분)이 지난 경우에만 중단으로 정리한다.
+            source = trash.get('source')
+            if source in ('periodic', 'trash'):
+                cur_key = ('trash_current' if source == 'trash'
+                           else 'periodic_current')
+                alive = False
+                try:
+                    raw_cur = P.ModelSetting.get(cur_key)
+                    cur = json.loads(raw_cur) if raw_cur else None
+                    alive = (isinstance(cur, dict)
+                             and str(cur.get('section_key')) == str(key))
+                except Exception:
+                    alive = False
+                stale = (not alive) and self._started_over_min(
+                    trash, self._stuck_timeout_min(trash))
+            elif trash.get('mode') == 'refresh_scan_empty':
+                stale = self._started_over_min(trash, 1)
+            else:
+                stale = self._started_over_min(trash, self._stuck_timeout_min(trash))
+            if stale:
+                trash['status'] = 'interrupted'
+                trash['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                logger.warning(f'[현황] 휴지통 비우기 중단 상태로 표시: 섹션 {key}')
+                changed = True
         scan = state.get('scan')
-        if scan and scan.get('status') == 'running' and scan.get('job') is not None:
+        if scan and scan.get('status') in ('running', 'requested') and scan.get('job') is not None:
             url, token = ShyniBackend.get_config()
             if url and token:
                 try:
@@ -467,21 +579,41 @@ class ModuleStatus(PluginModuleBase):
                             try:
                                 from .task_trash_view import clear_cache
                                 clear_cache(key)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f'[현황] 휴지통 상세 캐시 지우기 실패: {e}')
                             try:
                                 from .task_status import mark_trash_counts_stale
                                 mark_trash_counts_stale()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f'[현황] 휴지통 개수 캐시 오래됨 표시 실패: {e}')
                         elif job.get('status') == 'failed':
                             scan['status'] = 'failed'
                             scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             scan['error'] = str(job.get('error') or '')[:200]
                             logger.error(f"[현황] 스캔 실패: 섹션 {key} job {scan['job']} — {scan['error']}")
                             changed = True
+                    elif res.status_code == 404:
+                        # job 기록이 사라지면(보관 기간 경과·shyni 재시작 등)
+                        # 완료를 확인할 길이 없어 진행 중으로 굳는다 — 중단으로 정리한다
+                        scan['status'] = 'interrupted'
+                        scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        scan['error'] = 'job 기록을 찾을 수 없습니다'
+                        logger.warning(f"[현황] 스캔 job {scan['job']} 기록이 없어 중단으로 정리: 섹션 {key}")
+                        changed = True
                 except Exception:
                     pass
+        if scan and scan.get('status') == 'requested' and not scan.get('job'):
+            # job id가 없어 완료를 확인할 수 없는 표시 — 시작 후 설정 시간
+            # (기본값 30분)이 지나면 중단으로 정리한다. job id가 있는 기록은
+            # 폴링으로만 판정하고 시간 제한을 적용하지 않는다 (수 시간짜리
+            # 정상 스캔이 중단으로 찍히면 안 되므로).
+            timeout = self._stuck_timeout_min(scan)
+            if self._started_over_min(scan, timeout):
+                scan['status'] = 'interrupted'
+                scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                scan['error'] = '스캔 상태를 확인할 수 없어 중단으로 정리했습니다'
+                logger.warning(f'[현황] 스캔 전송됨 표시가 오래돼 중단으로 정리: 섹션 {key}')
+                changed = True
         if changed:
             self._set_state(key, state)
         return state
@@ -519,7 +651,8 @@ class ModuleStatus(PluginModuleBase):
                 return jsonify({'ret': 'success', 'data': [], 'need_config': True,
                                 'log_files': 0,
                                 'refresh_min': self._refresh_min(),
-                                'periodic_current': None, 'type_counts': {},
+                                'periodic_current': None, 'trash_current': None,
+                                'type_counts': {},
                                 'db_loading': False, 'progress': 100,
                                 'server': None, 'storage': None})
             # 한 번 불러온 정보는 새로고침 주기 동안 그대로 보여 주고, 주기가 지나거나
@@ -566,12 +699,22 @@ class ModuleStatus(PluginModuleBase):
                             periodic_current = cur
                     except Exception:
                         pass
+                trash_current = None
+                raw_trash = P.ModelSetting.get('trash_current')
+                if raw_trash:
+                    try:
+                        cur = json.loads(raw_trash)
+                        if isinstance(cur, dict):
+                            trash_current = cur
+                    except Exception:
+                        pass
                 type_counts = {}
                 for sec in sections:
                     t = sec.get('type') or 'unknown'
                     type_counts[t] = type_counts.get(t, 0) + 1
                 base = {'data': rows, 'log_files': log_file_count,
                         'periodic_current': periodic_current,
+                        'trash_current': trash_current,
                         'type_counts': type_counts,
                         'server': self._health(), 'storage': self._storage(),
                         'cached_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -579,8 +722,8 @@ class ModuleStatus(PluginModuleBase):
                 try:
                     P.ModelSetting.set('status_list_cache',
                                        json.dumps({'at': now_ts, 'data': base}))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f'[Status] 대시보드 목록 캐시 저장 실패: {e}')
             rows = base['data']
             # 진행 중으로 표시된 작업이 있으면, 캐시로 답하는 경우에도 상태만큼은
             # 그 자리에서 다시 확인한다 (끝난 작업이 다음 주기까지 '진행 중'으로 남지 않게)
@@ -594,6 +737,7 @@ class ModuleStatus(PluginModuleBase):
                     except Exception:
                         pass
             periodic_current = base['periodic_current']
+            trash_current = base.get('trash_current')
             db_stats_on = False
             health = None
             db_loading = False
@@ -613,6 +757,7 @@ class ModuleStatus(PluginModuleBase):
                             'log_files': base['log_files'],
                             'refresh_min': interval,
                             'periodic_current': periodic_current,
+                            'trash_current': trash_current,
                             'type_counts': base['type_counts'],
                             'db_stats_on': db_stats_on,
                             'db_loading': db_loading,
@@ -622,6 +767,23 @@ class ModuleStatus(PluginModuleBase):
                             'cached_at': base.get('cached_at'),
                             'server': base['server'],
                             'storage': base['storage']})
+
+        if sub == 'refresh_data_size':
+            # 데이터 폴더 용량 수동 측정 — du 전체 순회는 디스크를 오래
+            # 붙잡으므로 자동으로는 최초 1회만 재고, 이후에는 사용자가
+            # 새로고침 아이콘을 눌렀을 때만 잰다.
+            path = (P.ModelSetting.get('base_shyni_data_path') or '').strip()
+            if not path or not os.path.isdir(path):
+                return jsonify({'ret': 'fail', 'msg': '데이터 폴더를 찾지 못했습니다. 기본 설정에서 shyni 데이터 폴더를 확인해 주세요.'})
+            if not type(self)._start_measure_data_size(path):
+                return jsonify({'ret': 'success', 'measuring': True,
+                                'msg': '용량을 측정하고 있습니다. 잠시만 기다려 주세요.'})
+            return jsonify({'ret': 'success', 'measuring': True,
+                            'msg': '데이터 용량을 다시 측정하고 있습니다. 끝나면 자동으로 반영됩니다.'})
+
+        if sub == 'storage':
+            # 용량 카드만 가볍게 다시 읽는다 (수동 측정 완료 확인용 폴링)
+            return jsonify({'ret': 'success', 'storage': self._storage()})
 
         if sub == 'set_lib_sort':
             # 대시보드·건강도에서 고른 정렬을 화면별로 기억한다.
@@ -710,6 +872,20 @@ class ModuleStatus(PluginModuleBase):
                         logger.info(f"[현황] 주기적 스캔 취소 요청: {sec['title']}")
                         return jsonify({'ret': 'success',
                                         'msg': '주기적 스캔 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다.'})
+                # 휴지통 작업이 이 라이브러리를 실행 중이면 그쪽 취소를 요청한다
+                raw_trash = P.ModelSetting.get('trash_current')
+                if raw_trash:
+                    try:
+                        cur = json.loads(raw_trash)
+                    except Exception:
+                        cur = None
+                    if isinstance(cur, dict) and str(cur.get('section_key')) == str(key):
+                        # task_trash가 이 모듈을 참조하므로 순환을 피하려 안에서 가져온다
+                        from .task_trash import request_trash_cancel
+                        request_trash_cancel()
+                        logger.info(f"[현황] 휴지통 작업 취소 요청: {sec['title']}")
+                        return jsonify({'ret': 'success',
+                                        'msg': '휴지통 작업 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다.'})
                 meta = state.get('meta')
                 if meta and meta.get('status') == 'running':
                     meta['cancel'] = True
@@ -799,7 +975,7 @@ class ModuleStatus(PluginModuleBase):
                 is_folder = bool(only_no_code and db_support.library_is_folder(key))
                 _, ml = db_support.library_main_label(key)
                 try:
-                    # 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라
+                    # 폴더 에이전트 라이브러리는 메타가 없는 것이 특성이라
                     # '메타 없는 앨범'을 표지 없는 앨범으로 본다.
                     if is_folder:
                         ids = db_support.album_ids(key, only_no_thumb=True)
@@ -1110,28 +1286,22 @@ class ModuleStatus(PluginModuleBase):
         try:
             from .task_status import refresh_trash_counts_async
             refresh_trash_counts_async()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'[현황] 휴지통 개수 새로 읽기 요청 실패: {e}')
         # 비운 라이브러리의 상세 캐시 목록은 낡으므로 지운다
         try:
             from .task_trash_view import clear_cache
             clear_cache(key)
-        except Exception:
-            pass
-        # 휴지통 수가 바뀌므로 DB 통계 재계산을 요청한다
+        except Exception as e:
+            logger.warning(f'[현황] 휴지통 상세 캐시 지우기 실패: {e}')
+        # 휴지통 수가 바뀌므로 DB 통계 재계산을 요청한다.
+        # 상태를 직접 쓰면 계산 중일 때 요청이 소실되고 busy까지 지워지므로
+        # request_stats를 쓴다 (계산 중에도 요청이 유지된다).
         try:
-            st_raw = P.ModelSetting.get('status_db_stats_state')
-            st = json.loads(st_raw) if st_raw else {}
-            if not isinstance(st, dict):
-                st = {}
-        except Exception:
-            st = {}
-        st.pop('busy', None)
-        st['requested_at'] = time.time()
-        try:
-            P.ModelSetting.set('status_db_stats_state', json.dumps(st))
-        except Exception:
-            pass
+            from .task_status import request_stats
+            request_stats()
+        except Exception as e:
+            logger.warning(f'[현황] DB 통계 재계산 요청 실패: {e}')
         return True, ''
 
     def _run_scan_trash(self, key, title):
@@ -1220,15 +1390,20 @@ class ModuleStatus(PluginModuleBase):
                         self._set_state(key, st)
                 time.sleep(0.15)
         finally:
-            st = self._get_state(key)
-            if st.get('meta'):
-                finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                st['meta']['done'] = done
-                st['meta']['fail'] = fail
-                st['meta']['status'] = 'cancelled' if cancelled else 'done'
-                st['meta']['finished_at'] = finished_at
-                self._set_state(key, st)
+            # 스레드 사전부터 비운다 — set_state가 예외를 일으켜도 항목이
+            # 남아 '실행 중'으로 오인되지 않게 한다.
             _meta_refresh_threads.pop(str(key), None)
+            try:
+                st = self._get_state(key)
+                if st.get('meta'):
+                    finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    st['meta']['done'] = done
+                    st['meta']['fail'] = fail
+                    st['meta']['status'] = 'cancelled' if cancelled else 'done'
+                    st['meta']['finished_at'] = finished_at
+                    self._set_state(key, st)
+            except Exception as e:
+                logger.warning(f'[현황] 메타 새로고침 상태 저장 실패: {e}')
             logger.info(f'[현황] 메타 새로고침 {"취소됨" if cancelled else "완료"}: '
                         f'{title} 처리 {done} · 실패 {fail} / 전체 {len(ids)}')
         if filled_kind and not cancelled and finished_at:
@@ -1238,7 +1413,7 @@ class ModuleStatus(PluginModuleBase):
         """전송이 끝난 뒤 shyni 반영을 두 차례 확인해, 실제로 채워진 수를
         완료 상태에 남긴다 (전송 완료와 반영 완료가 다르기 때문)."""
         from . import db_support
-        label = '표지' if kind == 'thumb' else '코드'
+        label = '표지' if kind == 'thumb' else '메타'
         n = None
         for delay in (90, 150):
             time.sleep(delay)

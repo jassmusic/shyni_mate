@@ -1,3 +1,4 @@
+import json
 import time as _time
 from datetime import timedelta
 
@@ -44,7 +45,6 @@ class ModelScanItem(ModelBase):
     process_finish_time = db.Column(db.DateTime)
     process_duration = db.Column(db.Integer)
     status = db.Column(db.String)
-    queue_list = []
 
     filecheck_count = db.Column(db.Integer)
     send_attempt = db.Column(db.Integer)  # shyni 전송 시도 번호 — 멱등 키 재료 전용 (파일체크 횟수와 별개로 세며, 리셋·재시도에서도 되돌리지 않는다)
@@ -111,35 +111,6 @@ class ModelScanItem(ModelBase):
 
 
 
-    @classmethod
-    def get_incompleted(cls):
-        with F.app.app_context():
-            return db.session.query(cls).filter_by(
-                flag_finish=False
-            ).all()
-
-
-    ### only for queue
-    def init_for_queue(self):
-        self.queue_list.append(self)
-
-    @classmethod
-    def get_by_id_in_queue(cls, id):
-        for _ in cls.queue_list:
-            if _.id == int(id):
-                return _
-
-    @classmethod
-    def remove_in_queue(cls, db_item):
-        ret = []
-        for _ in cls.queue_list:
-            if _.id == db_item.id:
-                continue
-            ret.append(_)
-        cls.queue_list = ret
-
-
-
     def set_status(self, status, save=False):
         self.status = status
         # 리셋 표시는 재처리가 끝나도 지우지 않는다 (리셋한 항목임을 목록에서 계속 보여 준다)
@@ -148,9 +119,6 @@ class ModelScanItem(ModelBase):
             self.flag_filecheck = True
         elif status == 'SCANNING':
             self.process_start_time = datetime.now()
-        elif status == 'FINISH_ADD':
-            self.process_finish_time = datetime.now()
-            self.process_duration = str(self.process_finish_time - self.process_start_time)
         if self.status.startswith('FINISH_'):
             self.completed_time = datetime.now()
             if self.callback_id != None and self.callback_url != None:
@@ -170,7 +138,6 @@ class ModelScanItem(ModelBase):
                 except Exception as e:
                     logger.error(f'Exception:{str(e)}')
                     #logger.error(traceback.format_exc())
-            self.remove_in_queue(self)
         if save:
             self.save()
 
@@ -202,8 +169,9 @@ class ModelScanItem(ModelBase):
         '분석중' 표시 분류가 이 조건 하나를 공유한다 (기준이 갈라지지 않게).
         기준 시각은 shyni job의 실제 시작(shyni_started_at), 기록이 없으면
         mate가 전송한 시각(process_start_time)이다.
-        REFRESH 등록 대기(refresh-scan:)는 실제 등록 스캔이 도는 구간을 포함해
-        제외하지 않는다. 설정이 0이면 어떤 항목도 해당하지 않는다."""
+        REFRESH 등록 대기(refresh-scan:)는 이 조건에서 제외한다 — 등록 스캔이
+        도는 구간을 포함하므로 동시 스캔 수에서는 계속 센다. 설정이 0이면
+        어떤 항목도 해당하지 않는다."""
         if wait_min is None:
             wait_min = cls.analyze_wait_min_cached()
         if now is None:
@@ -370,21 +338,33 @@ class ModelScanItem(ModelBase):
 
     @classmethod
     def summary_counts(cls):
-        """스캔 진행현황 한 줄용 집계 — 목록 필터(표시 상태)와 같은 기준으로 센다."""
+        """스캔 진행현황 한 줄용 집계 — 목록 필터(표시 상태)와 같은 기준으로 센다.
+
+        번호 목록은 전부 최신 번호부터(내림차순) 돌려준다 — 펼친 목록이
+        가장 최근 항목부터 보이게 하기 위해서다."""
         with F.app.app_context():
             def _query(option2):
-                return cls.make_query(None, order='asc', search='', option2=option2)
+                return cls.make_query(None, order='desc', search='', option2=option2)
             scanning_ids = [r[0] for r in
                             _query('SCANNING').with_entities(cls.id).all()]
             analyzing_ids = [r[0] for r in
                              _query('ANALYZING').with_entities(cls.id).all()]
             queued_ids = [r[0] for r in
                           _query('QUEUED').with_entities(cls.id).all()]
-            # 최근 완료 10개 — 스캔 목록 '최근 완료' 토글이 번호를 펼쳐 보여 준다
+            # 최근 완료·실패 10개 — 스캔 목록 둘째 줄의 완료·실패 토글이
+            # 번호를 펼쳐 보여 준다. 총수는 토글에 항상 표시된다
             recent_done_ids = [r[0] for r in db.session.query(cls.id).filter(
                 cls.status == 'FINISH_SHYNI').order_by(
                     cls.completed_time.desc(), cls.id.desc()).limit(10).all()]
+            recent_failed_ids = [r[0] for r in db.session.query(cls.id).filter(
+                cls.status == 'FINISH_SHYNI_FAILED').order_by(
+                    cls.completed_time.desc(), cls.id.desc()).limit(10).all()]
             return {'recent_done_ids': recent_done_ids,
+                    'recent_failed_ids': recent_failed_ids,
+                    'total_done': db.session.query(cls.id).filter(
+                        cls.status == 'FINISH_SHYNI').count(),
+                    'total_failed': db.session.query(cls.id).filter(
+                        cls.status == 'FINISH_SHYNI_FAILED').count(),
                     'scanning_ids': scanning_ids,
                     'analyzing_ids': analyzing_ids,
                     'assembling': _query('ASSEMBLING').count(),
@@ -434,7 +414,12 @@ class ModelScanItem(ModelBase):
             ret['paging'] = cls.get_paging_info(count, page, page_size)
             try:
                 if cls.P.ModelSetting is not None and cls.__tablename__ is not None:
-                    cls.P.ModelSetting.set(f'{cls.__tablename__}_last_list_option', f'{order}|{page}|{search}|{option1}|{option2}|{option3}')
+                    # 검색어에 '|'가 들어가도 깨지지 않게 JSON 형태로 저장한다
+                    # (옛 '|' 형식 값은 템플릿이 그대로 읽을 수 있게 둔다)
+                    cls.P.ModelSetting.set(f'{cls.__tablename__}_last_list_option', json.dumps(
+                        {'order': order, 'page': page, 'search': search,
+                         'option1': option1, 'option2': option2, 'option3': option3},
+                        ensure_ascii=False))
             except Exception as e:
                 F.logger.error(f"Exception:{str(e)}")
                 F.logger.error(traceback.format_exc())
@@ -443,43 +428,10 @@ class ModelScanItem(ModelBase):
         except Exception as e:
             cls.P.logger.error(f"Exception:{str(e)}")
             cls.P.logger.error(traceback.format_exc())
-
-    """
-    @classmethod
-    def get_items(cls, mode):
-        if mode == 'wait':
-            query = db.session.query(cls).filter(or_(cls.status == 'ready', cls.status.like('wait_%')))
-
-        elif mode == 'run':
-            query = db.session.query(cls).filter(cls.status.like('run_%'))
-        elif mode == 'all':
-            query = db.session.query(cls)
-
-        query = query.order_by(cls.id)
-        #logger.debug(query)
-        items = query.all()
-        return items
-
-
-    @classmethod
-    def is_already_scan_folder_exist(cls, scan_folder):
-        query = db.session.query(cls).filter(
-            cls.scan_folder == scan_folder,
-            or_(cls.status == 'run_add_find', cls.status == 'run_remove_removed')
-        )
-        query = query.order_by(cls.id)
-        items = query.all()
-        return items
-
-    @classmethod
-    def not_finished_to_ready(cls):
-        items = db.session.query(cls).filter(not_(cls.status.like('finish_%'))).with_for_update().all()
-        for item in items:
-            item.status = 'ready'
-        db.session.commit()
-
-
-    # JSON
-
-
-    """
+            # 프레임워크는 web_list의 반환을 그대로 JSON으로 바꾸므로,
+            # 예외 때도 목록 형태를 돌려줘야 500이 되지 않는다
+            try:
+                paging = cls.get_paging_info(0, 1, 30)
+            except Exception:
+                paging = {'count': 0, 'page': 1, 'page_size': 30}
+            return {'list': [], 'paging': paging}

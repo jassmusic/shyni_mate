@@ -50,8 +50,8 @@ def write_state(**kwargs):
     state.update(kwargs)
     try:
         P.ModelSetting.set(STATE_KEY, json.dumps(state))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'[Trash] 조회 상태 저장 실패: {e}')
     return state
 
 
@@ -86,13 +86,17 @@ def _cache_libs():
 
 
 def write_cache(lib_id, data):
+    """조회 결과 캐시를 저장한다 — 성공 여부를 돌려준다 (실패하면
+    compute_view가 완료 표시 대신 오류 상태를 남긴다)."""
     libs = _cache_libs()
     libs[str(lib_id)] = {'at': time.time(), 'data': data}
     try:
         P.ModelSetting.set(CACHE_KEY, json.dumps({'libs': libs},
                                                  ensure_ascii=False))
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        logger.warning(f'[Trash] 휴지통 조회 캐시 저장 실패: {e}')
+        return False
 
 
 def cached_data(lib_id):
@@ -122,8 +126,8 @@ def clear_cache(lib_id=None):
     if lib_id is None:
         try:
             P.ModelSetting.set(CACHE_KEY, '')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'[Trash] 휴지통 조회 캐시 지우기 실패: {e}')
         return
     libs = _cache_libs()
     if str(lib_id) in libs:
@@ -131,8 +135,8 @@ def clear_cache(lib_id=None):
         try:
             P.ModelSetting.set(CACHE_KEY, json.dumps({'libs': libs},
                                                      ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'[Trash] 휴지통 조회 캐시 지우기 실패: {e}')
 
 
 def request_view(lib_id, force=False):
@@ -140,6 +144,7 @@ def request_view(lib_id, force=False):
 
     이미 계산 중이면 그 상태를 그대로 돌려주고, 같은 라이브러리의 요청이
     접수만 된 채 15분이 지나면 워커 무응답으로 보고 다시 요청할 수 있게 한다.
+    다른 라이브러리의 요청이 대기 중이면 덮어쓰지 않고 거부한다.
     단, 캐시가 있는데 force('최신으로 조회')가 아니면 계산을 시작하지
     않는다 — 캐시 확인보다 조회가 먼저 눌린 경우의 방어로, 화면은 캐시를
     보여 준다. force일 때만 끝난 계산이 있어도 다시 계산한다.
@@ -152,9 +157,16 @@ def request_view(lib_id, force=False):
     now = time.time()
     requested_at = state.get('requested_at') or 0
     finished_at = state.get('finished_at') or 0
-    if (state.get('lib') == lib_id and requested_at > finished_at
-            and now - requested_at < REQUEST_EXPIRE):
-        return state
+    pending = requested_at > finished_at and now - requested_at < REQUEST_EXPIRE
+    if pending:
+        if str(state.get('lib')) == str(lib_id):
+            return state
+        # 다른 라이브러리의 조회가 대기 중이면 덮어쓰지 않고 거부한다 —
+        # 덮어쓰면 그 라이브러리는 계산되지 않은 채 화면만 오래 기다리게 된다.
+        # 화면은 다음 폴링 때 다시 요청하므로, 끝난 뒤 자동으로 이어진다
+        return {'ret': 'fail',
+                'msg': '다른 라이브러리의 조회가 대기 중입니다. 끝난 뒤에 다시 시도해 주세요.',
+                'lib': state.get('lib'), 'requested_at': requested_at}
     return write_state(lib=lib_id, requested_at=now, progress=0, error=None)
 
 
@@ -175,8 +187,8 @@ def write_bulk(**kwargs):
     bulk.update(kwargs)
     try:
         P.ModelSetting.set(BULK_KEY, json.dumps(bulk))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'[Trash] 전체 조회 상태 저장 실패: {e}')
     return bulk
 
 
@@ -245,13 +257,20 @@ def compute_view(lib_id):
         def cb(pct):
             write_state(progress=max(2, min(98, int(pct))))
         data = db_support.trash_compute(lib_id, progress_cb=cb)
-        write_cache(lib_id, data)
+        if not write_cache(lib_id, data):
+            # 캐시를 저장하지 못했으면 완료 표시를 남기지 않고 오류로 끝낸다.
+            # finished_at은 함께 찍는다 — 화면이 오류를 보려면 끝난 시각이
+            # 필요하고, 안 찍으면 감시 루프가 같은 계산을 계속 다시 돌린다
+            write_state(busy=False, progress=0, finished_at=time.time(),
+                        error='조회 결과를 저장하지 못했습니다. 다시 조회해 주세요.')
+            logger.warning(f'[Trash] 휴지통 조회 캐시 저장 실패로 오류 처리: 라이브러리 {lib_id}')
+            return
         # 현황·건강도의 휴지통 개수 캐시에도 이 라이브러리 개수를 바로 반영한다
         try:
             from .task_status import set_trash_count
             set_trash_count(lib_id, (data.get('summary') or {}).get('files') or 0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f'[Trash] 휴지통 개수 반영 실패: {e}')
         write_state(busy=False, progress=100, finished_at=time.time())
         logger.info(f"[Trash] 휴지통 조회 계산 완료 (워커): 라이브러리 {lib_id}, "
                     f"파일 {data['summary']['files']}개 · "

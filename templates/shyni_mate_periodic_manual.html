@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
+      작업 관리
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13.5px">
+      라이브러리를 골라 cron으로 등록해 두면, 정해진 시각에 하나씩 순차로 실행합니다. 동작은 새로고침·스캔·새로고침 후 스캔 중에서 고를 수 있습니다.
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
+      스캔 결과
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13.5px">
+      주기적 스캔의 실행 결과를 봅니다. 행을 누르면 단계별 소요와 집계, 추가된 파일을 볼 수 있습니다.
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
+      설정
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13.5px">
+      주기적 스캔의 진행 중 표시 정리 시간과 실행 이력 보관 기간을 정합니다.
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13px; color:#888">
+      나머지 매뉴얼은 함께 작성할 예정입니다.
+    </span>
+  </div>
+</div>
+
+{% endblock %}

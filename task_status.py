@@ -48,26 +48,46 @@ def write_state(**kwargs):
     state.update(kwargs)
     try:
         P.ModelSetting.set(STATE_KEY, json.dumps(state))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'[Status] 상태 저장 실패: {e}')
     return state
 
 
 def request_stats(force=False):
     """웹 프로세스가 계산을 요청한다 — 실제 계산은 워커가 수행한다.
 
-    이미 계산 중이거나, 접수된 요청이 15분 이내면 중복 요청하지 않는다.
-    15분이 지나도 처리되지 않은 요청은 워커 무응답으로 보고 다시 요청할 수
-    있게 하며, 그때까지 웹은 마지막 저장 결과를 계속 보여 준다."""
+    접수된 요청이 15분 이내면 중복 요청하지 않는다. 15분이 지나도 처리되지
+    않은 요청은 워커 무응답으로 보고 다시 요청할 수 있게 하며, 그때까지 웹은
+    마지막 저장 결과를 계속 보여 준다.
+    계산 중에도 요청은 남긴다 — 그 요청이 없으면 비우기처럼 계산 도중에
+    바뀐 내용이 다음 재계산까지 반영되지 않는다. compute_stats가 끝나면서
+    계산 중에 들어온 요청을 finished_at 뒤에 다시 남겨 워커가 다시 계산한다."""
     state = read_state()
-    if state.get('busy'):
-        return state
     now = time.time()
     requested_at = state.get('requested_at') or 0
     finished_at = state.get('finished_at') or 0
+    if state.get('busy'):
+        # 계산 중 — 이미 계산 시작 뒤에 남긴 요청이 있으면 중복하지 않고,
+        # 없으면 요청만 남긴다 (진행률·busy는 건드리지 않는다).
+        started_at = state.get('started_at') or 0
+        if requested_at > started_at and now - requested_at < REQUEST_EXPIRE:
+            return state
+        return write_state(requested_at=now)
     if requested_at > finished_at and now - requested_at < REQUEST_EXPIRE:
         return state
     return write_state(requested_at=now, progress=0, error=None)
+
+
+def _requeue_if_requested_during(req_at):
+    """계산 중에 들어온 새 요청이 있으면 finished_at 뒤에 다시 남긴다.
+
+    계산이 끝나면서 finished_at을 찍으면, 계산 중에 남긴 요청이 그보다
+    먼저 찍혀 워커가 '이미 처리된 요청'으로 보고 넘겨버린다. 요청 시각을
+    finished_at보다 뒤로 다시 찍어 다음 감시 주기에 다시 계산하게 한다."""
+    state = read_state()
+    if (state.get('requested_at') or 0) > req_at:
+        finished_at = state.get('finished_at') or 0
+        write_state(requested_at=max(time.time(), finished_at + 0.001))
 
 
 TRASH_CACHE_KEY = 'status_trash_counts_cache'
@@ -91,8 +111,8 @@ def write_trash_cache(counts, at=None):
         P.ModelSetting.set(TRASH_CACHE_KEY, json.dumps(
             {'at': time.time() if at is None else at,
              'data': {str(k): int(v) for k, v in counts.items()}}))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'[Status] 휴지통 개수 캐시 저장 실패: {e}')
 
 
 def trash_counts_for_stats():
@@ -147,17 +167,16 @@ def mark_trash_counts_stale():
     그때마다 돌리지 않기 위한 표시. 데이터는 그대로 두어 화면에는
     직전 개수가 계속 보인다."""
     try:
-        cache = _get_json(TRASH_COUNTS_KEY)
-        if cache:
-            cache['at'] = 0
-            P.ModelSetting.set(TRASH_COUNTS_KEY, json.dumps(cache))
-    except Exception:
-        pass
+        cache = read_trash_cache()
+        write_trash_cache(cache.get('data') or {}, at=0)
+    except Exception as e:
+        logger.warning(f'[Status] 휴지통 개수 캐시 오래됨 표시 실패: {e}')
 
 
 def compute_stats():
     """DB 통계 계산 본체 — 워커에서만 실행한다 (기존 웹 스레드 계산을 옮긴 것)."""
     t0 = time.time()
+    req_at = read_state().get('requested_at') or 0
     write_state(busy=True, progress=5, started_at=t0, error=None)
     try:
         counts = trash_counts_for_stats()
@@ -175,13 +194,20 @@ def compute_stats():
         try:
             P.ModelSetting.set(CACHE_KEY,
                                json.dumps({'at': time.time(), 'data': data}))
-        except Exception:
-            pass
+        except Exception as e:
+            # 저장이 안 됐는데 완료로 표시하면 화면에 '불러오기 완료'가 뜨고
+            # 옛 통계가 그대로 보인다 — error를 남기고 finished_at은 찍지 않아
+            # 다음 감시 주기에 다시 계산하게 한다.
+            logger.warning(f'[Status] DB 통계 캐시 저장 실패: {e}')
+            write_state(busy=False, progress=0, error=f'통계 저장에 실패했습니다: {e}')
+            return
         write_state(busy=False, progress=100, finished_at=time.time())
+        _requeue_if_requested_during(req_at)
         logger.info(f"[Status] DB 통계 계산 완료 (워커): {data['elapsed']}초")
     except Exception as e:
         logger.warning(f'[Status] DB 통계 계산 실패(워커): {e}')
         write_state(busy=False, progress=0, finished_at=time.time(), error=str(e))
+        _requeue_if_requested_during(req_at)
 
 
 class TaskStatus:

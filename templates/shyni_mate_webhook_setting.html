@@ -15,11 +15,11 @@
 
 {{ macros.m_tab_content_start('normal', true) }}
   {{ macros.setting_checkbox('webhook_use', '웹훅 알림 사용', value=arg['webhook_use'], desc=['shyni에서 재생 소식과 새 항목 소식이 오면, Discord로 다시 보내 드립니다.', '켜 두시면 아래에서 정한 소식들을 Discord로 보내 드립니다.']) }}
-  {{ macros.setting_input_text('webhook_discord_url', 'Discord 웹훅 주소', value=arg['webhook_discord_url'], desc=['알림을 받을 Discord 채널의 웹훅 주소를 입력해 주세요.']) }}
+  {{ macros.setting_input_text('webhook_discord_url', 'Discord 웹훅 주소', value=arg['webhook_discord_url'], type='password', desc=['알림을 받을 Discord 채널의 웹훅 주소를 입력해 주세요.']) }}
   {{ macros.setting_input_text('webhook_play_events', '받을 재생 알림', value=arg['webhook_play_events'], desc=['받고 싶은 알림만 쉼표로 구분해 적어 주세요. 예: play, stop', '종류는 play(재생), pause(일시정지), resume(다시 재생), stop(중지), scrobble(끝까지 재생)입니다. 비워 두면 전부 받습니다.']) }}
   {{ macros.setting_checkbox('webhook_attach_thumb', '표지 이미지 함께 보내기', value=arg['webhook_attach_thumb'], desc=['shyni가 함께 보내 주는 표지 이미지를 Discord 메시지에도 표시합니다.']) }}
   {{ macros.setting_checkbox('webhook_library_use', '신규 항목 알림', value=arg['webhook_library_use'], desc=['새로 추가된 항목을 건마다 보내지 않고, 모아서 요약으로 알려 드립니다.']) }}
-  {{ macros.setting_input_int('webhook_library_interval_min', '신규 항목 묶는 간격', min=1, max=120, value=arg['webhook_library_interval_min'], desc=['단위: 분', '마지막으로 새 항목이 들어온 뒤 이 시간만큼 조용하면, 그때까지 쌓인 항목을 라이브러리마다 한 건씩 보내 드립니다. 기본값은 5분입니다.']) }}
+  {{ macros.setting_input_int('webhook_library_interval_min', '신규 항목 묶는 간격', min=1, max=120, value=arg['webhook_library_interval_min'], desc=['기본값 5분 · 단위: 분', '마지막으로 새 항목이 들어온 뒤 이 시간만큼 조용하면, 그때까지 쌓인 항목을 라이브러리마다 한 건씩 보내 드립니다.']) }}
 {{ macros.m_tab_content_end() }}
 
 {{ macros.m_tab_content_start('api', false) }}
@@ -28,4 +28,48 @@
 
 </div>
 </form>
+
+<script type="text/javascript">
+$(document).ready(function(){
+  // 웹훅 주소 칸 보기/숨기기
+  $('#webhook_discord_url').each(function(){
+    var $input = $(this);
+    var $btn = $('<button type="button" class="btn btn-sm btn-outline-secondary" style="margin-left:6px">보기</button>');
+    $btn.on('click', function(){
+      var show = $input.attr('type') === 'password';
+      $input.attr('type', show ? 'text' : 'password');
+      $btn.text(show ? '숨기기' : '보기');
+    });
+    $input.after($btn);
+  });
+
+  // 저장 전 숫자 칸 검증 — 비어 있으면 통과, 값이 있으면 정수·범위를 확인한다.
+  // 최상위 function 선언이 아니라 ready 안에서 할당한다. 프레임워크 스크립트가
+  // 나중에 로드돼 기본값으로 덮어쓰기 때문이다.
+  window.globalSettingSaveBefore = function(){
+    var ok = true;
+    $('#setting input[type=number]').each(function(){
+      var $input = $(this);
+      var val = $input.val().trim();
+      if (val === '') return;
+      var label = $input.closest('.row').find('.set-left strong').first().text().trim() || $input.attr('name');
+      if (!/^-?\d+$/.test(val)) {
+        $.notify('<strong>' + label + ' 칸에 숫자를 입력해 주세요.</strong>', {type: 'warning'});
+        ok = false;
+        return false;
+      }
+      var num = parseInt(val, 10);
+      var min = $input.attr('min');
+      var max = $input.attr('max');
+      if ((min !== undefined && min !== '' && num < parseInt(min, 10)) ||
+          (max !== undefined && max !== '' && num > parseInt(max, 10))) {
+        $.notify('<strong>' + label + ' 칸의 범위를 확인해 주세요.</strong>', {type: 'warning'});
+        ok = false;
+        return false;
+      }
+    });
+    return ok;
+  };
+});
+</script>
 {% endblock %}

@@ -14,6 +14,10 @@ logger = P.logger
 
 class Task:
     filecheck_thread = None
+    watch_thread = None
+    # 파일체크 스레드 생존 감시 간격 (초) — 스레드가 죽으면 이 간격 안에
+    # 다시 시작한다. 감시 자체는 가벼운 확인만 하므로 자주 돌릴 필요가 없다
+    WATCH_INTERVAL = 60
 
     # 디스크 양보 임계값 — /proc/pressure/io의 full avg10(%)이 이 값 이상이면
     # 신규 전송을 한 주기 미룬다. FF 웹이 10초 넘게 늦어졌던 사고 때 실측이
@@ -38,14 +42,39 @@ class Task:
             pass
         return None
 
-    @F.celery.task
-    def start():
-        ModelScanItem.set_status_incompleted_to_ready()
-        if Task.filecheck_thread is None:
+    @staticmethod
+    def _ensure_filecheck_thread():
+        """파일체크 스레드가 없거나 죽어 있으면 새로 만들어 시작한다.
+
+        죽은 스레드 객체는 start()로 다시 살릴 수 없어, None 검사만으로는
+        재시작이 안 된다 — is_alive()까지 확인해 새로 만든다."""
+        if Task.filecheck_thread is None or not Task.filecheck_thread.is_alive():
             Task.filecheck_thread = threading.Thread(target=Task.filecheck_thread_function, args=())
             Task.filecheck_thread.daemon = True
             Task.filecheck_thread.start()
             P.logger.info("SHYNI SCAN 대기")
+
+    @staticmethod
+    def watch_function():
+        """파일체크 스레드 생존 감시 — 주기마다 살아 있는지 확인하고,
+        죽어 있으면 다시 시작한다. 감시 루프 자체는 예외가 나도 멈추지 않는다."""
+        while True:
+            time.sleep(Task.WATCH_INTERVAL)
+            try:
+                if Task.filecheck_thread is not None and not Task.filecheck_thread.is_alive():
+                    logger.warning('[Scan] 파일체크 스레드가 멈춘 것을 감지했습니다 — 다시 시작합니다')
+                Task._ensure_filecheck_thread()
+            except Exception as e:
+                logger.error(f'[Scan] 파일체크 스레드 감시 오류: {e}')
+
+    @F.celery.task
+    def start():
+        ModelScanItem.set_status_incompleted_to_ready()
+        Task._ensure_filecheck_thread()
+        if Task.watch_thread is None or not Task.watch_thread.is_alive():
+            Task.watch_thread = threading.Thread(target=Task.watch_function, args=())
+            Task.watch_thread.daemon = True
+            Task.watch_thread.start()
 
 
     # 직전 호출에서 정체로 제외한 항목 id — 제외 로그를 상태가 바뀔 때만 남기기 위함
@@ -64,7 +93,11 @@ class Task:
         # 설정값이 0이면 이 제외를 하지 않는다 (기능 끔).
         # REFRESH 등록 대기(refresh-scan:)는 실제 등록 스캔이 도는 구간을 포함하므로
         # 종전대로 계속 센다.
+        # get_int은 값이 비면 None을 돌려준다 — 0은 '기능 끔'이라 의미가 있어
+        # or 기본값이 아니라 None일 때만 기본값(5분)으로 채운다
         wait_min = P.ModelSetting.get_int('scan_analyze_wait_min')
+        if wait_min is None:
+            wait_min = 5
         now = datetime.now()
         with F.app.app_context():
             base = F.db.session.query(ModelScanItem).filter(
@@ -135,7 +168,7 @@ class Task:
             try:
                 Task.save_summary_cache()
                 items = ModelScanItem.get_list_by_status('READY')
-                max_scan_count = max(P.ModelSetting.get_int('scan_max_scan_count'), 1)
+                max_scan_count = max(P.ModelSetting.get_int('scan_max_scan_count') or 2, 1)
                 running = Task.running_shyni_count()
                 assembling = Task.assembling_shyni_count()
                 pending_groups = Task.running_probe_groups()
@@ -257,5 +290,13 @@ class Task:
             except Exception as e:
                 logger.error(f"Exception:{str(e)}")
                 logger.error(traceback.format_exc())
-            for i in range(P.ModelSetting.get_int(f"{name}_filecheck_thread_interval")):
+            # 수면 구간 — 설정값이 비면 None이 와서 스레드가 죽으므로,
+            # try 안에서 기본값(60초)으로 채우고 최소 5초는 쉰다.
+            # 주기 작업에서 예외가 나도 수면은 건너뛰지 않는다
+            # (건너뛰면 주기가 쉴 새 없이 돌아 부하가 된다)
+            try:
+                interval = max(P.ModelSetting.get_int(f"{name}_filecheck_thread_interval") or 60, 5)
+            except Exception:
+                interval = 60
+            for i in range(interval):
                 time.sleep(1)

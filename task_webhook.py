@@ -11,6 +11,19 @@
 - webhook_library_buffer : 신규 항목 버퍼
   {'libs': {라이브러리명: {'groups': {...}, 'thumb_b64'}},
    'last_at': 마지막 수신 시각, 'dropped': 상한으로 버린 건수}
+
+원자성 설계 (W6):
+- 웹 프로세스(쌓기)와 Celery 워커(비우기)는 별도 프로세스라 `_lock`
+  (프로세스 내 스레드 락)이 통하지 않는다. 그래서 비우기는 SQL 수준
+  compare-and-swap(CAS)으로 한다.
+- 워커는 값을 읽어 보낸 뒤, 해당 키의 현재 값이 읽었던 값과 같을 때만
+  비우는 UPDATE를 실행한다 (UPDATE ... SET value=? WHERE key=? AND value=?).
+- 영향받은 행이 0이면 사이에 다른 프로세스가 썼다는 뜻이다. 그 경우
+  이번 주기는 건너뛰고 warning 로그를 남긴 뒤, 다음 주기에 다시 읽어
+  처리한다 — 항목은 큐·버퍼에 그대로 남아 유실되지 않는다.
+- 신규 항목 버퍼는 보낸 만큼만 빼야 해서, CAS 실패 시 다시 읽어 빼기를
+  최대 3번 재시도하고 그래도 안 되면 다음 주기에 다시 보낸다
+  (중복 전송은 있을 수 있으나 유실은 없다).
 """
 import base64
 import json
@@ -77,23 +90,68 @@ def _play_allowed(event):
 
 
 # ---------- 상태 저장 ----------
-def _read_json(key, default):
+def _read_json_raw(key, default):
+    """(원시 문자열, 파싱 값)을 함께 돌려준다.
+
+    CAS 비교에는 읽었던 원시 문자열이 필요하다. 값이 없거나 파싱에
+    실패하면 원시는 None(또는 저장된 문자열), 값은 기본값을 돌려준다.
+    """
     try:
         raw = P.ModelSetting.get(key)
         if raw:
-            data = json.loads(raw)
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return raw, default
             if isinstance(data, type(default)):
-                return data
+                return raw, data
+            return raw, default
     except Exception:
         pass
-    return default
+    return None, default
+
+
+def _read_json(key, default):
+    return _read_json_raw(key, default)[1]
 
 
 def _write_json(key, data):
     try:
         P.ModelSetting.set(key, json.dumps(data, ensure_ascii=False))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'[Webhook] {key} 저장 실패: {e}')
+
+
+def _cas_write(key, expected_raw, new_data):
+    """조건부 쓰기: 현재 값이 expected_raw와 같을 때만 new_data로 교체한다.
+
+    SQL UPDATE ... WHERE key=? AND value=? 로 원자화한다. 웹 프로세스와
+    워커가 별도 프로세스라 스레드 락이 통하지 않기 때문이다.
+    성공하면 True, 사이에 다른 쓰기가 있어 0행이면 False를 돌려준다.
+    잠금 오류 등 쓰기 자체가 실패해도 False이다 — 항목은 큐·버퍼에 남아
+    다음 주기에 다시 처리되므로 유실되는 쪽이 아니다.
+    expected_raw가 None이면 행이 아직 없는 경우라 그냥 저장한다.
+    """
+    if expected_raw is None:
+        _write_json(key, new_data)
+        return True
+    new_raw = json.dumps(new_data, ensure_ascii=False)
+    try:
+        with F.app.app_context():
+            rows = (F.db.session.query(P.ModelSetting)
+                    .filter(P.ModelSetting.key == key)
+                    .filter(P.ModelSetting.value == expected_raw)
+                    .update({P.ModelSetting.value: new_raw},
+                            synchronize_session=False))
+            F.db.session.commit()
+            return rows == 1
+    except Exception as e:
+        try:
+            F.db.session.rollback()
+        except Exception:
+            pass
+        logger.warning(f'[Webhook] {key} 조건부 쓰기 실패: {e}')
+        return False
 
 
 def _thumb_b64(thumb_bytes):
@@ -270,11 +328,19 @@ def build_play_embed(payload):
 
 
 def drain_play_queue():
-    """재생 이벤트 대기열을 비우며 Discord로 보낸다 (워커에서 실행)."""
+    """재생 이벤트 대기열을 비우며 Discord로 보낸다 (워커에서 실행).
+
+    비우기는 조건부 쓰기(CAS)로 한다. 웹 프로세스가 쌓는 사이 워커가
+    읽고 비우면, 사이에 쌓인 항목이 지워질 수 있기 때문이다.
+    CAS가 실패하면 이번 주기는 건너뛰고, 다음 주기에 다시 읽어 처리한다.
+    """
     with _lock:
-        queue = _read_json(PLAY_QUEUE_KEY, [])
+        raw, queue = _read_json_raw(PLAY_QUEUE_KEY, [])
         if queue:
-            _write_json(PLAY_QUEUE_KEY, [])
+            if not _cas_write(PLAY_QUEUE_KEY, raw, []):
+                logger.warning('[Webhook] 재생 알림 대기열 비우기 중 다른 쓰기가 '
+                               '끼어들어, 다음 주기에 다시 처리합니다')
+                return
     if not queue or not _use() or not _url():
         return
     for item in queue:
@@ -324,6 +390,45 @@ def build_library_embed(lib_name, lib):
             'timestamp': datetime.now(timezone.utc).isoformat()}
 
 
+def _remove_sent_groups(lib_name, sent_lib):
+    """보낸 라이브러리의 그룹을 버퍼에서 뺀다 (CAS 재시도 포함).
+
+    보내는 동안 새로 쌓인 항목은 남겨야 하므로, 방금 보낸 그룹의 트랙 수만큼만
+    빼고 남은 것은 그대로 둔다. CAS가 실패하면 다시 읽어 빼기를 최대 3번
+    재시도하고, 그래도 안 되면 False를 돌려준다 — 버퍼는 그대로 남아
+    다음 주기에 다시 보내진다 (중복 전송은 있을 수 있으나 유실은 없다).
+    """
+    for attempt in range(3):
+        with _lock:
+            raw, cur = _read_json_raw(
+                LIB_BUFFER_KEY, {'libs': {}, 'last_at': 0, 'dropped': 0})
+            cur_lib = (cur.get('libs') or {}).get(lib_name)
+            if not cur_lib:
+                return True
+            for key, group in (sent_lib.get('groups') or {}).items():
+                cur_group = cur_lib['groups'].get(key)
+                if cur_group:
+                    cur_group['tracks'] -= group.get('tracks', 0)
+                    if cur_group['tracks'] <= 0:
+                        del cur_lib['groups'][key]
+            if not cur_lib['groups']:
+                del cur['libs'][lib_name]
+            else:
+                # 대표 표지는 이미 보냈으니 비운다 (새 항목이 오면 다시 채워진다)
+                cur_lib['thumb_b64'] = None
+            if not cur.get('libs') and cur.get('dropped'):
+                logger.info(f"[Webhook] 버퍼 상한으로 요약에서 제외된 항목 "
+                            f"{cur['dropped']}건")
+                cur['dropped'] = 0
+            if _cas_write(LIB_BUFFER_KEY, raw, cur):
+                return True
+        logger.warning(f'[Webhook] 신규 항목 버퍼 정리 중 다른 쓰기가 끼어들어 '
+                       f'다시 읽어 시도합니다 ({attempt + 1}/3): {lib_name}')
+    logger.warning(f'[Webhook] 신규 항목 버퍼 정리 경합이 반복돼 다음 주기에 '
+                   f'다시 처리합니다: {lib_name}')
+    return False
+
+
 def flush_library_buffer(force=False):
     """마지막 수신 후 설정 간격이 지나면 라이브러리별로 요약을 보낸다.
 
@@ -351,27 +456,7 @@ def flush_library_buffer(force=False):
             continue
         sent_any = True
         # 보낸 만큼만 버퍼에서 뺀다 — 보내는 동안 새로 쌓인 항목은 남는다
-        with _lock:
-            cur = _read_json(LIB_BUFFER_KEY,
-                             {'libs': {}, 'last_at': 0, 'dropped': 0})
-            cur_lib = (cur.get('libs') or {}).get(lib_name)
-            if cur_lib:
-                for key, group in (lib.get('groups') or {}).items():
-                    cur_group = cur_lib['groups'].get(key)
-                    if cur_group:
-                        cur_group['tracks'] -= group.get('tracks', 0)
-                        if cur_group['tracks'] <= 0:
-                            del cur_lib['groups'][key]
-                if not cur_lib['groups']:
-                    del cur['libs'][lib_name]
-                else:
-                    # 대표 표지는 이미 보냈으니 비운다 (새 항목이 오면 다시 채워진다)
-                    cur_lib['thumb_b64'] = None
-            if not cur.get('libs') and cur.get('dropped'):
-                logger.info(f"[Webhook] 버퍼 상한으로 요약에서 제외된 항목 "
-                            f"{cur['dropped']}건")
-                cur['dropped'] = 0
-            _write_json(LIB_BUFFER_KEY, cur)
+        _remove_sent_groups(lib_name, lib)
     if sent_any:
         logger.info('[Webhook] 신규 항목 요약을 Discord로 보냈습니다')
     return sent_any

@@ -15,12 +15,13 @@
 <form id='setting'>
   <div class="tab-content" id="nav-tabContent">
     {{ macros.m_tab_content_start('basic', true) }}
-      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['기본값 2', '한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝난 뒤에 다음 항목을 시작합니다.', '서버 부하가 걱정되시면 1로 줄여서 사용하셔도 됩니다.']) }}
+      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['기본값 2 · 단위: 개', '한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝난 뒤에 다음 항목을 시작합니다.', '서버 부하가 걱정되시면 1로 줄여서 사용하셔도 됩니다.']) }}
       {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['기본값 5분 · 단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.']) }}
       {{ macros.setting_input_int('scan_probe_timeout_sec', '반영 여부 확인 제한 시간', value=arg['scan_probe_timeout_sec'], desc=['기본값 60초 · 단위: 초', '반영 여부 확인은 리셋한 항목을 다시 처리할 때만 전송 전에 합니다. 일반 항목은 확인 없이 바로 전송합니다.', '이미 라이브러리에 반영돼 있는지 shyni에 확인하는 조회가 끝날 때까지 기다리는 최대 시간입니다. 이 조회는 환경에 따라 수십 초 이상 걸릴 수 있습니다.']) }}
       {{ macros.setting_input_int('scan_analyze_wait_min', 'analyze 대기 시간', value=arg['scan_analyze_wait_min'], desc=['기본값 5분 · 단위: 분', '스캔 중 상태로 이 시간 이상 머물러 있는 항목은 정체로 보고 동시 스캔 수에서 제외합니다. 정체된 스캔 하나가 전체 큐를 막는 것을 방지합니다.', '제외된 항목의 상태는 바뀌지 않으며, shyni가 스캔을 끝내면 정상적으로 완료 처리됩니다. 0으로 두면 이 기능을 끕니다.']) }}
       {{ macros.setting_input_int('scan_analyze_fail_min', 'analyze 후 대기 시간', value=arg['scan_analyze_fail_min'], desc=['기본값 60분 · 단위: 분', '스캔이 시작된 뒤 이 시간 이상 끝나지 않는 항목은 실패로 확정합니다. analyze 단계에서 멈춘 스캔이 분석중으로 계속 쌓이는 것을 방지합니다.', '실패로 확정된 항목은 shyni에서 나중에 끝나도 실패로 남습니다. 다시 처리하려면 스캔 목록에서 리셋해 주세요. 0으로 두면 이 기능을 끕니다.']) }}
       {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['기본값 60초 · 단위: 초', '새로 들어온 항목이 있는지 확인하는 간격입니다.']) }}
+      {{ macros.setting_input_int('scan_stuck_timeout_min', '진행 중 표시 정리 시간', min=0, value=arg['scan_stuck_timeout_min'], desc=['기본값 30분 · 단위: 분', '대시보드에서 스캔이나 휴지통 비우기가 진행 중으로 보이지만, 작업 번호를 받지 못했거나 비우기 도중 다시 시작되는 바람에 끝났는지 확인할 방법이 없을 때가 있습니다. 그런 상태가 이 시간 이상 계속되면 진행 중 표시를 중단됨으로 정리합니다.', '정리하는 것은 화면 표시뿐입니다. shyni에서 실제 작업이 계속 돌고 있다면 멈추지 않습니다. 작업 기록이 아예 사라진 경우에는 이 시간과 관계없이 바로 정리합니다. 0으로 두면 이 기능을 끕니다.']) }}
       {{ macros.m_hr() }}
 
       {{ macros.setting_checkbox('scan_use_vfs_refresh', 'rclone vfs/refresh 사용', value=arg['scan_use_vfs_refresh'], desc=['스캔을 전송하기 전에 항목 경로를 먼저 VFS 새로고침합니다.', 'rclone 플러그인이 설치되어 있어야 합니다.']) }}
@@ -79,7 +80,7 @@
     {{ macros.m_tab_content_end() }}
 
     {{ macros.m_tab_content_start('db', false) }}
-      {{ macros.setting_input_text_and_buttons('scan_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','scan_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['scan_db_delete_day'], col='6') }}
+      {{ macros.setting_input_text_and_buttons('scan_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','scan_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['scan_db_delete_day'], col='6', desc=['기본값 30일 · 단위: 일', '이 기간이 지난 스캔 기록을 삭제할 때의 기준입니다. 자동 삭제가 켜져 있으면 기간이 지난 기록을 알아서 정리합니다.']) }}
       {{ macros.setting_checkbox('scan_db_auto_delete', 'DB 자동 삭제', value=arg['scan_db_auto_delete'], desc=['켜 두시면, 설정한 기간이 지난 DB 기록을 자동으로 삭제합니다.']) }}
     {{ macros.m_tab_content_end() }}
 </form>
@@ -88,6 +89,44 @@
 
 $(document).ready(function(){
   use_collapse("scan_use_vfs_refresh");
+  // 숫자 칸 검증 — 저장을 누르기 전에 비어 있지 않은 숫자 칸이
+  // 정수이고 min/max 범위 안에 있는지 확인한다. 최상위 function
+  // 선언이 아니라 여기서 할당해야 한다 — ff_global1.js가 나중에
+  // 로드돼 기본값으로 덮어쓰기 때문이다.
+  window.globalSettingSaveBefore = function(){
+    function settingNotify(msg) {
+      if (window.$ && $.notify) $.notify(msg, 'warn');
+      else alert(msg);
+    }
+    var ok = true;
+    $('#setting input[type=number]').each(function(){
+      var v = $(this).val();
+      if (v === '' || v == null) return;
+      var label = '';
+      var fid = $(this).attr('id');
+      if (fid) label = $('label[for="' + fid + '"]').text().trim();
+      if (!label) label = $(this).closest('.form-group').find('label').first().text().trim();
+      if (!label) label = $(this).attr('name') || '입력 칸';
+      if (!/^-?\d+$/.test(v)) {
+        settingNotify('[' + label + '] 숫자로 입력해 주세요.');
+        ok = false;
+        return false;
+      }
+      var n = parseInt(v, 10);
+      var mn = $(this).attr('min'), mx = $(this).attr('max');
+      if (mn !== undefined && mn !== '' && n < parseInt(mn, 10)) {
+        settingNotify('[' + label + '] ' + mn + ' 이상의 숫자로 입력해 주세요.');
+        ok = false;
+        return false;
+      }
+      if (mx !== undefined && mx !== '' && n > parseInt(mx, 10)) {
+        settingNotify('[' + label + '] ' + mx + ' 이하의 숫자로 입력해 주세요.');
+        ok = false;
+        return false;
+      }
+    });
+    return ok;
+  };
   // 고급 설정 탭 잠금 — 활성화에 체크해야 값을 바꿀 수 있다 (실수 방지)
   var timeoutIds = ['#base_timeout_query', '#base_timeout_send', '#base_timeout_poll', '#base_timeout_callback', '#base_timeout_vfs_rc'];
   function lockTimeoutFields(lock){
@@ -99,24 +138,38 @@ $(document).ready(function(){
 
 $('#scan_use_vfs_refresh').change(function() {use_collapse('scan_use_vfs_refresh');});
 
+function manualTargetOrWarn() {
+  var t = ($('#scan_manual_target').val() || '').trim();
+  if (!t) {
+    if (window.$ && $.notify) $.notify('스캔할 파일이나 폴더 경로를 입력해 주세요.', 'warn');
+    else alert('스캔할 파일이나 폴더 경로를 입력해 주세요.');
+    return null;
+  }
+  return t;
+}
+
 $("body").on('click', '#add_btn', function(e){
   e.preventDefault();
-  globalSendCommand('manual', 'ADD', $('#scan_manual_target').val().trim());
+  var t = manualTargetOrWarn();
+  if (t !== null) globalSendCommand('manual', 'ADD', t);
 });
 
 $("body").on('click', '#remove_file_btn', function(e){
   e.preventDefault();
-  globalSendCommand('manual', 'REMOVE_FILE', $('#scan_manual_target').val().trim());
+  var t = manualTargetOrWarn();
+  if (t !== null) globalSendCommand('manual', 'REMOVE_FILE', t);
 });
 
 $("body").on('click', '#remove_folder_btn', function(e){
   e.preventDefault();
-  globalSendCommand('manual', 'REMOVE_FOLDER', $('#scan_manual_target').val().trim());
+  var t = manualTargetOrWarn();
+  if (t !== null) globalSendCommand('manual', 'REMOVE_FOLDER', t);
 });
 
 $("body").on('click', '#refresh_btn', function(e){
   e.preventDefault();
-  globalSendCommand('manual', 'REFRESH', $('#scan_manual_target').val().trim());
+  var t = manualTargetOrWarn();
+  if (t !== null) globalSendCommand('manual', 'REFRESH', t);
 });
 
 </script>

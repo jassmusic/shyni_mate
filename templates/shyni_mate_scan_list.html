@@ -72,8 +72,9 @@
   <div id="scan_analyzing_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
   <div id="scan_queued_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
   <div id="scan_hold_notice" style="display:none; font-size:12.5px; color:#b7791f; margin-top:3px"></div>
-  <div style="margin-top:3px; font-size:13px; color:#888"><span id="scan_filter_count_div" style="display:none; cursor:pointer" title="누르면 필터를 풀고 처음 화면으로 돌아갑니다"></span><span id="scan_recent_wrap" style="display:none"> · <a href="#" id="scan_recent_toggle" style="color:inherit">최근 완료 <strong id="scan_recent_count"></strong> <span class="rcn-arrow">▾</span></a></span></div>
-  <div id="scan_recent_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
+  <div style="margin-top:3px; font-size:13px; color:#888"><span id="scan_filter_count_div" style="display:none; cursor:pointer" title="누르면 필터를 풀고 처음 화면으로 돌아갑니다"></span><span id="scan_done_wrap" style="display:none"> · <span id="scan_done_slot"></span></span><span id="scan_failed_wrap" style="display:none"> · <span id="scan_failed_slot"></span></span></div>
+  <div id="scan_done_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
+  <div id="scan_failed_ids_div" style="display:none; font-size:12px; color:#888; margin-top:2px"></div>
 </div>
 {{ macros.m_hr_head_top() }}
 {{ macros.m_row_start('0') }}
@@ -85,7 +86,7 @@
 <div id='page2'></div>
 
 <script type="text/javascript">
-var last_list_option = "{{arg['scan_item_last_list_option']}}";
+var last_list_option = {{ (arg['scan_item_last_list_option'] or '')|tojson }};
 var shyni_url = "{{arg['base_shyni_url']}}";
 var analyze_wait_min = parseInt("{{arg['scan_analyze_wait_min'] or '5'}}", 10);
 if (isNaN(analyze_wait_min)) analyze_wait_min = 0;
@@ -111,16 +112,28 @@ function isRowAnalyzing(d) {
   return isAnalyzing(d);
 }
 
+// 마지막 목록 옵션 — JSON 형태(신규)를 먼저 읽고, 옛 '|' 형태도 읽는다.
+// 검색어에 '|'가 들어가도 깨지지 않게 저장 형식을 JSON으로 바꿨다.
+function parseLastListOption(raw) {
+  if (!raw) return null;
+  try {
+    var o = JSON.parse(raw);
+    if (o && typeof o === 'object') return o;
+  } catch (e) { /* 옛 형식으로 넘긴다 */ }
+  var tmp = String(raw).split('|');
+  if (tmp.length == 6) return {order: tmp[0], page: tmp[1], search: tmp[2], option1: tmp[3], option2: tmp[4], option3: tmp[5]};
+  return null;
+}
+
 $(document).ready(function(){
-  tmp = last_list_option.split('|');
-  if (tmp.length == 6) {
-    $("#order").val(tmp[0]);
-    $("#keyword").val(tmp[2]);
-    $("#option1").val(tmp[3]);
-    $("#option2").val(tmp[4]);
-    $("#option3").val(tmp[5]);
-    //document.getElementById("option2").value = tmp[4];
-    globalRequestSearch(tmp[1]);
+  var saved = parseLastListOption(last_list_option);
+  if (saved) {
+    $("#order").val(saved.order);
+    $("#keyword").val(saved.search);
+    $("#option1").val(saved.option1);
+    $("#option2").val(saved.option2);
+    $("#option3").val(saved.option3);
+    globalRequestSearch(saved.page);
   } else {
     globalRequestSearch('1');
   }
@@ -176,7 +189,6 @@ function hms(t) {
 function make_list(data) {
   str = '';
   for (i in data) {
-    console.log(data[i])
     str += j_row_start();
     tmp = '모드 : ';
     var idCell = '<input type="checkbox" class="item-check" value="' + data[i].id + '"> ' + data[i].id;
@@ -307,7 +319,7 @@ function make_list(data) {
     right += j_row_end();
     str += j_col(9, right)
     str += j_row_end();
-    // DB에서 불러온 제목·소개는 가운데 열(경로 시작점)부터 행 끝까지 폭으로 보여 준다.
+    // DB에서 불러온 제목·설명은 가운데 열(경로 시작점)부터 행 끝까지 폭으로 보여 준다.
     // 가로는 그 폭 안에서 스크롤, 세로는 3줄까지만 보이고 스크롤한다 (표지는 위 가운데 영역)
     var mi0 = (data[i].meta_info != null && data[i].meta_info.length > 0) ? data[i].meta_info[0] : null;
     if (mi0 && (mi0.album_title || mi0.summary)) {
@@ -396,33 +408,6 @@ function paintFilterCount() {
 }
 
 
-
-$("body").on('click', '#all_append_files_show_btn', function(e){
-  e.preventDefault();
-  $('.collapse').collapse('show');
-
-});
-
-$("body").on('click', '#all_append_files_hide_btn', function(e){
-  e.preventDefault();
-  $('.collapse').collapse('hide');
-});
-
-$("body").on('click', '#kill_btn', function(e){
-  e.preventDefault();
-  id = $(this).data('id');
-  globalSendCommand('kill', id);
-
-  // 확장, 축소 방지
-  return false;
-});
-
-$("body").on('click', '#remove_no_append_data_btn', function(e){
-  e.preventDefault();
-  globalSendCommand('remove_no_append_data', null, null, null, function(ret){
-    $('#reset_btn').click();
-  });
-});
 
 $("body").on('click', '#retryScanBtn', function(e){
   e.preventDefault();
@@ -524,14 +509,16 @@ var scanSummaryLastAt = null;
 var scanScanningOpen = false;
 var scanAnalyzingOpen = false;
 var scanQueuedOpen = false;
-var scanRecentOpen = false;
+var scanDoneOpen = false;
+var scanFailedOpen = false;
 function scanSummaryRanges(ids, kind) {
+  // 번호는 최신부터(내림차순) 묶는다 — 구간은 '2150~2148번'처럼 표시되고,
+  // 구간을 누르면 가장 최근 번호(구간의 첫 번호)로 이동해 그 행을 강조한다
   if (!ids || !ids.length) return '';
   var parts = [], s = ids[0], p = ids[0];
   for (var i = 1; i <= ids.length; i++) {
-    if (i < ids.length && ids[i] == p + 1) { p = ids[i]; continue; }
+    if (i < ids.length && ids[i] == p - 1) { p = ids[i]; continue; }
     var label = (s == p ? '' + s : s + '~' + p);
-    // 구간을 누르면 그 상태 필터로 바꾸고 구간 첫 번호가 있는 페이지로 이동한다
     if (kind) label = '<a href="#" class="sm-id-link" data-kind="' + kind + '" data-id="' + s + '" style="color:#666; text-decoration:underline">' + label + '</a>';
     parts.push(label);
     if (i < ids.length) { s = p = ids[i]; }
@@ -572,19 +559,37 @@ function paintScanSummary(ret) {
   } else {
     queDiv.hide().text('');
   }
-  var rcDiv = $('#scan_recent_ids_div');
-  var rcWrap = $('#scan_recent_wrap');
-  if (sm.recent_done_ids && sm.recent_done_ids.length) {
-    rcWrap.show();
-    $('#scan_recent_count').text(sm.recent_done_ids.length + '개');
-    // 구간 표시는 오름차순으로 접는 기존 방식에 맞춰 정렬한 사본을 쓴다
-    var rcIds = sm.recent_done_ids.slice().sort(function(a, b){ return a - b; });
-    rcDiv.html('최근 완료 항목: ' + scanSummaryRanges(rcIds, 'FINISH_SHYNI'));
-    rcDiv.toggle(scanRecentOpen);
-    $('#scan_recent_toggle').find('.rcn-arrow').text(scanRecentOpen ? '▴' : '▾');
+  // 완료·실패는 전체 총수를 항상 표시하고, 0개가 아니면 눌러서 최근 10개를
+  // 펼칠 수 있다. 0개면 숫자만 보이고 펼침 화살표는 없다.
+  var doneTotal = (sm.total_done != null ? sm.total_done : (sm.recent_done_ids ? sm.recent_done_ids.length : 0));
+  var failTotal = (sm.total_failed != null ? sm.total_failed : (sm.recent_failed_ids ? sm.recent_failed_ids.length : 0));
+  var doneWrap = $('#scan_done_wrap');
+  doneWrap.show();
+  if (doneTotal > 0 && sm.recent_done_ids && sm.recent_done_ids.length) {
+    $('#scan_done_slot').html('<a href="#" id="scan_done_toggle" style="color:inherit">완료 <strong>' + Number(doneTotal).toLocaleString('en-US') + '개</strong> <span class="don-arrow">' + (scanDoneOpen ? '▴' : '▾') + '</span></a>');
   } else {
-    rcWrap.hide();
-    rcDiv.hide().text('');
+    $('#scan_done_slot').html('완료 <strong>' + Number(doneTotal).toLocaleString('en-US') + '개</strong>');
+  }
+  var doneDiv = $('#scan_done_ids_div');
+  if (sm.recent_done_ids && sm.recent_done_ids.length) {
+    doneDiv.html('최근 완료 항목: ' + scanSummaryRanges(sm.recent_done_ids, 'FINISH_SHYNI'));
+    doneDiv.toggle(scanDoneOpen);
+  } else {
+    doneDiv.hide().text('');
+  }
+  var failWrap = $('#scan_failed_wrap');
+  failWrap.show();
+  if (failTotal > 0 && sm.recent_failed_ids && sm.recent_failed_ids.length) {
+    $('#scan_failed_slot').html('<a href="#" id="scan_failed_toggle" style="color:inherit">실패 <strong>' + Number(failTotal).toLocaleString('en-US') + '개</strong> <span class="fal-arrow">' + (scanFailedOpen ? '▴' : '▾') + '</span></a>');
+  } else {
+    $('#scan_failed_slot').html('실패 <strong>' + Number(failTotal).toLocaleString('en-US') + '개</strong>');
+  }
+  var failDiv = $('#scan_failed_ids_div');
+  if (sm.recent_failed_ids && sm.recent_failed_ids.length) {
+    failDiv.html('최근 실패 항목: ' + scanSummaryRanges(sm.recent_failed_ids, 'FINISH_SHYNI_FAILED'));
+    failDiv.toggle(scanFailedOpen);
+  } else {
+    failDiv.hide().text('');
   }
   var holdNotice = $('#scan_hold_notice');
   if (sm.held) {
@@ -620,7 +625,8 @@ function closeOtherSummaryIds(keep) {
   if (keep != 'scanning') { scanScanningOpen = false; $('#scan_scanning_ids_div').hide(); $('.scn-arrow').text('▾'); }
   if (keep != 'analyzing') { scanAnalyzingOpen = false; $('#scan_analyzing_ids_div').hide(); $('.anz-arrow').text('▾'); }
   if (keep != 'queued') { scanQueuedOpen = false; $('#scan_queued_ids_div').hide(); $('.que-arrow').text('▾'); }
-  if (keep != 'recent') { scanRecentOpen = false; $('#scan_recent_ids_div').hide(); $('.rcn-arrow').text('▾'); }
+  if (keep != 'done') { scanDoneOpen = false; $('#scan_done_ids_div').hide(); $('.don-arrow').text('▾'); }
+  if (keep != 'failed') { scanFailedOpen = false; $('#scan_failed_ids_div').hide(); $('.fal-arrow').text('▾'); }
 }
 // 진행중 구간을 누르면 아래 번호 줄을 펼치거나 접는다 (분석중과 같은 방식)
 $("body").on('click', '#scan_scanning_toggle', function(e){
@@ -668,19 +674,27 @@ $("body").on('click', '#scan_analyzing_toggle', function(e){
   $(this).find('.anz-arrow').text(scanAnalyzingOpen ? '▴' : '▾');
   $('#scan_analyzing_ids_div').toggle(scanAnalyzingOpen);
 });
-// 최근 완료 구간을 누르면 아래 번호 줄을 펼치거나 접는다
-$("body").on('click', '#scan_recent_toggle', function(e){
+// 완료 구간을 누르면 아래 번호 줄을 펼치거나 접는다
+$("body").on('click', '#scan_done_toggle', function(e){
   e.preventDefault();
-  scanRecentOpen = !scanRecentOpen;
-  if (scanRecentOpen) closeOtherSummaryIds('recent');
-  $(this).find('.rcn-arrow').text(scanRecentOpen ? '▴' : '▾');
-  $('#scan_recent_ids_div').toggle(scanRecentOpen);
+  scanDoneOpen = !scanDoneOpen;
+  if (scanDoneOpen) closeOtherSummaryIds('done');
+  $(this).find('.don-arrow').text(scanDoneOpen ? '▴' : '▾');
+  $('#scan_done_ids_div').toggle(scanDoneOpen);
+});
+// 실패 구간을 누르면 아래 번호 줄을 펼치거나 접는다
+$("body").on('click', '#scan_failed_toggle', function(e){
+  e.preventDefault();
+  scanFailedOpen = !scanFailedOpen;
+  if (scanFailedOpen) closeOtherSummaryIds('failed');
+  $(this).find('.fal-arrow').text(scanFailedOpen ? '▴' : '▾');
+  $('#scan_failed_ids_div').toggle(scanFailedOpen);
 });
 // ff_global1.js가 content 블록보다 뒤에서 로드되므로, 즉시 호출하면 함수가 없어 오류가 난다 — ready 이후에 시작한다
 $(document).ready(function(){
-  var savedOption = String(last_list_option || '').split('|');
-  if (savedOption.length == 6) {
-    var savedPage = parseInt(savedOption[1], 10);
+  var savedOpt = parseLastListOption(last_list_option);
+  if (savedOpt) {
+    var savedPage = parseInt(savedOpt.page, 10);
     if (!isNaN(savedPage) && savedPage > 0) scanListPage = savedPage;
   }
   try {

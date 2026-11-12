@@ -118,16 +118,16 @@ function libComment(c) {
   var ml = c.main_label || '앨범';
   var mainCount = (c.main_count != null) ? c.main_count : c.albums;
   if (c.is_folder && mainCount > 0) {
-    if (!(c.no_thumb > 0)) return '라이브러리 특성상 코드가 없어, 표지 여부로 건강도를 판단합니다. 모든 ' + ml + '에 표지가 있습니다.';
-    return '라이브러리 특성상 코드가 없어, 표지 여부로 건강도를 판단합니다. 표지 없는 ' + ml + ' ' + fmtNum(c.no_thumb) + '개(' + pctText(c.no_thumb, c.check_pct) + ')은 점검이 필요합니다.';
+    if (!(c.no_thumb > 0)) return '라이브러리 특성상 메타가 없어, 표지 여부로 건강도를 판단합니다. 모든 ' + ml + '에 표지가 있습니다.';
+    return '라이브러리 특성상 메타가 없어, 표지 여부로 건강도를 판단합니다. 표지 없는 ' + ml + ' ' + fmtNum(c.no_thumb) + '개(' + pctText(c.no_thumb, c.check_pct) + ')은 점검이 필요합니다.';
   }
-  if (mainCount > 0 && c.no_code >= mainCount) return ml + ' 전부에 코드가 없습니다.' + (c.lib_type == 'music' ? ' 차트 라이브러리 특성으로 보입니다.' : '');
-  var miss = [['코드 없음', c.no_code], ['소개 없음', c.no_summary], ['연도 없음', c.no_year], ['표지 없음', c.no_thumb]];
+  if (mainCount > 0 && c.no_code >= mainCount) return ml + ' 전부에 메타가 없습니다.';
+  var miss = [['메타 없음', c.no_code], ['설명 없음', c.no_summary], ['연도 없음', c.no_year], ['표지 없음', c.no_thumb]];
   miss.sort(function(a, b){ return b[1] - a[1]; });
   if (miss[0][1] == 0) return '누락 항목이 없습니다.';
   var msg = '누락 중에서는 ' + miss[0][0] + '이 ' + fmtNum(miss[0][1]) + '개로 가장 많습니다.';
-  if (c.no_code > 0) msg += ' 코드 없는 ' + ml + ' ' + fmtNum(c.no_code) + '개(' + pctText(c.no_code, (c.code_pct != null ? c.code_pct : c.check_pct)) + ')는 점검이 필요합니다.';
-  else msg += (c.lib_type == 'music' || !c.lib_type) ? ' 코드 없는 앨범은 없습니다.' : ' 코드 없는 항목은 없습니다.';
+  if (c.no_code > 0) msg += ' 메타 없는 ' + ml + ' ' + fmtNum(c.no_code) + '개(' + pctText(c.no_code, (c.code_pct != null ? c.code_pct : c.check_pct)) + ')는 점검이 필요합니다.';
+  else msg += (c.lib_type == 'music' || !c.lib_type) ? ' 메타 없는 앨범은 없습니다.' : ' 메타 없는 항목은 없습니다.';
   return msg;
 }
 
@@ -192,8 +192,8 @@ function libCard(c) {
   var missStyle = function(v, judged) { return (judged && v > 0) ? 'color:#c05621' : null; };
   var folderLib = !!c.is_folder;
   card += '<div style="border-top:1px solid #eee; margin-top:4px; padding-top:4px">'
-    + statGrid([statCell('코드 없음', fmtNum(c.no_code), null, missStyle(c.no_code, !folderLib), true),
-                statCell('소개 없음', fmtNum(c.no_summary), null, missStyle(c.no_summary, !folderLib), true),
+    + statGrid([statCell('메타 없음', fmtNum(c.no_code), null, missStyle(c.no_code, !folderLib), true),
+                statCell('설명 없음', fmtNum(c.no_summary), null, missStyle(c.no_summary, !folderLib), true),
                 statCell('연도 없음', fmtNum(c.no_year), null, missStyle(c.no_year, !folderLib), true),
                 statCell('표지 없음', fmtNum(c.no_thumb), null, missStyle(c.no_thumb, true), true)], 2)
     + '</div>';
@@ -374,9 +374,9 @@ function renderHealth(h) {
   var sAsm = sc.assembling || 0, sReady = sc.ready || 0, sHeld = sc.held || 0;
   var sQue = sc.queued || 0;
   var sTot = sc.total || (sDone + sFail + sRun + sAnz + sAsm + sQue + sReady + sHeld);
-  var missTot = t.no_code + t.no_summary + t.no_year + t.no_thumb;
+  var missTot = (t.no_code || 0) + (t.no_summary || 0) + (t.no_year || 0) + (t.no_thumb || 0);
   function pctOf(v, tot) { return tot ? Math.round(v * 1000 / tot) / 10 : 0; }
-  var judgeNote = '코드·소개·연도·표지 중 하나라도 누락된 항목이 점검 필요입니다.';
+  var judgeNote = '메타·설명·연도·표지 중 하나라도 누락된 항목이 점검 필요입니다.';
   if (h.libs && h.libs.some(function(c){ return c.is_folder; })) judgeNote += ' 폴더 에이전트 라이브러리는 표지 여부로만 판단합니다.';
   var donutCards = [];
   var LIB_TYPE_DONUT = [['movie', '영화', '#3182ce'], ['tv', '쇼', '#805ad5'], ['show', '쇼', '#805ad5'], ['music', '음악', '#38a169'], ['book', '도서', '#d69e2e'], ['photo', '사진', '#718096']];
@@ -403,8 +403,8 @@ function renderHealth(h) {
      {pct: pctOf(t.no_year, missTot), color: '#805ad5'},
      {pct: pctOf(t.no_thumb, missTot), color: '#d69e2e'}], null,
     fmtNum(missTot), '누락 합계',
-    legendItem('#dd6b20', '코드 없음', '<strong>' + fmtNum(t.no_code) + '</strong> (' + pctText(t.no_code, pctOf(t.no_code, missTot)) + ')')
-    + legendItem('#3182ce', '소개 없음', '<strong>' + fmtNum(t.no_summary) + '</strong> (' + pctText(t.no_summary, pctOf(t.no_summary, missTot)) + ')')
+    legendItem('#dd6b20', '메타 없음', '<strong>' + fmtNum(t.no_code) + '</strong> (' + pctText(t.no_code, pctOf(t.no_code, missTot)) + ')')
+    + legendItem('#3182ce', '설명 없음', '<strong>' + fmtNum(t.no_summary) + '</strong> (' + pctText(t.no_summary, pctOf(t.no_summary, missTot)) + ')')
     + legendItem('#805ad5', '연도 없음', '<strong>' + fmtNum(t.no_year) + '</strong> (' + pctText(t.no_year, pctOf(t.no_year, missTot)) + ')')
     + legendItem('#d69e2e', '표지 없음', '<strong>' + fmtNum(t.no_thumb) + '</strong> (' + pctText(t.no_thumb, pctOf(t.no_thumb, missTot)) + ')'), 'tag'));
   donutCards.push(barCard('스캔 상태',
@@ -441,8 +441,8 @@ function renderHealth(h) {
       + libSortOption('okpct', '정상률')
       + libSortOption('media', '미디어')
       + libSortOption('trash', '휴지통')
-      + libSortOption('code', '코드')
-      + libSortOption('summary', '소개')
+      + libSortOption('code', '메타')
+      + libSortOption('summary', '설명')
       + libSortOption('year', '연도')
       + libSortOption('thumb', '표지')
       + '</select></label></div>';
@@ -451,11 +451,12 @@ function renderHealth(h) {
   str += '<div style="font-size:13px; color:#888; margin-top:14px; line-height:1.8">'
     + '<div style="font-weight:bold; color:#666; cursor:pointer" onclick="toggleHealthGuide()">건강도 안내 <span id="health_guide_arrow" style="font-weight:normal; font-size:12px; color:#999">' + (healthGuideOpen ? '▾ 접기' : '▸ 펼치기') + '</span></div>'
     + '<div id="health_guide_body" style="display:' + (healthGuideOpen ? 'block' : 'none') + '">'
-    + '<div>- <strong style="color:#666">코드</strong> — 미디어가 어떤 미디어인지 매칭이 확정됐는지를 나타냅니다. 코드가 없는 미디어가 \'메타 없음(매칭안됨)\' 상태입니다.</div>'
-    + '<div>- <strong style="color:#666">소개</strong> — 미디어 설명글이 채워져 있는지입니다.</div>'
+    + '<div>- <strong style="color:#666">메타</strong> — 미디어가 어떤 작품인지 매칭이 확정됐는지를 나타냅니다. 메타가 없는 미디어가 \'메타 없음(매칭안됨)\' 상태입니다.</div>'
+    + '<div>- <strong style="color:#666">설명</strong> — 미디어에 대한 설명글이 채워져 있는지입니다.</div>'
     + '<div>- <strong style="color:#666">연도</strong> — 미디어의 연도(발매·개봉·출간)가 입력돼 있는지입니다.</div>'
     + '<div>- <strong style="color:#666">표지</strong> — 표지(포스터·커버) 이미지가 있는지입니다.</div>'
-    + '<div style="margin-top:6px">네 가지 중 하나라도 없으면 점검 필요로 읽어옵니다. 코드가 있어도 소개·연도·표지 중 하나가 없으면 점검 필요에 포함됩니다. 단, 폴더 에이전트 라이브러리는 코드가 없는 것이 특성이라 표지 여부로만 건강도를 판단합니다.</div></div></div>';
+    + '<div style="margin-top:6px">네 가지가 다 있으면 정상, 하나라도 없으면 점검 필요로 읽어옵니다. 폴더 에이전트 라이브러리는 메타가 없는 것이 특성이라 표지 여부로만 건강도를 판단합니다. 미디어가 하나도 없는 라이브러리는 \'비어있음\'으로 표시합니다.</div>'
+    + '<div style="margin-top:6px">점검 필요 항목의 메타는 대시보드의 메타 새로고침으로 채울 수 있습니다.</div></div></div>';
   str += '<div style="font-size:13px; color:#888; margin-top:10px">미디어·항목·메타 없음 수는 데이터베이스에서 읽어 보여 드립니다.</div>';
   $('#health_div').html(str);
   $('#health_head_div, #health_div').show();

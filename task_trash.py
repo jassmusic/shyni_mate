@@ -1,124 +1,31 @@
 import json
 import os
+import time
 
 import requests
 
 from .model_scan import ModelScanItem
 from .setup import *
 from .shyni_backend import ShyniBackend
+from .task_periodic import (WAIT_TIMEOUT_SEC, _extract_job_id,
+                            _scan_poll_outcome, _stat_int, _write_status,
+                            apply_scan_result, scan_summary_text)
 
 logger = P.logger
 
-RUNNING_KEY = 'scan_trash_running'
-RESULT_KEY = 'scan_trash_last_result'
+# 옛 휴지통 스케줄러(run_empty_trash)는 호출처가 없어 z38에서 제거했다 (A3).
+# 기준 경로 설정(scan_trash_schedule_anchors)은 TaskTrash가 쓰므로 유지한다.
 
-
-def run_empty_trash(mode):
-    """선택한 라이브러리의 휴지통을 비운다 (plex_mate 휴지통 스캔과 같은 방식).
-
-    안전장치:
-    - 기준 경로(anchors)가 하나라도 실제로 보이지 않으면 전체를 중단한다.
-      (마운트가 깨진 상태에서 비우면 멀쩡한 항목까지 지워질 수 있어서다)
-    - 주기적 스캔이 도는 라이브러리와, 스캔 항목이 실행 중인 라이브러리는 건너뛴다.
-    결과는 ModelSetting scan_trash_last_result에 남긴다.
-    """
-    with F.app.app_context():
-        if (P.ModelSetting.get(RUNNING_KEY) or '') == '1':
-            logger.warning('휴지통 비우기: 이미 실행 중이라 시작하지 않습니다.')
-            return
-        P.ModelSetting.set(RUNNING_KEY, '1')
-        lines = []
-        try:
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            lines.append(f'{now} ({mode}) 휴지통 비우기 시작')
-
-            anchors = [a.strip() for a in (P.ModelSetting.get('scan_trash_schedule_anchors') or '').splitlines() if a.strip()]
-            for anchor in anchors:
-                if not os.path.exists(anchor):
-                    lines.append(f'중단: 기준 경로를 찾을 수 없습니다 — {anchor}')
-                    lines.append('마운트 상태를 확인한 뒤 다시 실행해 주세요.')
-                    return
-
-            from .mod_status import ModuleStatus
-            sections, err = ModuleStatus._sections()
-            if err:
-                lines.append(f'중단: {err}')
-                return
-            selected = []
-            raw = P.ModelSetting.get('scan_trash_sections')
-            if raw:
-                try:
-                    selected = [str(s) for s in json.loads(raw)]
-                except Exception:
-                    selected = []
-
-            # 건너뛸 섹션: 주기적 스캔 실행 중 + 스캔 항목 실행 중
-            skip = {}
-            raw_cur = P.ModelSetting.get('periodic_current')
-            if raw_cur:
-                try:
-                    cur = json.loads(raw_cur)
-                    if isinstance(cur, dict) and cur.get('section_key'):
-                        skip[str(cur['section_key'])] = '주기적 스캔 실행 중'
-                except Exception:
-                    pass
-            try:
-                running = F.db.session.query(ModelScanItem).filter(
-                    ModelScanItem.shyni_status == 'RUNNING').all()
-                for item in running:
-                    if item.section_id:
-                        skip[str(item.section_id)] = '스캔 항목 실행 중'
-            except Exception:
-                pass
-
-            url, token = ShyniBackend.get_config()
-            if not url or not token:
-                lines.append('중단: 기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.')
-                return
-            for sec in sections:
-                key = str(sec['key'])
-                if selected and key not in selected:
-                    continue
-                title = sec.get('title') or key
-                if key in skip:
-                    lines.append(f'{title}: 건너뜀 ({skip[key]})')
-                    continue
-                try:
-                    res = requests.get(f'{url}/library/sections/{key}/emptyTrash',
-                                       headers={'X-Plex-Token': token, 'Accept': 'application/json'},
-                                       timeout=600)
-                    if res.status_code == 200:
-                        lines.append(f'{title}: 휴지통을 비웠습니다.')
-                        try:
-                            from .task_trash_view import clear_cache
-                            clear_cache(key)
-                        except Exception:
-                            pass
-                    else:
-                        lines.append(f'{title}: 실패 (응답 코드 {res.status_code})')
-                except Exception as e:
-                    lines.append(f'{title}: 실패 ({e})')
-            try:
-                from .task_status import refresh_trash_counts_async
-                refresh_trash_counts_async()
-            except Exception:
-                pass
-            lines.append('완료')
-        except Exception as e:
-            logger.error(f'휴지통 비우기 실패: {e}')
-            logger.error(traceback.format_exc())
-            lines.append(f'실패: {e}')
-        finally:
-            for line in lines:
-                logger.info(f'[휴지통] {line}')
-            P.ModelSetting.set(RESULT_KEY, '\n'.join(lines))
-            P.ModelSetting.set(RUNNING_KEY, '')
-
-
-# ---- 휴지통 주기 작업 (주기적 스캔과 같은 작업 목록 방식) ----
 TRASH_JOBS_KEY = 'trash_jobs'
 TRASH_CURRENT_KEY = 'trash_current'
 TRASH_CANCEL_KEY = 'trash_cancel'
+
+# 폴링 실패 기준 (W7과 같은 기준): 일시적 오류는 재시도하고,
+# 연속 3회 실패 시에만 실패로 확정한다.
+POLL_FAIL_MAX = 3
+VFS_POLL_SEC = 10
+SCAN_POLL_SEC = 20
+EMPTY_POLL_SEC = 10
 
 ACTION_LABEL = {
     'refresh': '새로고침',
@@ -135,6 +42,23 @@ ACTION_STEPS = {
     'refresh_scan_empty': ['refresh', 'scan', 'empty'],
 }
 STAGE_LABEL = {'refresh': '새로고침 중', 'scan': '스캔 중', 'empty': '비우는 중'}
+
+
+def _trash_skip_decision(periodic_parse_ok, periodic_section_key,
+                         running_query_ok, running_section_keys, key):
+    """섹션 시작 시 건너뜀 판정 — 순수 함수(하니스 검증용).
+    가드 조회에 실패하면 fail-closed로 건너뛴다 (W5).
+    (건너뜀 사유 | None)을 돌려준다."""
+    if not periodic_parse_ok:
+        return '주기적 스캔 상태를 확인할 수 없음'
+    if not running_query_ok:
+        return '실행 중인 스캔 항목을 확인할 수 없음'
+    if periodic_section_key is not None and str(periodic_section_key) == str(key):
+        return '주기적 스캔 실행 중'
+    running_keys = {str(k) for k in (running_section_keys or []) if k is not None}
+    if str(key) in running_keys:
+        return '스캔 항목 실행 중'
+    return None
 
 
 def get_trash_jobs():
@@ -179,46 +103,123 @@ def request_trash_cancel():
     P.ModelSetting.set(TRASH_CANCEL_KEY, '1')
 
 
-def _wait_vfs(addr, jobid, timeout=3600):
-    """rclone VFS 새로고침 job 완료를 기다린다. done | failed | cancelled"""
-    import time as _time
-    deadline = _time.time() + timeout
-    while _time.time() < deadline:
+def _now_text():
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _wait_vfs(addr, jobid, timeout=WAIT_TIMEOUT_SEC):
+    """rclone VFS 새로고침 job 완료를 기다린다.
+    {'result': done|failed|cancelled, 'duration': 초}를 돌려준다.
+    기한은 다른 대기(6시간)와 맞췄다 (R18)."""
+    t0 = time.time()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         if _trash_cancel_requested():
-            return 'cancelled'
+            return {'result': 'cancelled', 'duration': int(time.time() - t0)}
         try:
             from .mod_status import ModuleStatus
             job = ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
             if job.get('finished'):
-                return 'failed' if job.get('error') else 'done'
+                return {'result': 'failed' if job.get('error') else 'done',
+                        'duration': int(time.time() - t0)}
+        except requests.HTTPError as e:
+            body = ''
+            try:
+                body = e.response.text if e.response is not None else ''
+            except Exception:
+                body = ''
+            if 'not found' in body:
+                return {'result': 'failed', 'duration': int(time.time() - t0)}
         except Exception:
             pass
-        _time.sleep(10)
-    return 'failed'
+        time.sleep(VFS_POLL_SEC)
+    return {'result': 'failed', 'duration': int(time.time() - t0)}
 
 
-def _wait_scan(url, token, job_id, timeout=6 * 3600):
-    """shyni 스캔 job 완료를 기다린다. done | failed | cancelled"""
-    import time as _time
-    deadline = _time.time() + timeout
-    while _time.time() < deadline:
+def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_SEC):
+    """shyni job 완료를 기다린다 (스캔·비우기 공통).
+    {'result': done|failed|cancelled|not_found, 'job': job 응답 또는 None,
+     'duration': 초}를 돌려준다. job 조회에서 404를 받으면 즉시 실패로
+    끝낸다 (W3). 폴링 중 일시적 오류는 재시도하고 연속 3회 실패 시에만
+    실패로 확정한다."""
+    t0 = time.time()
+    deadline = time.time() + timeout
+    fail_count = 0
+    while time.time() < deadline:
         if _trash_cancel_requested():
-            return 'cancelled'
+            return {'result': 'cancelled', 'job': None,
+                    'duration': int(time.time() - t0)}
         try:
             res = requests.get(f'{url}/compat/jobs/{job_id}',
                                headers={'X-Plex-Token': token,
                                         'Accept': 'application/json'},
                                timeout=15)
-            if res.status_code == 200:
-                status = (res.json() or {}).get('status')
-                if status == 'completed':
-                    return 'done'
-                if status == 'failed':
-                    return 'failed'
         except Exception:
-            pass
-        _time.sleep(20)
-    return 'failed'
+            fail_count += 1
+            if fail_count >= POLL_FAIL_MAX:
+                return {'result': 'failed', 'job': None,
+                        'duration': int(time.time() - t0)}
+            time.sleep(poll_sec)
+            continue
+        job = None
+        if res.status_code == 200:
+            try:
+                job = res.json()
+            except Exception:
+                job = None
+        outcome, _msg = _scan_poll_outcome(res.status_code, job)
+        if outcome == 'not_found':
+            return {'result': 'not_found', 'job': None,
+                    'duration': int(time.time() - t0)}
+        if outcome == 'done':
+            return {'result': 'done', 'job': job,
+                    'duration': int(time.time() - t0)}
+        if outcome == 'failed':
+            return {'result': 'failed', 'job': job,
+                    'duration': int(time.time() - t0)}
+        if res.status_code != 200:
+            fail_count += 1
+            if fail_count >= POLL_FAIL_MAX:
+                return {'result': 'failed', 'job': None,
+                        'duration': int(time.time() - t0)}
+        else:
+            fail_count = 0
+        time.sleep(poll_sec)
+    return {'result': 'failed', 'job': None, 'duration': int(time.time() - t0)}
+
+
+def _wait_scan(url, token, job_id, timeout=WAIT_TIMEOUT_SEC):
+    """shyni 스캔 job 완료를 기다린다 — _wait_job과 같은 결과를 돌려준다."""
+    return _wait_job(url, token, job_id, timeout=timeout, poll_sec=SCAN_POLL_SEC)
+
+
+def _compute_skip_reason(key):
+    """이 섹션을 건너뛸 사유 — None이면 진행한다.
+    가드 조회에 실패하면 fail-closed로 건너뛴다 (W5).
+    섹션 시작 시마다 다시 읽는다."""
+    periodic_parse_ok = True
+    periodic_section_key = None
+    raw_cur = P.ModelSetting.get('periodic_current')
+    if raw_cur:
+        try:
+            cur = json.loads(raw_cur)
+            if isinstance(cur, dict):
+                periodic_section_key = cur.get('section_key')
+            else:
+                periodic_parse_ok = False
+        except Exception:
+            periodic_parse_ok = False
+    running_query_ok = True
+    running_keys = []
+    try:
+        running = F.db.session.query(ModelScanItem).filter(
+            ModelScanItem.shyni_status == 'RUNNING').all()
+        running_keys = [it.section_id for it in running if it.section_id]
+    except Exception as e:
+        running_query_ok = False
+        logger.warning(f'[휴지통 작업] 실행 중인 스캔 항목 조회 실패: {e}')
+    return _trash_skip_decision(periodic_parse_ok, periodic_section_key,
+                                running_query_ok, running_keys, key)
 
 
 class TaskTrash:
@@ -227,6 +228,8 @@ class TaskTrash:
     동작(새로고침/스캔/비우기 조합)을 단계별로 실행하고, 단계 완료를 확인한
     뒤 다음 단계로 넘어간다. 진행 상태는 ModelSetting trash_current에 기록해
     화면이 공유하고, 취소는 trash_cancel 플래그로 요청받는다.
+    완료된 스캔의 집계와 비운 개수는 이력 행에 남기고, 진행 상황은 대시보드
+    섹션 상태(status_sec_N)에도 수동 작업과 같은 모양으로 기록한다.
     """
 
     @F.celery.task
@@ -238,6 +241,26 @@ class TaskTrash:
                 logger.error(f'휴지통 주기 작업 실행 실패: {e}')
                 logger.error(traceback.format_exc())
                 _set_trash_current(None)
+
+    @staticmethod
+    def _fail_running_status(key, job_name):
+        """예외로 섹션이 끝났을 때 이 작업이 남긴 running 표시를 실패로 정리한다."""
+        try:
+            from .mod_status import ModuleStatus
+            st = ModuleStatus._get_state(int(key))
+            changed = False
+            for slot in ('vfs', 'scan', 'trash'):
+                entry = st.get(slot) or {}
+                if (entry.get('status') == 'running'
+                        and entry.get('source') == 'trash'
+                        and entry.get('job_name') == job_name):
+                    entry['status'] = 'failed'
+                    entry['finished_at'] = _now_text()
+                    changed = True
+            if changed:
+                ModuleStatus._set_state(int(key), st)
+        except Exception as e:
+            logger.warning(f'[휴지통 작업] 현황 상태 정리 실패: {e}')
 
     @staticmethod
     def _run(idx, mode):
@@ -255,7 +278,7 @@ class TaskTrash:
         action = job.get('action') or 'empty'
         steps = ACTION_STEPS.get(action, ['empty'])
         P.ModelSetting.set(TRASH_CANCEL_KEY, '')
-        job_started = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        job_started = _now_text()
         logger.info(f'[휴지통 작업] 시작: {name} ({ACTION_LABEL.get(action, action)}, {mode})')
 
         # 안전장치: 기준 경로가 하나라도 보이지 않으면 전체를 중단한다
@@ -281,25 +304,6 @@ class TaskTrash:
             item.finish('failed', '대상 라이브러리가 없습니다.')
             return
 
-        # 건너뛸 섹션: 주기적 스캔 실행 중 + 스캔 항목 실행 중 + 현황 작업 중
-        skip = {}
-        raw_cur = P.ModelSetting.get('periodic_current')
-        if raw_cur:
-            try:
-                cur = json.loads(raw_cur)
-                if isinstance(cur, dict) and cur.get('section_key'):
-                    skip[str(cur['section_key'])] = '주기적 스캔 실행 중'
-            except Exception:
-                pass
-        try:
-            running = F.db.session.query(ModelScanItem).filter(
-                ModelScanItem.shyni_status == 'RUNNING').all()
-            for it in running:
-                if it.section_id:
-                    skip[str(it.section_id)] = '스캔 항목 실행 중'
-        except Exception:
-            pass
-
         url, token = ShyniBackend.get_config()
         if not url or not token:
             item = ModelTrashItem(name, '', '전체', mode)
@@ -313,9 +317,12 @@ class TaskTrash:
                 item = ModelTrashItem(name, key, title, mode)
                 item.finish('cancelled', '취소 요청으로 실행하지 않았습니다.')
                 continue
-            if key in skip:
+            # 건너뜀 가드는 섹션 시작 시마다 다시 읽는다 (W5)
+            skip_reason = _compute_skip_reason(key)
+            if skip_reason is not None:
                 item = ModelTrashItem(name, key, title, mode)
-                item.finish('cancelled', f'건너뜀 ({skip[key]})')
+                item.finish('cancelled', f'건너뜀 ({skip_reason})')
+                logger.info(f'[휴지통 작업] {title}: 건너뜀 ({skip_reason})')
                 continue
             try:
                 st = ModuleStatus._get_state(int(key))
@@ -331,89 +338,256 @@ class TaskTrash:
             item = ModelTrashItem(name, key, title, mode)
             item.save()
             status, message = 'done', ''
-            for step in steps:
-                if _trash_cancel_requested():
-                    status, message = 'cancelled', '취소 요청으로 중단했습니다.'
-                    break
-                _set_trash_current({
-                    'job_name': name, 'section_key': key, 'section_title': title,
-                    'stage': step, 'job_started_at': job_started,
-                    'section_started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'mode': mode})
-                try:
-                    if step == 'refresh':
-                        addr, remote = ModuleStatus._rc_target(sec['path'])
-                        if not addr:
-                            status, message = 'failed', 'VFS 새로고침 규칙과 맞지 않는 경로입니다.'
-                            break
-                        ret = ModuleStatus._rc(addr, 'vfs/refresh',
-                                               {'dir': remote, 'recursive': 'true',
-                                                '_async': 'true'})
-                        r = _wait_vfs(addr, ret.get('jobid'))
-                        if r != 'done':
-                            status = 'cancelled' if r == 'cancelled' else 'failed'
-                            message = ('취소 요청으로 중단했습니다.' if r == 'cancelled'
-                                       else 'VFS 새로고침이 끝나지 않았습니다.')
-                            break
-                    elif step == 'scan':
-                        res = requests.get(f'{url}/library/sections/{key}/refresh',
-                                           headers={'X-Plex-Token': token,
-                                                    'Accept': 'application/json'},
-                                           timeout=30)
-                        res.raise_for_status()
-                        job_id = res.headers.get('X-Job-Id')
-                        if not job_id:
-                            try:
-                                body = res.json()
-                                if isinstance(body, dict):
-                                    job_id = (body.get('job_id') or body.get('jobId')
-                                              or body.get('jobID'))
-                            except Exception:
-                                job_id = None
-                        if job_id:
-                            r = _wait_scan(url, token, job_id)
-                            if r != 'done':
-                                status = 'cancelled' if r == 'cancelled' else 'failed'
-                                message = ('취소 요청으로 중단했습니다.' if r == 'cancelled'
-                                           else '스캔이 완료되지 않았습니다.')
+            vfs_duration = None
+            scan_duration = None
+            scan_job_id = None
+            scan_stats = None
+            pre_max_id = None
+            emptied_count = None
+            try:
+                for step in steps:
+                    if _trash_cancel_requested():
+                        status, message = 'cancelled', '취소 요청으로 중단했습니다.'
+                        break
+                    _set_trash_current({
+                        'job_name': name, 'section_key': key, 'section_title': title,
+                        'stage': step, 'job_started_at': job_started,
+                        'section_started_at': _now_text(),
+                        'mode': mode})
+                    try:
+                        if step == 'refresh':
+                            addr, remote = ModuleStatus._rc_target(sec['path'])
+                            if not addr:
+                                status, message = 'failed', 'VFS 새로고침 규칙과 맞지 않는 경로입니다.'
                                 break
-                    elif step == 'empty':
-                        res = requests.get(f'{url}/library/sections/{key}/emptyTrash',
-                                           headers={'X-Plex-Token': token,
-                                                    'Accept': 'application/json'},
-                                           timeout=600)
-                        if res.status_code != 200:
-                            status, message = 'failed', f'비우기 실패 (응답 코드 {res.status_code})'
-                            break
-                        # 휴지통 개수가 바뀌므로 현황·건강도 개수 캐시를 새로 읽어 둔다
-                        try:
-                            from .task_status import refresh_trash_counts_async
-                            refresh_trash_counts_async()
-                        except Exception:
-                            pass
-                        # 비운 라이브러리의 상세 캐시 목록은 낡으므로 지운다
-                        try:
-                            from .task_trash_view import clear_cache
-                            clear_cache(key)
-                        except Exception:
-                            pass
-                except Exception as e:
-                    status, message = 'failed', f'{STAGE_LABEL.get(step, step)} 단계 오류: {e}'
-                    break
-            item.finish(status, message)
+                            refresh_started = _now_text()
+                            _write_status(key, 'vfs', {
+                                'job': None, 'path': sec.get('path', ''),
+                                'started_at': refresh_started, 'finished_at': None,
+                                'status': 'running', 'source': 'trash',
+                                'job_name': name}, label='휴지통 작업')
+                            ret = ModuleStatus._rc(addr, 'vfs/refresh',
+                                                   {'dir': remote, 'recursive': 'true',
+                                                    '_async': 'true'})
+                            vfs_jobid = ret.get('jobid')
+                            if vfs_jobid:
+                                _write_status(key, 'vfs', {
+                                    'job': vfs_jobid, 'path': sec.get('path', ''),
+                                    'started_at': refresh_started, 'finished_at': None,
+                                    'status': 'running', 'source': 'trash',
+                                    'job_name': name}, label='휴지통 작업')
+                            w = _wait_vfs(addr, vfs_jobid)
+                            vfs_duration = w['duration']
+                            _write_status(key, 'vfs', {
+                                'job': vfs_jobid, 'path': sec.get('path', ''),
+                                'started_at': refresh_started, 'finished_at': _now_text(),
+                                'status': {'done': 'done', 'failed': 'failed',
+                                           'cancelled': 'cancelled'}.get(w['result'], 'failed'),
+                                'source': 'trash', 'job_name': name}, label='휴지통 작업')
+                            if w['result'] != 'done':
+                                status = 'cancelled' if w['result'] == 'cancelled' else 'failed'
+                                message = ('취소 요청으로 중단했습니다.' if w['result'] == 'cancelled'
+                                           else 'VFS 새로고침이 끝나지 않았습니다.')
+                                break
+                        elif step == 'scan':
+                            # 스캔 시작 전 MAX(media_parts.id) 기록 —
+                            # 추가 파일 목록 2차 방법용 기준점이다.
+                            try:
+                                from . import db_support
+                                if db_support.db_ready():
+                                    pre_max_id = db_support.parts_max_id()
+                            except Exception as e:
+                                logger.warning(f'[휴지통 작업] 추가 파일 기준점 기록 실패: {e}')
+                            scan_started = _now_text()
+                            _write_status(key, 'scan', {
+                                'job': None, 'path': sec.get('path', ''),
+                                'started_at': scan_started, 'finished_at': None,
+                                'status': 'running', 'source': 'trash',
+                                'job_name': name}, label='휴지통 작업')
+                            res = requests.get(f'{url}/library/sections/{key}/refresh',
+                                               headers={'X-Plex-Token': token,
+                                                        'Accept': 'application/json'},
+                                               timeout=30)
+                            res.raise_for_status()
+                            scan_job_id = _extract_job_id(res)
+                            if scan_job_id:
+                                _write_status(key, 'scan', {
+                                    'job': scan_job_id, 'path': sec.get('path', ''),
+                                    'started_at': scan_started, 'finished_at': None,
+                                    'status': 'running', 'source': 'trash',
+                                    'job_name': name}, label='휴지통 작업')
+                                cur = get_trash_current() or {}
+                                cur['scan_job'] = scan_job_id
+                                _set_trash_current(cur)
+                                w = _wait_scan(url, token, scan_job_id)
+                                scan_duration = w['duration']
+                                scan_stats = (w.get('job') or {}).get('stats') or {}
+                                summary = scan_summary_text(scan_stats)
+                                scan_entry = {
+                                    'job': scan_job_id, 'path': sec.get('path', ''),
+                                    'started_at': scan_started, 'finished_at': _now_text(),
+                                    'status': {'done': 'done', 'failed': 'failed',
+                                               'cancelled': 'cancelled',
+                                               'not_found': 'failed'}.get(w['result'], 'failed'),
+                                    'source': 'trash', 'job_name': name}
+                                if summary:
+                                    scan_entry['summary'] = summary
+                                _write_status(key, 'scan', scan_entry, label='휴지통 작업')
+                                if w['result'] == 'cancelled':
+                                    status, message = 'cancelled', '취소 요청으로 중단했습니다.'
+                                    break
+                                if w['result'] == 'not_found':
+                                    status, message = 'failed', '스캔 작업 기록을 찾을 수 없습니다.'
+                                    break
+                                if w['result'] != 'done':
+                                    job_err = ((w.get('job') or {}).get('error') or '')
+                                    status = 'failed'
+                                    message = (f"스캔 실패: {job_err}" if job_err
+                                               else '스캔이 완료되지 않았습니다.')
+                                    break
+                            else:
+                                _write_status(key, 'scan', {
+                                    'job': None, 'path': sec.get('path', ''),
+                                    'started_at': scan_started, 'finished_at': _now_text(),
+                                    'status': 'done', 'source': 'trash',
+                                    'job_name': name}, label='휴지통 작업')
+                        elif step == 'empty':
+                            empty_started = _now_text()
+                            _write_status(key, 'trash', {
+                                'job': None, 'mode': action,
+                                'started_at': empty_started, 'finished_at': None,
+                                'status': 'running', 'source': 'trash',
+                                'job_name': name}, label='휴지통 작업')
+                            res = requests.get(f'{url}/library/sections/{key}/emptyTrash',
+                                               headers={'X-Plex-Token': token,
+                                                        'Accept': 'application/json'},
+                                               timeout=600)
+                            if res.status_code != 200:
+                                _write_status(key, 'trash', {
+                                    'job': None, 'mode': action,
+                                    'started_at': empty_started, 'finished_at': _now_text(),
+                                    'status': 'failed', 'source': 'trash',
+                                    'job_name': name}, label='휴지통 작업')
+                                status, message = 'failed', f'비우기 실패 (응답 코드 {res.status_code})'
+                                break
+                            # 비우기는 job으로 돌아오므로, 완료 후 job을 조회해
+                            # stats.removed_parts에서 비운 개수를 읽는다.
+                            empty_job_id = _extract_job_id(res)
+                            if empty_job_id:
+                                _write_status(key, 'trash', {
+                                    'job': empty_job_id, 'mode': action,
+                                    'started_at': empty_started, 'finished_at': None,
+                                    'status': 'running', 'source': 'trash',
+                                    'job_name': name}, label='휴지통 작업')
+                                w = _wait_job(url, token, empty_job_id,
+                                              poll_sec=EMPTY_POLL_SEC)
+                                if w['result'] == 'cancelled':
+                                    _write_status(key, 'trash', {
+                                        'job': empty_job_id, 'mode': action,
+                                        'started_at': empty_started,
+                                        'finished_at': _now_text(),
+                                        'status': 'cancelled', 'source': 'trash',
+                                        'job_name': name}, label='휴지통 작업')
+                                    status, message = 'cancelled', '취소 요청으로 중단했습니다.'
+                                    break
+                                if w['result'] == 'not_found':
+                                    _write_status(key, 'trash', {
+                                        'job': empty_job_id, 'mode': action,
+                                        'started_at': empty_started,
+                                        'finished_at': _now_text(),
+                                        'status': 'failed', 'source': 'trash',
+                                        'job_name': name}, label='휴지통 작업')
+                                    status, message = 'failed', '비우기 작업 기록을 찾을 수 없습니다.'
+                                    break
+                                if w['result'] != 'done':
+                                    _write_status(key, 'trash', {
+                                        'job': empty_job_id, 'mode': action,
+                                        'started_at': empty_started,
+                                        'finished_at': _now_text(),
+                                        'status': 'failed', 'source': 'trash',
+                                        'job_name': name}, label='휴지통 작업')
+                                    status, message = 'failed', '비우기가 완료되지 않았습니다.'
+                                    break
+                                estat = (w.get('job') or {}).get('stats') or {}
+                                emptied_count = _stat_int(estat.get('removed_parts'))
+                            trash_entry = {
+                                'job': empty_job_id, 'mode': action,
+                                'started_at': empty_started, 'finished_at': _now_text(),
+                                'status': 'done', 'source': 'trash',
+                                'job_name': name}
+                            if emptied_count is not None:
+                                trash_entry['summary'] = f'{emptied_count}개 비움'
+                            _write_status(key, 'trash', trash_entry, label='휴지통 작업')
+                            # 비우기에 성공했으니 이 라이브러리 휴지통은 0개 —
+                            # 개수 캐시에 바로 반영한다.
+                            try:
+                                from .task_status import set_trash_count
+                                set_trash_count(key, 0)
+                            except Exception as e:
+                                logger.warning(f'[휴지통 작업] 휴지통 개수 캐시 반영 실패: {e}')
+                            # 휴지통 개수가 바뀌므로 현황·건강도 개수 캐시를 새로 읽어 둔다
+                            try:
+                                from .task_status import refresh_trash_counts_async
+                                refresh_trash_counts_async()
+                            except Exception as e:
+                                logger.warning(f'[휴지통 작업] 휴지통 개수 새로 읽기 실패: {e}')
+                            # 비운 라이브러리의 상세 캐시 목록은 낡으므로 지운다
+                            try:
+                                from .task_trash_view import clear_cache
+                                clear_cache(key)
+                            except Exception as e:
+                                logger.warning(f'[휴지통 작업] 휴지통 상세 캐시 정리 실패: {e}')
+                    except Exception as e:
+                        status, message = 'failed', f'{STAGE_LABEL.get(step, step)} 단계 오류: {e}'
+                        break
+            except Exception as e:
+                logger.error(f'[휴지통 작업] {title} 처리 실패: {e}')
+                logger.error(traceback.format_exc())
+                status, message = 'failed', str(e)
+                TaskTrash._fail_running_status(key, name)
+            # 스캔 단계가 있었다면 집계·추가 파일 목록을 이력에 남긴다
+            if scan_job_id or scan_stats is not None:
+                apply_scan_result(item, scan_job_id, scan_stats, vfs_duration,
+                                  scan_duration, pre_max_id, key,
+                                  label='휴지통 작업')
+            else:
+                item.vfs_duration = vfs_duration
+                item.scan_duration = scan_duration
+            item.emptied_count = emptied_count
+            if status == 'done':
+                summary = scan_summary_text(scan_stats)
+                done_msg = message
+                if not done_msg:
+                    bits = []
+                    if summary:
+                        bits.append(summary)
+                    if emptied_count is not None:
+                        bits.append(f'{emptied_count}개 비움')
+                    done_msg = ('완료됐습니다. (' + ' · '.join(bits) + ')'
+                                if bits else '완료됐습니다.')
+                item.finish('done', done_msg)
+            else:
+                item.finish(status, message)
             logger.info(f'[휴지통 작업] {title}: {status} {message}')
             if status == 'done' and 'scan' in steps:
                 # 스캔으로 휴지통 구성이 바뀌었을 수 있어 상세 캐시를 지우고
-                # 개수 캐시는 '오래됨'으로 표시해 다음 통계 계산 때 읽게 한다
+                # 개수 캐시는 '오래됨'으로 표시해 다음 통계 계산 때 읽게 한다.
+                # 스캔으로 미디어 수가 바뀌었을 수 있어 통계 재계산도 요청한다.
                 try:
                     from .task_trash_view import clear_cache
                     clear_cache(key)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f'[휴지통 작업] 휴지통 상세 캐시 정리 실패: {e}')
                 try:
                     from .task_status import mark_trash_counts_stale
                     mark_trash_counts_stale()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f'[휴지통 작업] 휴지통 개수 캐시 표시 실패: {e}')
+                try:
+                    from .task_status import request_stats
+                    request_stats()
+                except Exception as e:
+                    logger.warning(f'[휴지통 작업] 통계 재계산 요청 실패: {e}')
             _set_trash_current(None)
+        _set_trash_current(None)
         logger.info(f'[휴지통 작업] 종료: {name}')

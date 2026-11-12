@@ -34,6 +34,9 @@
 <style>
 .status-act { padding:4px 10px !important; font-size:11.5px !important; line-height:1.45 !important; white-space:nowrap !important; }
 .status-side { padding-left:2px !important; padding-right:2px !important; }
+/* 용량 측정 중에는 새로고침 아이콘이 회전한다 */
+@keyframes sm-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.sm-spin { animation: sm-rotate 1s linear infinite; }
 /* 비활성 버튼은 '누를 수 없음'이 한눈에 드러나게 한다 — 부트스트랩 기본 표현은
    색이 옅어질 뿐이라 활성 버튼(특히 휴지통 비우기와 취소의 빨간 아웃라인)과
    구분이 모호하다. 색이 죽은 회색으로 고정하고 호버 반응을 없앤다. */
@@ -165,12 +168,20 @@ function jobText(job, label, jobLabel) {
   if (!job) return '';
   var hasJob = job.job !== null && job.job !== undefined && job.job !== '';
   var jp = hasJob ? ' · ' + jobLabel + ' ' + job.job : '';
-  if (job.status == 'running') return label + ' 중 (' + fmt(job.started_at) + ' 시작' + jp + ')';
-  if (job.status == 'requested') return label + ' 전송됨 (' + fmt(job.started_at) + jp + ')';
-  if (job.status == 'done') return label + ' 완료 (' + fmt(job.finished_at) + jp + ')';
-  if (job.status == 'failed') return label + ' 실패' + (hasJob ? ' (' + jobLabel + ' ' + job.job + ')' : '') + (job.error ? ': ' + job.error : '');
-  if (job.status == 'cancelled') return label + ' 취소됨 (' + fmt(job.finished_at) + jp + ')';
-  if (job.status == 'interrupted') return label + ' 중단됨 (' + fmt(job.finished_at) + jp + ')';
+  // 주기적 스캔·휴지통 작업이 남긴 표시에는 작업명을 함께 보여 준다
+  var srcTag = '';
+  if (job.job_name) {
+    if (job.source == 'periodic') srcTag = '주기적 스캔: ' + job.job_name;
+    else if (job.source == 'trash') srcTag = '휴지통 작업: ' + job.job_name;
+  }
+  var src = srcTag ? ' · ' + srcTag : '';
+  var sum = job.summary ? ' · ' + job.summary : '';
+  if (job.status == 'running') return label + ' 중 (' + fmt(job.started_at) + ' 시작' + src + jp + ')';
+  if (job.status == 'requested') return label + ' 전송됨 (' + fmt(job.started_at) + src + jp + ')';
+  if (job.status == 'done') return label + ' 완료 (' + fmt(job.finished_at) + src + sum + jp + ')';
+  if (job.status == 'failed') return label + ' 실패' + src + (hasJob ? ' (' + jobLabel + ' ' + job.job + ')' : '') + (job.error ? ': ' + job.error : '');
+  if (job.status == 'cancelled') return label + ' 취소됨 (' + fmt(job.finished_at) + src + jp + ')';
+  if (job.status == 'interrupted') return label + ' 중단됨 (' + fmt(job.finished_at) + src + jp + ')';
   return label + ' ' + job.status;
 }
 
@@ -253,8 +264,13 @@ function renderServer(server, storage) {
   }
   str += '</div>';
   if (storage) {
+    // 용량 측정 시각은 paintInfoAgo가 매초 경과 표시로 바꿔 보여 준다
+    window.__dataSizeAt = storage.data_size_at || null;
+    var measuring = !!storage.measuring;
+    var refreshSvg = '<svg' + (measuring ? ' class="sm-spin"' : '') + ' width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>';
     str += '<div style="' + cardStyle + '; flex:1 1 0; min-width:300px">';
-    str += '<div style="font-size:14px; margin-bottom:8px"><strong>' + smIcon('hdd') + '데이터 용량</strong>' + (storage.disk_total ? ' <strong style="font-size:13px">' + (storage.data_size ? fmtBytes(storage.data_size) : '계산 중') + '</strong>' : '') + '</div>';
+    str += '<div style="font-size:14px; margin-bottom:8px"><strong>' + smIcon('hdd') + '데이터 용량</strong>' + (storage.disk_total ? ' <strong style="font-size:13px">' + (storage.data_size ? fmtBytes(storage.data_size) : '계산 중') + '</strong>' + ' <button type="button" id="data_size_refresh_btn" title="' + (measuring ? '용량 측정 중' : '용량 다시 측정') + '" style="background:none; border:none; padding:2px 4px; cursor:pointer; vertical-align:middle"' + (measuring ? ' disabled' : '') + '>' + refreshSvg + '</button><span id="data_size_ago" style="font-size:12px; color:#888; font-weight:normal"></span>' : '') + '</div>';
+    if (measuring) startDataSizePoll();
   }
   if (storage && storage.disk_total) {
     var pct = Math.round(storage.disk_used / storage.disk_total * 100);
@@ -284,6 +300,7 @@ function renderServer(server, storage) {
   if (storage) str += '</div>';
   str += '</div>';
   $('#server_card_div').html(str);
+  paintInfoAgo();
 }
 
 // 작업 상태 줄: 시간 순서(오른쪽이 최신)로 정렬하고, 최신 항목만 상태 색으로·나머지는 회색으로
@@ -324,17 +341,33 @@ function stateLineHtml(st) {
   }).join(' <span style="color:#ccc">·</span> ');
 }
 
+// (N분 전) — 유닉스 시각(초) 기준 경과 표시. 용량 측정 시각에도 쓴다.
+function fmtAgo(ts) {
+  if (!ts) return '';
+  var sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (sec < 60) return '(' + sec + '초 전)';
+  if (sec < 3600) return '(' + Math.floor(sec / 60) + '분 전)';
+  if (sec < 86400) return '(' + Math.floor(sec / 3600) + '시간 전)';
+  return '(' + Math.floor(sec / 86400) + '일 전)';
+}
+
 // 항목 수 줄 오른쪽 끝 (N초 전) — 정보를 마지막으로 불러온 시각 기준
 var infoUpdatedAt = null;
 function markInfoUpdated() { infoUpdatedAt = Date.now(); paintInfoAgo(); }
 function paintInfoAgo() {
-  if (!infoUpdatedAt) return;
-  var sec = Math.max(0, Math.floor((Date.now() - infoUpdatedAt) / 1000));
-  var txt;
-  if (sec < 60) txt = '(' + sec + '초 전)';
-  else if (sec < 3600) txt = '(' + Math.floor(sec / 60) + '분 전)';
-  else txt = '(' + Math.floor(sec / 3600) + '시간 전)';
-  $('#info_ago').text(txt);
+  if (infoUpdatedAt) {
+    var sec = Math.max(0, Math.floor((Date.now() - infoUpdatedAt) / 1000));
+    var txt;
+    if (sec < 60) txt = '(' + sec + '초 전)';
+    else if (sec < 3600) txt = '(' + Math.floor(sec / 60) + '분 전)';
+    else txt = '(' + Math.floor(sec / 3600) + '시간 전)';
+    $('#info_ago').text(txt);
+  }
+  // 데이터 용량 측정 시각 — renderServer가 window.__dataSizeAt에 남긴다
+  if (window.__dataSizeAt) {
+    var agoEl = $('#data_size_ago');
+    if (agoEl.length) agoEl.text(fmtAgo(window.__dataSizeAt));
+  }
 }
 
 // 상태 줄 자동 갱신 — 화면 밖에서 시작된 작업도 보이도록 30초마다 상태만 가볍게 다시 읽는다
@@ -364,6 +397,45 @@ function pollStates() {
   });
 }
 
+// 데이터 용량 수동 측정 — 측정 중에는 5초마다 가볍게 확인하고, 끝나면
+// 대시보드를 조용히 다시 불러 새 용량을 반영한다 (최대 10분)
+var dataSizePollTimer = null;
+var dataSizePollCount = 0;
+function stopDataSizePoll() {
+  if (dataSizePollTimer) { clearInterval(dataSizePollTimer); dataSizePollTimer = null; }
+}
+function startDataSizePoll() {
+  if (dataSizePollTimer) return;
+  dataSizePollCount = 0;
+  dataSizePollTimer = setInterval(function () {
+    dataSizePollCount++;
+    if (dataSizePollCount > 120) { stopDataSizePoll(); return; }
+    $.ajax({
+      global: false,
+      type: 'POST', url: API_BASE + 'storage', data: {}, timeout: 20000,
+      success: function (r) {
+        if (!r || r.ret != 'success' || !r.storage) return;
+        if (!r.storage.measuring) { stopDataSizePoll(); load_list(false, true); }
+      }
+    });
+  }, 5000);
+}
+function refreshDataSize() {
+  $.ajax({
+    global: false,
+    type: 'POST', url: API_BASE + 'refresh_data_size', data: {}, timeout: 20000,
+    success: function (ret) {
+      showMsg(ret);
+      if (ret && ret.ret == 'success' && ret.measuring) {
+        $('#data_size_refresh_btn svg').addClass('sm-spin');
+        $('#data_size_refresh_btn').prop('disabled', true);
+        startDataSizePoll();
+      }
+    },
+    error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); }
+  });
+}
+
 var statusLibSort = "{{ arg['status_lib_sort'] or 'default' }}";
 if (['default', 'name', 'nometa', 'media', 'trash'].indexOf(statusLibSort) < 0) statusLibSort = 'default';
 $('#status_lib_sort').val(statusLibSort);  // 저장된 정렬을 선택 칸에도 표시 (없으면 '기본'으로 보여 저장이 안 된 것처럼 보였다)
@@ -383,7 +455,7 @@ function sortedStatusLibs(data) {
 function setStatusLibSort(v) {
   statusLibSort = v;
   $.ajax({type: 'POST', url: API_BASE + 'set_lib_sort', data: {which: 'list', value: v}, global: false});
-  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2]);
+  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2], lastStatusArgs[3]);
 }
 
 // 라이브러리 표시 선택 — 사용자가 고른 숨김 목록은 서버 설정에 기억해
@@ -425,7 +497,7 @@ $("body").on('change', '.lib-show-chk', function () {
   var k = String($(this).data('key'));
   if (this.checked) delete statusHiddenLibs[k]; else statusHiddenLibs[k] = true;
   saveHiddenLibs();
-  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2]);
+  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2], lastStatusArgs[3]);
 });
 $("body").on('change', '#lib_show_all', function () {
   var show = this.checked;
@@ -434,15 +506,15 @@ $("body").on('change', '#lib_show_all', function () {
   });
   $('.lib-show-chk').prop('checked', show);
   saveHiddenLibs();
-  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2]);
+  if (lastStatusArgs) render(lastStatusArgs[0], lastStatusArgs[1], lastStatusArgs[2], lastStatusArgs[3]);
 });
 $("body").on('input', '#lib_show_search', function () {
   var q = $(this).val().toLowerCase();
   $('.lib-show-row').each(function () { $(this).toggle(!q || $(this).data('title').toLowerCase().indexOf(q) >= 0); });
 });
 
-function render(data, logFiles, periodicCurrent) {
-  lastStatusArgs = [data, logFiles, periodicCurrent];
+function render(data, logFiles, periodicCurrent, trashCurrent) {
+  lastStatusArgs = [data, logFiles, periodicCurrent, trashCurrent];
   window.__stateKeys = (data || []).map(function (x) { return x.key; });
   stateKnownRunning = (data || []).some(function (x) { var t = x.state || {}; return (t.vfs && t.vfs.status == 'running') || (t.scan && (t.scan.status == 'running' || t.scan.status == 'requested')) || (t.meta && t.meta.status == 'running'); });
   $('#logwarn_div').toggle(logFiles === 0);
@@ -454,7 +526,8 @@ function render(data, logFiles, periodicCurrent) {
     var s = sortedData[i];
     var st = s.state || {};
     var hl = periodicCurrent && String(periodicCurrent.section_key) === String(s.key);
-    var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || (st.trash && st.trash.status == 'running') || hl;
+    var hlTrash = trashCurrent && String(trashCurrent.section_key) === String(s.key);
+    var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || (st.trash && st.trash.status == 'running') || hl || hlTrash;
     var ls = s.last_scan;
 
     str += '<div style="border:' + (running ? '2px solid #2b6cb0' : '1px solid #ddd') + '; border-radius:6px; padding:10px 14px; margin-bottom:10px; background:' + (running ? '#ebf4ff' : '#fff') + '; display:flex; flex-wrap:wrap; gap:10px 14px">';
@@ -466,6 +539,10 @@ function render(data, logFiles, periodicCurrent) {
     if (hl) {
       var stageTxt = periodicCurrent.stage == 'vfs' ? '새로고침 중' : '스캔 중';
       str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">주기적 스캔 진행 중 · ' + stageTxt + '</span>';
+    }
+    if (hlTrash) {
+      var trashStageTxt = {'refresh': '새로고침 중', 'scan': '스캔 중', 'empty': '비우는 중'}[trashCurrent.stage] || '진행 중';
+      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">휴지통 작업 진행 중 · ' + trashStageTxt + '</span>';
     }
     str += '</div>';
     var stateHtml0 = stateLineHtml(st);
@@ -805,7 +882,7 @@ function load_list(force, quiet) {
         $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
         if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
-        render(ret.data, ret.log_files, ret.periodic_current);
+        render(ret.data, ret.log_files, ret.periodic_current, ret.trash_current);
         markInfoUpdated();
         scheduleStatePoll(ret.data);
         if (quiet) {
@@ -844,6 +921,8 @@ $(document).ready(function () {
   load_list();
   setInterval(pollStates, 30000);
   setInterval(paintInfoAgo, 1000);
+  // 용량 새로고침 버튼은 renderServer가 다시 그리므로 위임으로 건다
+  $("body").on('click', '#data_size_refresh_btn', function () { refreshDataSize(); });
   $('#btn_guide_toggle').on('click', function () {
     var body = $('#btn_guide_body');
     var open = body.is(':visible');

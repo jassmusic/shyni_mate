@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div id="periodic_current_div" style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">
+  진행 상태를 불러오는 중입니다.
+</div>
+
+<div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:10px 0">
+  <select id="histLibSel" class="form-control input-sm" style="width:170px">
+    <option value="">전체 라이브러리</option>
+  </select>
+  <label style="font-weight:normal; margin:0"><input type="checkbox" id="histOnlyAppend" name="tmp_hist_only_append"> 추가된 항목만</label>
+  <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·파일 경로 검색" style="width:230px">
+  <button type="button" class="btn btn-sm btn-default" id="histSearchBtn">검색</button>
+  <button type="button" class="btn btn-sm btn-default" id="histResetBtn">초기화</button>
+  <span style="margin-left:auto">
+    <button type="button" class="btn btn-sm btn-default" id="histRefreshBtn">새로고침</button>
+    <button type="button" class="btn btn-sm btn-default" id="histExpandAllBtn">모두 펼치기</button>
+    <button type="button" class="btn btn-sm btn-default" id="histCollapseAllBtn">모두 접기</button>
+  </span>
+</div>
+
+<div id="periodic_history_div" style="font-size:13px; color:#888">불러오는 중입니다.</div>
+
+<script type="text/javascript">
+var LIBS = [];
+var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/periodic/';
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+
+// 통계 칸 표시 — 예전 행의 NULL은 '-'로 표시한다
+function statText(v) {
+  if (v == null) return '-';
+  return String(v);
+}
+
+function fmtDur(sec) {
+  if (sec == null) return '-';
+  sec = parseInt(sec, 10);
+  if (isNaN(sec) || sec < 0) return '-';
+  if (sec < 60) return sec + '초';
+  return Math.floor(sec / 60) + '분 ' + (sec % 60) + '초';
+}
+
+function stageLabel(stage) {
+  if (stage == 'vfs') return 'VFS 새로고침 중';
+  if (stage == 'scan') return '스캔 중';
+  return stage || '';
+}
+
+function renderCurrent(cur) {
+  if (!cur) {
+    $('#periodic_current_div').html('<span style="color:#888">현재 진행 중인 주기적 스캔이 없습니다.</span>');
+    return;
+  }
+  var str = '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
+  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>';
+  str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
+  str += '<button type="button" class="btn btn-sm btn-danger" id="periodicCancelBtn">취소</button>';
+  str += '</div>';
+  $('#periodic_current_div').html(str);
+}
+
+function loadCurrent() {
+  $.ajax({
+    type: 'POST', url: API_BASE + 'current', data: {}, global: false,
+    success: function (ret) { if (ret.ret == 'success') renderCurrent(ret.data); }
+  });
+}
+
+function statusText(s) {
+  if (s == 'done') return '<span style="color:#2f855a">완료</span>';
+  if (s == 'failed') return '<span style="color:#c0392b">실패</span>';
+  if (s == 'cancelled') return '<span style="color:#b7791f">취소</span>';
+  if (s == 'running') return '<span style="color:#2b6cb0">실행 중</span>';
+  if (s == 'terminated') return '<span style="color:#888">중단됨(재시작)</span>';
+  return s;
+}
+
+function statCell(h) {
+  var str = '';
+  str += '신규 ' + statText(h.stat_new) + ' · 전체 ' + statText(h.stat_total);
+  if (h.stat_missing != null && h.stat_missing > 0) str += ' · 누락 ' + h.stat_missing;
+  return str;
+}
+
+var histPage = 1;
+var expandedIds = {};
+var detailCache = {};
+
+function renderHistory(data) {
+  if (!data || !data.count) {
+    $('#periodic_history_div').html('아직 실행 이력이 없습니다.');
+    return;
+  }
+  histPage = data.page;
+  var rows = data.list || [];
+  var str = '<table class="table table-sm" style="font-size:13px"><thead><tr><th>시작</th><th>종료</th><th>작업명</th><th>라이브러리</th><th>상태</th><th>소요</th><th>결과</th></tr></thead><tbody>';
+  for (var i = 0; i < rows.length; i++) {
+    var h = rows[i];
+    var expanded = !!expandedIds[h.id];
+    str += '<tr class="hist-row" data-id="' + h.id + '" style="cursor:pointer' + (expanded ? '; background:#f7fafc' : '') + '">';
+    str += '<td style="white-space:nowrap">' + h.start_time + '</td>';
+    str += '<td style="white-space:nowrap">' + (h.finish_time || '') + '</td>';
+    str += '<td>' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#888; font-size:11px">(수동)</span>' : '') + '</td>';
+    str += '<td>' + esc(h.section_title) + '</td>';
+    str += '<td style="white-space:nowrap">' + statusText(h.status) + '</td>';
+    str += '<td style="white-space:nowrap">' + fmtDur(h.duration) + '</td>';
+    str += '<td style="white-space:nowrap">' + statCell(h) + '</td></tr>';
+    if (expanded) {
+      str += '<tr class="hist-detail-row" data-id="' + h.id + '"><td colspan="7" style="background:#f7fafc"><div class="hist-detail" data-id="' + h.id + '">';
+      str += detailCache[h.id] ? renderDetail(detailCache[h.id]) : '불러오는 중입니다.';
+      str += '</div></td></tr>';
+    }
+  }
+  str += '</tbody></table>';
+  str += '<div style="display:flex; justify-content:space-between; align-items:center">';
+  str += '<span style="color:#888">전체 ' + data.count + '개</span>';
+  str += '<span><button type="button" class="btn btn-xs btn-default" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
+  str += data.page + ' / ' + data.pages + ' 페이지 ';
+  str += '<button type="button" class="btn btn-xs btn-default" id="histNextBtn"' + (data.page >= data.pages ? ' disabled' : '') + '>다음</button></span></div>';
+  $('#periodic_history_div').html(str);
+  $('#histPrevBtn').click(function () { loadHistory(histPage - 1); });
+  $('#histNextBtn').click(function () { loadHistory(histPage + 1); });
+}
+
+function folderStatLine(f) {
+  var folder = f.path || f.folder || f.dir || f.name || '';
+  var bits = [];
+  if (f.new != null && f.new > 0) bits.push('신규 ' + f.new);
+  if (f.total != null) bits.push('전체 ' + f.total);
+  if (f.missing != null && f.missing > 0) bits.push('누락 ' + f.missing);
+  if (f.updated != null && f.updated > 0) bits.push('업데이트 ' + f.updated);
+  if (f.restored != null && f.restored > 0) bits.push('복원 ' + f.restored);
+  return esc(folder) + (bits.length ? ' — ' + bits.join(' · ') : '');
+}
+
+function renderDetail(d) {
+  var str = '<div style="font-size:13px; line-height:1.8">';
+  // 단계별 소요
+  var steps = [];
+  if (d.vfs_duration != null) steps.push('VFS 새로고침 ' + fmtDur(d.vfs_duration));
+  if (d.scan_duration != null) steps.push('스캔 ' + fmtDur(d.scan_duration));
+  steps.push('전체 ' + fmtDur(d.duration));
+  str += '<div><strong>소요</strong> — ' + steps.join(' · ') + '</div>';
+  // 집계 한 줄 (0인 항목은 빼고 간결하게)
+  var hasStats = d.stat_total != null || d.stat_new != null || d.stat_missing != null ||
+    d.stat_updated != null || d.stat_restored != null || d.stat_registered != null || d.stat_failed != null;
+  if (hasStats) {
+    var bits = [];
+    if (d.stat_total != null) bits.push('전체 ' + d.stat_total);
+    if (d.stat_new != null && d.stat_new > 0) bits.push('신규 ' + d.stat_new);
+    if (d.stat_updated != null && d.stat_updated > 0) bits.push('업데이트 ' + d.stat_updated);
+    if (d.stat_restored != null && d.stat_restored > 0) bits.push('복원 ' + d.stat_restored);
+    if (d.stat_missing != null && d.stat_missing > 0) bits.push('누락 ' + d.stat_missing);
+    if (d.stat_registered != null && d.stat_registered > 0) bits.push('등록 ' + d.stat_registered);
+    if (d.stat_failed != null && d.stat_failed > 0) bits.push('실패 ' + d.stat_failed);
+    str += '<div><strong>집계</strong> — ' + (bits.length ? bits.join(' · ') : '변화가 없습니다.') + '</div>';
+  } else {
+    str += '<div style="color:#888">집계가 없습니다. (이 실행은 결과 저장이 되기 전에 기록됐습니다.)</div>';
+  }
+  if (d.shyni_job_id) str += '<div style="color:#888">shyni 작업 번호 ' + esc(d.shyni_job_id) + '</div>';
+  // 폴더별 결과
+  var folders = d.stat_folders || [];
+  if (folders.length) {
+    str += '<div style="margin-top:6px"><strong>폴더별 결과</strong><ul style="margin:2px 0; padding-left:18px">';
+    for (var i = 0; i < folders.length; i++) str += '<li>' + folderStatLine(folders[i]) + '</li>';
+    str += '</ul></div>';
+  }
+  // 추가 파일 목록 — 앨범(폴더) 단위 묶음
+  str += '<div style="margin-top:6px"><strong>추가된 파일</strong> ';
+  if (d.append_total == null) {
+    str += '<span style="color:#888">파일 목록을 볼 수 없습니다. Relay가 꺼져 있으면 목록은 저장되지 않습니다.</span>';
+  } else if (!d.append_total) {
+    str += '<span style="color:#888">추가된 파일이 없습니다.</span>';
+  } else {
+    str += '<span style="color:#888">전체 ' + d.append_count + '개' + (d.append_truncated ? ' (외 ' + (d.append_count - d.append_total) + '개 더 있음)' : '') + '</span>';
+    var groups = d.append_groups || [];
+    str += '<ul style="margin:2px 0; padding-left:18px">';
+    for (var g = 0; g < groups.length; g++) {
+      var grp = groups[g];
+      str += '<li><a href="#" class="append-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
+      str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
+      str += '<div class="append-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
+      for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
+      str += '</div></li>';
+    }
+    str += '</ul>';
+  }
+  str += '</div>';
+  if (d.message) str += '<div style="color:#888; margin-top:4px">' + esc(d.message) + '</div>';
+  str += '</div>';
+  return str;
+}
+
+function loadDetail(id) {
+  if (detailCache[id]) return;
+  $.ajax({
+    type: 'POST', url: API_BASE + 'history_detail', data: {id: id}, global: false,
+    success: function (ret) {
+      if (ret.ret != 'success' || !ret.data) {
+        $('.hist-detail[data-id="' + id + '"]').html('<span style="color:#c0392b">상세를 불러오지 못했습니다.</span>');
+        return;
+      }
+      detailCache[id] = ret.data;
+      $('.hist-detail[data-id="' + id + '"]').html(renderDetail(ret.data));
+    },
+    error: function () {
+      $('.hist-detail[data-id="' + id + '"]').html('<span style="color:#c0392b">상세를 불러오지 못했습니다.</span>');
+    }
+  });
+}
+
+function loadHistory(page, cb) {
+  if (page == null) page = histPage;
+  $.ajax({
+    type: 'POST', url: API_BASE + 'history', global: false,
+    data: {
+      page: page,
+      section: $('#histLibSel').val() || '',
+      only_append: $('#histOnlyAppend').is(':checked') ? '1' : '',
+      search: $('#histSearch').val() || ''
+    },
+    success: function (ret) {
+      if (ret.ret == 'success') renderHistory(ret.data);
+      if (cb) cb();
+    }
+  });
+}
+
+// 라이브러리 목록은 페이지가 뜬 뒤에 따로 불러온다 — 필터만 채우는
+// 목록 때문에 이력 화면이 늦게 뜨지 않게 하기 위해서다.
+function loadSections() {
+  $.ajax({
+    type: 'POST', url: API_BASE + 'sections', data: {}, global: false,
+    success: function (ret) {
+      if (ret && ret.ret == 'success' && Array.isArray(ret.data)) {
+        LIBS = ret.data;
+        buildLibFilter();
+      }
+    }
+  });
+}
+
+function buildLibFilter() {
+  var sel = $('#histLibSel');
+  sel.find('option[data-lib]').remove();
+  for (var k = 0; k < LIBS.length; k++) {
+    sel.append('<option data-lib="1" value="' + LIBS[k].key + '">' + esc(LIBS[k].title) + '</option>');
+  }
+}
+
+$(document).ready(function () {
+  loadSections();
+  loadCurrent();
+  loadHistory();
+  setInterval(function () { loadCurrent(); }, 15000);
+
+  $(document).off('click', '#periodicCancelBtn').on('click', '#periodicCancelBtn', function () {
+    globalSendCommand('cancel_current', null);
+    setTimeout(loadCurrent, 2000);
+  });
+
+  $('#histLibSel').off('change').on('change', function () { loadHistory(1); });
+  $('#histOnlyAppend').off('change').on('change', function () { loadHistory(1); });
+  $('#histSearchBtn').off('click').on('click', function () { loadHistory(1); });
+  $('#histSearch').off('keypress').on('keypress', function (e) {
+    if (e.which == 13) { e.preventDefault(); loadHistory(1); }
+  });
+  $('#histResetBtn').off('click').on('click', function () {
+    $('#histLibSel').val('');
+    $('#histOnlyAppend').prop('checked', false);
+    $('#histSearch').val('');
+    loadHistory(1);
+  });
+
+  $(document).off('click', '.hist-row').on('click', '.hist-row', function () {
+    var id = $(this).data('id');
+    if (expandedIds[id]) delete expandedIds[id];
+    else { expandedIds[id] = true; }
+    loadHistory(histPage, function () { if (expandedIds[id]) loadDetail(id); });
+  });
+
+  $(document).off('click', '.append-group-toggle').on('click', '.append-group-toggle', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var gidx = $(this).data('gidx');
+    var id = $(this).data('id');
+    $('.append-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
+  });
+
+  $('#histRefreshBtn').off('click').on('click', function () {
+    loadCurrent();
+    loadHistory(histPage);
+  });
+
+  $('#histExpandAllBtn').off('click').on('click', function () {
+    $('.hist-row').each(function () {
+      var id = $(this).data('id');
+      expandedIds[id] = true;
+    });
+    loadHistory(histPage, function () {
+      $('.hist-row').each(function () { loadDetail($(this).data('id')); });
+    });
+  });
+
+  $('#histCollapseAllBtn').off('click').on('click', function () {
+    expandedIds = {};
+    loadHistory(histPage);
+  });
+});
+</script>
+{% endblock %}

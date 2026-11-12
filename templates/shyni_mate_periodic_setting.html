@@ -1,336 +1,51 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="container-fluid">
-  <div class="row show-grid">
-    <span class="col-md-12">
-      <strong>주기적 스캔</strong>
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13px; color:#888">
-      라이브러리를 골라 cron으로 등록해 두면, 정해진 시각에 하나씩 순차로 실행합니다. 작업 종류는 스캔과 VFS 새로고침만 중에서 고를 수 있고, 스캔 작업은 VFS 새로고침을 먼저 할지 고를 수 있습니다.
-    </span>
-  </div>
-</div>
+{{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장']])}}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
 
-<div id="periodic_current_div" style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">
-  진행 상태를 불러오는 중입니다.
-</div>
-
-{{ macros.m_button_group([['jobsSaveBtn', '저장'], ['jobAddBtn', '작업 추가'], ['globalSettingSaveBtn', '설정 저장']]) }}
-<div style="margin:6px 0 10px">
-  <span style="font-size:12px; color:#888">저장하면 사용으로 켜진 작업이 스케줄러에 바로 반영됩니다. cron 예: <code>0 4 * * *</code> 매일 새벽 4시, <code>0 3 * * 1</code> 매주 월요일 새벽 3시</span>
-</div>
-
-<nav>
-  <div class="nav nav-tabs" id="nav-tab" role="tablist">
-    {{ macros.m_tab_head_start() }}
-    {{ macros.m_tab_head('jobs', '작업 목록', true) }}
-    {{ macros.m_tab_head('db', 'DB', false) }}
-    {{ macros.m_tab_head_end() }}
-  </div>
-</nav>
 <form id='setting'>
-<div class="tab-content" id="nav-tabContent">
-    {{ macros.m_tab_content_start('jobs', true) }}
-      {{ macros.m_hr_head_top() }}
-      <div id="jobs_div"></div>
-
-      {{ macros.m_hr() }}
-      <div>
-        <strong>최근 실행 이력</strong>
-        <div id="periodic_history_div" style="margin-top:8px; font-size:13px; color:#888">불러오는 중입니다.</div>
-      </div>
-    {{ macros.m_tab_content_end() }}
-
-    {{ macros.m_tab_content_start('db', false) }}
-      {{ macros.setting_input_text_and_buttons('periodic_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','periodic_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['periodic_db_delete_day'], col='6') }}
-      {{ macros.setting_checkbox('periodic_db_auto_delete', 'DB 자동 삭제', value=arg['periodic_db_auto_delete'], desc=['켜 두시면, 설정한 기간이 지난 DB 기록을 자동으로 삭제합니다.']) }}
-    {{ macros.m_tab_content_end() }}
-</div>
+  {{ macros.setting_input_int('periodic_stuck_timeout_min', '진행 중 표시 정리 시간', min=0, value=arg['periodic_stuck_timeout_min'], desc=['기본값 30분 · 단위: 분', '주기적 스캔이 진행 중인데, 스캔을 보냈는데 작업 번호를 받지 못했거나 실행 중에 다시 시작되는 등 진행 상태를 확인할 방법이 없을 때, 이 시간이 지나면 대시보드의 진행 중 표시를 중단됨으로 정리합니다.', '화면 표시만 정리하는 것으로, shyni에서 실제 작업이 계속 돌고 있다면 멈추지 않습니다.', '작업 기록이 사라진 경우에는 시간과 무관하게 바로 정리합니다.', '0으로 두면 이 기능을 끕니다.']) }}
+  {{ macros.m_hr() }}
+  {{ macros.setting_input_text_and_buttons('periodic_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','periodic_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['periodic_db_delete_day'], col='6') }}
+  {{ macros.setting_checkbox('periodic_db_auto_delete', 'DB 자동 삭제', value=arg['periodic_db_auto_delete'], desc=['켜 두시면, 설정한 기간이 지난 DB 기록을 자동으로 삭제합니다.']) }}
 </form>
 
-<div id="libPickModal" style="display:none; position:fixed; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.45); z-index:2000">
-  <div style="background:#fff; max-width:520px; margin:48px auto; border-radius:8px; padding:16px 18px; max-height:82vh; display:flex; flex-direction:column">
-    <div style="display:flex; justify-content:space-between; align-items:center">
-      <strong style="font-size:15px">라이브러리 선택</strong>
-      <span id="libPickCount" style="color:#888; font-size:12.5px"></span>
-    </div>
-    <input type="text" id="libPickSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="margin:10px 0 8px">
-    <div style="margin-bottom:8px">
-      <button type="button" class="btn btn-xs btn-default" id="libPickAll">보이는 항목 전체 선택</button>
-      <button type="button" class="btn btn-xs btn-default" id="libPickNone">보이는 항목 전체 해제</button>
-    </div>
-    <div id="libPickList" style="overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:6px 10px; min-height:80px"></div>
-    <div style="margin-top:12px; text-align:right">
-      <button type="button" class="btn btn-sm btn-default" id="libPickCancel">취소</button>
-      <button type="button" class="btn btn-sm btn-primary" id="libPickOk">확인</button>
-    </div>
-  </div>
-</div>
-
 <script type="text/javascript">
-var LIBS = {{ arg['library_list']|tojson }};
-var jobs = {{ arg['periodic_jobs_json']|safe }};
-var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/periodic/';
-
-function esc(s) {
-  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-}
-
-function libTitle(key) {
-  for (var k = 0; k < LIBS.length; k++) if (String(LIBS[k].key) === String(key)) return LIBS[k].title;
-  return key;
-}
-
-function sectionChips(sections) {
-  var secs = (sections || []).map(String);
-  if (!secs.length) return '<span style="color:#c0392b; font-size:12.5px">선택된 라이브러리가 없습니다</span>';
-  var str = '';
-  var show = Math.min(secs.length, 8);
-  for (var k = 0; k < show; k++) {
-    str += '<span style="background:#edf2f7; border:1px solid #e2e8f0; border-radius:10px; padding:1px 8px; font-size:12px">' + esc(libTitle(secs[k])) + '</span>';
-  }
-  if (secs.length > show) str += '<span style="font-size:12px; color:#4a5568">외 ' + (secs.length - show) + '개</span>';
-  str += '<span style="font-size:12px; color:#888">총 ' + secs.length + '개</span>';
-  return str;
-}
-
-var pickIdx = -1;
-var pickSel = {};
-
-function updatePickCount() {
-  var cnt = Object.keys(pickSel).length;
-  $('#libPickCount').text(cnt ? cnt + '개 선택됨' : '');
-}
-
-function renderPickList() {
-  var q = ($('#libPickSearch').val() || '').trim().toLowerCase();
-  var str = '';
-  var shown = 0;
-  for (var k = 0; k < LIBS.length; k++) {
-    var lib = LIBS[k];
-    if (q && String(lib.title).toLowerCase().indexOf(q) < 0) continue;
-    shown++;
-    var checked = pickSel[String(lib.key)] ? ' checked' : '';
-    str += '<label style="display:block; font-weight:normal; padding:3px 2px; margin:0"><input type="checkbox" class="pick-sec" name="tmp_pick_sec" value="' + lib.key + '"' + checked + '> ' + esc(lib.title) + '</label>';
-  }
-  if (!shown) str = '<div style="color:#888; padding:4px 2px">검색 결과가 없습니다.</div>';
-  $('#libPickList').html(str);
-  updatePickCount();
-}
-
-function openLibPicker(idx) {
-  jobs = collectJobs();
-  pickIdx = idx;
-  pickSel = {};
-  ((jobs[idx] && jobs[idx].sections) || []).forEach(function (s) { pickSel[String(s)] = true; });
-  $('#libPickSearch').val('');
-  renderPickList();
-  $('#libPickModal').show();
-}
-
-function closeLibPicker() {
-  $('#libPickModal').hide();
-  pickIdx = -1;
-}
-
-function renderJobs() {
-  var str = '';
-  for (var i = 0; i < jobs.length; i++) {
-    var j = jobs[i];
-    str += '<div class="job-row" data-idx="' + i + '" style="border:1px solid #ddd; border-radius:6px; padding:10px 14px; margin-bottom:10px; background:#fff">';
-    str += '<div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center">';
-    str += '<input type="text" class="form-control input-sm j-name" placeholder="작업 이름" value="' + esc(j.name) + '" style="width:180px">';
-    str += '<input type="text" class="form-control input-sm j-cron" placeholder="cron 예: 0 4 * * *" value="' + esc(j.cron) + '" style="width:150px">';
-    var kind = j.kind == 'vfs' ? 'vfs' : 'scan';
-    str += '<select class="form-control input-sm j-kind" style="width:160px">';
-    str += '<option value="scan"' + (kind == 'scan' ? ' selected' : '') + '>스캔</option>';
-    str += '<option value="vfs"' + (kind == 'vfs' ? ' selected' : '') + '>VFS 새로고침만</option>';
-    str += '</select>';
-    str += '<label style="font-weight:normal"><input type="checkbox" class="j-vfs" name="tmp_j_vfs"' + (j.use_vfs ? ' checked' : '') + (kind == 'vfs' ? ' disabled' : '') + '> VFS 새로고침 먼저 하기</label>';
-    str += '<label style="font-weight:normal"><input type="checkbox" class="j-use" name="tmp_j_use"' + (j.use ? ' checked' : '') + '> 사용</label>';
-    str += '<span style="margin-left:auto">';
-    str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '">지금 실행</button> ';
-    str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '">삭제</button>';
-    str += '</span></div>';
-    str += '<div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; align-items:center">';
-    if (!LIBS.length) {
-      str += '<span style="color:#c0392b">라이브러리 목록을 가져오지 못했습니다. 기본 설정의 shyni 연결을 확인해 주세요.</span>';
-    } else {
-      str += '<button type="button" class="btn btn-sm btn-default job-libs" data-idx="' + i + '">라이브러리 선택</button>';
-      str += sectionChips(j.sections);
-    }
-    str += '</div></div>';
-  }
-  if (!jobs.length) str = '<div style="color:#888; padding:8px 2px">아직 작업이 없습니다. 아래 작업 추가 버튼으로 만들어 보세요.</div>';
-  $('#jobs_div').html(str);
-}
-
-function collectJobs() {
-  var out = [];
-  $('.job-row').each(function () {
-    var row = $(this);
-    var idx = parseInt(row.attr('data-idx'), 10);
-    var secs = (jobs[idx] && jobs[idx].sections) ? jobs[idx].sections.map(String) : [];
-    out.push({
-      name: row.find('.j-name').val().trim(),
-      cron: row.find('.j-cron').val().trim(),
-      kind: row.find('.j-kind').val(),
-      use_vfs: row.find('.j-vfs').is(':checked'),
-      use: row.find('.j-use').is(':checked'),
-      sections: secs
-    });
-  });
-  return out;
-}
-
-function stageLabel(stage) {
-  if (stage == 'vfs') return 'VFS 새로고침 중';
-  if (stage == 'scan') return '스캔 중';
-  return stage || '';
-}
-
-function renderCurrent(cur) {
-  if (!cur) {
-    $('#periodic_current_div').html('<span style="color:#888">현재 진행 중인 주기적 스캔이 없습니다.</span>');
-    return;
-  }
-  var str = '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
-  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>';
-  str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
-  str += '<button type="button" class="btn btn-sm btn-danger" id="periodicCancelBtn">취소</button>';
-  str += '</div>';
-  $('#periodic_current_div').html(str);
-}
-
-function loadCurrent() {
-  $.ajax({
-    type: 'POST', url: API_BASE + 'current', data: {},
-    success: function (ret) { if (ret.ret == 'success') renderCurrent(ret.data); }
-  });
-}
-
-function statusText(s) {
-  if (s == 'done') return '<span style="color:#2f855a">완료</span>';
-  if (s == 'failed') return '<span style="color:#c0392b">실패</span>';
-  if (s == 'cancelled') return '<span style="color:#b7791f">취소</span>';
-  if (s == 'running') return '<span style="color:#2b6cb0">실행 중</span>';
-  if (s == 'terminated') return '<span style="color:#888">중단됨(재시작)</span>';
-  return s;
-}
-
-var histPage = 1;
-function renderHistory(data) {
-  if (!data || !data.count) {
-    $('#periodic_history_div').html('아직 실행 이력이 없습니다.');
-    return;
-  }
-  histPage = data.page;
-  var rows = data.list || [];
-  var str = '<table class="table table-sm" style="font-size:13px"><tbody>';
-  for (var i = 0; i < rows.length; i++) {
-    var h = rows[i];
-    str += '<tr><td style="width:110px">' + h.start_time + '</td>';
-    str += '<td style="width:130px">' + esc(h.job_name) + '</td>';
-    str += '<td>' + esc(h.section_title) + '</td>';
-    str += '<td style="width:80px">' + statusText(h.status) + '</td>';
-    str += '<td style="width:90px">' + (h.duration != null ? h.duration + '초' : '') + '</td>';
-    str += '<td style="color:#888">' + esc(h.message) + '</td></tr>';
-  }
-  str += '</tbody></table>';
-  str += '<div style="display:flex; justify-content:space-between; align-items:center">';
-  str += '<span style="color:#888">전체 ' + data.count + '개</span>';
-  str += '<span><button type="button" class="btn btn-xs btn-default" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
-  str += data.page + ' / ' + data.pages + ' 페이지 ';
-  str += '<button type="button" class="btn btn-xs btn-default" id="histNextBtn"' + (data.page >= data.pages ? ' disabled' : '') + '>다음</button></span></div>';
-  $('#periodic_history_div').html(str);
-  $('#histPrevBtn').click(function () { loadHistory(histPage - 1); });
-  $('#histNextBtn').click(function () { loadHistory(histPage + 1); });
-}
-
-function loadHistory(page) {
-  if (page == null) page = histPage;
-  $.ajax({
-    type: 'POST', url: API_BASE + 'history', data: {page: page},
-    success: function (ret) { if (ret.ret == 'success') renderHistory(ret.data); }
-  });
-}
-
 $(document).ready(function () {
-  if (!Array.isArray(jobs)) jobs = [];
-  renderJobs();
-  loadCurrent();
-  loadHistory();
-  setInterval(function () { loadCurrent(); loadHistory(); }, 15000);
-
-  $('#jobAddBtn').off('click').on('click', function () {
-    jobs = collectJobs();
-    jobs.push({name: '', cron: '0 4 * * *', kind: 'scan', use_vfs: true, use: true, sections: []});
-    renderJobs();
-  });
-
-  $(document).off('change', '.j-kind').on('change', '.j-kind', function () {
-    $(this).closest('.job-row').find('.j-vfs').prop('disabled', $(this).val() == 'vfs');
-  });
-
-  $(document).off('click', '.job-del').on('click', '.job-del', function () {
-    jobs = collectJobs();
-    jobs.splice(parseInt($(this).data('idx'), 10), 1);
-    renderJobs();
-  });
-
-  $(document).off('click', '.job-run').on('click', '.job-run', function () {
-    globalSendCommand('task_execute', $(this).data('idx'));
-    setTimeout(function () { loadCurrent(); loadHistory(); }, 2500);
-  });
-
-  $('#jobsSaveBtn').off('click').on('click', function () {
-    globalSendCommand('save_jobs', JSON.stringify(collectJobs()));
-  });
-
-  $(document).off('click', '#periodicCancelBtn').on('click', '#periodicCancelBtn', function () {
-    globalSendCommand('cancel_current', null);
-    setTimeout(loadCurrent, 2000);
-  });
-
-  $(document).off('click', '.job-libs').on('click', '.job-libs', function () {
-    openLibPicker(parseInt($(this).data('idx'), 10));
-  });
-
-  $('#libPickSearch').off('input').on('input', renderPickList);
-
-  $(document).off('change', '.pick-sec').on('change', '.pick-sec', function () {
-    if ($(this).is(':checked')) pickSel[String($(this).val())] = true;
-    else delete pickSel[String($(this).val())];
-    updatePickCount();
-  });
-
-  $('#libPickAll').off('click').on('click', function () {
-    $('#libPickList .pick-sec').each(function () { pickSel[String($(this).val())] = true; });
-    renderPickList();
-  });
-
-  $('#libPickNone').off('click').on('click', function () {
-    $('#libPickList .pick-sec').each(function () { delete pickSel[String($(this).val())]; });
-    renderPickList();
-  });
-
-  $('#libPickOk').off('click').on('click', function () {
-    if (pickIdx < 0 || !jobs[pickIdx]) return;
-    var secs = [];
-    for (var k = 0; k < LIBS.length; k++) if (pickSel[String(LIBS[k].key)]) secs.push(String(LIBS[k].key));
-    jobs[pickIdx].sections = secs;
-    closeLibPicker();
-    renderJobs();
-  });
-
-  $('#libPickCancel').off('click').on('click', closeLibPicker);
-
-  $('#libPickModal').off('click').on('click', function (e) {
-    if (e.target === this) closeLibPicker();
-  });
+  // 숫자 칸 검증 — 저장 전에 확인하고, 어긋나면 알려 주고 저장을 막는다.
+  // (최상위 function 선언이 아니라 ready 안에서 할당해야 ff_global1.js의
+  // 기본값에 덮이지 않는다.)
+  window.globalSettingSaveBefore = function () {
+    var ok = true;
+    $('#setting input[type=number]').each(function () {
+      var input = $(this);
+      var v = (input.val() || '').trim();
+      if (v === '') return;
+      var label = input.closest('.row, .form-group').find('label').first().text().trim()
+        || input.attr('name') || '숫자 입력 칸';
+      if (!/^-?\d+$/.test(v)) {
+        notifyMsg(label + '에는 숫자만 입력해 주세요.');
+        ok = false;
+        return false;
+      }
+      var n = parseInt(v, 10);
+      var min = input.attr('min');
+      var max = input.attr('max');
+      if ((min !== undefined && min !== '' && n < parseInt(min, 10)) ||
+          (max !== undefined && max !== '' && n > parseInt(max, 10))) {
+        notifyMsg(label + ' 값이 범위를 벗어났습니다.');
+        ok = false;
+        return false;
+      }
+    });
+    return ok;
+  };
+  function notifyMsg(msg) {
+    if (window.$ && $.notify) $.notify(msg, 'warning');
+    else alert(msg);
+  }
 });
 </script>
 {% endblock %}

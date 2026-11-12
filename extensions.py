@@ -15,6 +15,7 @@ from threading import Thread
 
 import flask
 import requests
+from sqlalchemy.orm import object_session
 
 from support import SupportSubprocess
 from support import AlchemyEncoder
@@ -22,6 +23,11 @@ from plugin.create_plugin import PluginBase
 from plugin.logic_module_base import PluginModuleBase, PluginPageBase
 
 from .setup import F, P
+
+
+# rclone rc async job 대기 기한 (초). 대시보드·휴지통의 스캔 대기 기한(6시간)과
+# 맞춘다. 이 시간을 넘기면 실패로 빠져나와 호출자가 빈 결과를 받는다.
+RC_ASYNC_JOB_TIMEOUT_SEC = 6 * 3600
 
 
 
@@ -101,6 +107,7 @@ def rc_command(function: Callable) -> Callable:
                 job_status = job__status(server, int(job_id))
                 P.logger.debug(f"RC job status: {job_status}")
                 counter = 1
+                deadline = time.time() + RC_ASYNC_JOB_TIMEOUT_SEC
                 while not job_status['finished']:
                     # --rc-job-expire-duration=60s --rc-job-expire-interval=10s
                     # 작업 상태 확인: 10~60초
@@ -108,6 +115,10 @@ def rc_command(function: Callable) -> Callable:
                     job_status = job__status(server, int(job_id))
                     counter = counter + 1
                     P.logger.debug(f'Waiting for the RC job: {job_id}')
+                    if time.time() > deadline:
+                        raise Exception(f'RC async job 대기 시간 초과 '
+                                        f'({RC_ASYNC_JOB_TIMEOUT_SEC // 3600}시간): '
+                                        f'jobid={job_id}')
                 P.logger.debug(f"RC job status: {job_status}")
                 if job_status.get('error'):
                     P.logger.error(job_status)
@@ -133,7 +144,6 @@ def rc_command(function: Callable) -> Callable:
 
 @rc_command
 def job__status(server: dict, job_id: int) -> dict:
-    json_str = '{"jobid":%s}' % job_id
     return {
         'server': server,
         'args': [f"jobid={job_id}"],
@@ -431,9 +441,6 @@ class Base:
             th = ThreadHasReturn(target=func, args=args, kwargs=kwargs, daemon=True, callback=self.socketio_emit)
             th.start()
 
-    def callback_sio(self, data: dict) -> None:
-        self.socketio_callback('result', {'status': data.get('status'), 'data': data.get('result')})
-
     def process_command(self, command: str, arg1: str, arg2: str, arg3: str, request: flask.Request) -> flask.Response:
         '''override'''
         try:
@@ -571,7 +578,14 @@ def save_with_retry(item, attempts=6):
 
     프레임워크 기본 save()는 예외를 로그만 남기고 삼켜서, 등록이 몰리는 순간
     잠금에 걸린 항목이 조용히 사라진 일이 있었다 (2026-11-10 FP 등록 5건 유실).
-    성공하면 item, 끝내 실패하면 기존처럼 오류 로그를 남기고 None을 돌려준다."""
+    성공하면 item, 끝내 실패하면 기존처럼 오류 로그를 남기고 None을 돌려준다.
+
+    다른 앱 컨텍스트의 세션에 붙은 항목은 add()가 충돌하므로 merge()로
+    상태를 현재 세션에 합친다 — Flask-SQLAlchemy 3.x는 세션을 앱 컨텍스트
+    단위로 나눈다. z34(2026-11-12) 이후 poll_running이 finalize를 그 자리에서
+    부르면서 이 경우가 생겼다 ("already attached to session" 오류).
+    새로 만드는 항목(세션 없음)은 기존대로 add()를 써야 id가 채워진다 —
+    merge()는 원본에 id를 채우지 않아 뒤의 저장이 중복 행을 만든다."""
     # 실패한 commit 뒤에는 인스턴스 속성이 만료돼 있어 item.id를 그냥 읽으면
     # DetachedInstanceError가 난다 — dict에서 직접 읽어 그 함정을 피한다.
     item_id = item.__dict__.get('id')
@@ -582,7 +596,11 @@ def save_with_retry(item, attempts=6):
         try:
             with F.app.app_context():
                 try:
-                    F.db.session.add(item)
+                    attached = object_session(item)
+                    if attached is not None and attached is not F.db.session:
+                        F.db.session.merge(item)
+                    else:
+                        F.db.session.add(item)
                     F.db.session.commit()
                     return item
                 except Exception:

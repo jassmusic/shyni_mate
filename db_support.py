@@ -229,7 +229,7 @@ def library_stats(trash_map=None, progress_cb=None):
             missing_any = main_row.get('missing_any', 0)
             no_thumb = main_row.get('no_thumb', 0)
             # 폴더 에이전트(적용 에이전트 이름에 folder가 들어간) 라이브러리는
-            # 코드가 없는 것이 특성이라 건강도를 표지 여부로만 판단한다
+            # 메타가 없는 것이 특성이라 건강도를 표지 여부로만 판단한다
             # (judge_missing가 판정 기준).
             is_folder = 'folder' in (lib_variants.get(lib_id) or '').lower()
             judge_missing = no_thumb if is_folder else missing_any
@@ -247,7 +247,7 @@ def library_stats(trash_map=None, progress_cb=None):
                 'file_count': file_count,
                 'trash': trash_counts.get(lib_id, 0),
                 'judge_missing': judge_missing,
-                # 현황 '메타 없음' 표시용 — 폴더 에이전트는 표지 기준, 아니면 코드 기준
+                # 현황 '메타 없음' 표시용 — 폴더 에이전트는 표지 기준, 아니면 메타 기준
                 'no_meta': judge_missing if is_folder else no_code,
                 'ok_pct': round((main - judge_missing) * 100.0 / main, 1) if main else 100.0,
                 'albums': main if lib_type == 'music' else 0,
@@ -756,3 +756,138 @@ def trash_group_files(library_id, root_id, limit=500):
                     'reason': p['reason']})
     out.sort(key=lambda x: x['path'])
     return {'files': out[:limit], 'total': len(out)}
+
+
+# ---- 스캔 결과: 추가 파일 목록 ----
+# 주기적 스캔·휴지통 작업이 스캔 완료 후에 이력에 남길 추가 파일 목록을
+# Relay 경유로 조회한다. Relay가 꺼져 있으면 조회하지 않고 개수까지만 둔다.
+# 1차: 완료된 job의 stats.analyze.metadata_item_ids → media_parts 조인으로
+# 경로를 구한다 (이 job이 분석한 항목만 정확히 가져온다).
+# 2차: 1차가 비어 있고 신규가 있으면, 스캔 시작 전에 기록해 둔
+# MAX(media_parts.id)보다 큰 id의 행을 읽는다 (plex mate와 같은 방식).
+
+APPEND_MAX_FILES = 1000
+
+
+def parts_max_id():
+    """media_parts.id의 현재 최댓값 — 스캔 시작 전 2차 방법용 기준점."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT MAX(id) FROM media_parts')
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        conn.close()
+
+
+def paths_by_metadata_item_ids(item_ids, library_id=None):
+    """분석된 항목 id 목록에 속한 파일 경로를 media_parts에서 읽는다."""
+    ids = [int(i) for i in (item_ids or []) if i is not None]
+    if not ids:
+        return []
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        out = []
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            sql = ('SELECT file_path FROM media_parts '
+                   f"WHERE metadata_item_id IN ({','.join(['%s'] * len(part))}) "
+                   'AND deleted_at IS NULL ')
+            args = list(part)
+            if library_id is not None:
+                sql += 'AND library_id = %s '
+                args.append(int(library_id))
+            sql += 'ORDER BY file_path'
+            cur.execute(sql, args)
+            out.extend(r[0] for r in cur.fetchall() if r and r[0])
+        return out
+    finally:
+        conn.close()
+
+
+def count_parts_newer_than(max_id, library_id):
+    """기준 id보다 나중에 생긴 파일 수 (2차 방법용 전체 수)."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT count(*) FROM media_parts '
+                    'WHERE library_id = %s AND id > %s AND deleted_at IS NULL',
+                    (int(library_id), int(max_id)))
+        return int(cur.fetchone()[0] or 0)
+    finally:
+        conn.close()
+
+
+def paths_newer_than(max_id, library_id, limit=APPEND_MAX_FILES):
+    """기준 id보다 나중에 생긴 파일 경로 (2차 방법용, 저장 상한까지만)."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT file_path FROM media_parts '
+                    'WHERE library_id = %s AND id > %s AND deleted_at IS NULL '
+                    'ORDER BY id LIMIT %s',
+                    (int(library_id), int(max_id), int(limit)))
+        return [r[0] for r in cur.fetchall() if r and r[0]]
+    finally:
+        conn.close()
+
+
+def limit_append_files(paths, limit=APPEND_MAX_FILES):
+    """추가 파일 목록 저장 상한 — 순수 함수(하니스 검증용)."""
+    return list(paths or [])[:max(0, int(limit))]
+
+
+def collect_append_paths(library_id, metadata_item_ids, max_id_before, stat_new,
+                         limit=APPEND_MAX_FILES):
+    """추가 파일 목록을 수집한다. (파일 경로 목록, 전체 수)를 돌려준다.
+
+    파일 목록이 없으면 (None, None) — Relay가 꺼져 있거나 수집할 방법이
+    없을 때다. 신규가 없으면 ([], 0)이다.
+    """
+    if not db_ready():
+        return None, None
+    try:
+        stat_new = int(stat_new) if stat_new is not None else 0
+    except Exception:
+        stat_new = 0
+    if stat_new <= 0:
+        return [], 0
+    # 1차: 이 job이 분석한 항목 id로 경로를 바로 구한다
+    ids = [i for i in (metadata_item_ids or []) if i is not None]
+    if ids:
+        paths = paths_by_metadata_item_ids(ids, library_id=library_id)
+        if paths:
+            return limit_append_files(paths, limit), len(paths)
+    # 2차: 1차가 비어 있으면 스캔 시작 전 기준 id보다 큰 행을 읽는다
+    if max_id_before is None:
+        return None, None
+    count = count_parts_newer_than(max_id_before, library_id)
+    if count <= 0:
+        return [], 0
+    return (limit_append_files(paths_newer_than(max_id_before, library_id, limit),
+                               limit),
+            count)
+
+
+def group_append_paths(paths):
+    """추가 파일 경로를 앨범(폴더) 단위로 묶는다 — 순수 함수(하니스 검증용).
+
+    반환: [{'folder': 폴더 전체 경로, 'name': 폴더 이름,
+            'count': 파일 수, 'files': [파일 이름...]}] (폴더 이름순)
+    """
+    import os
+    groups = {}
+    for p in paths or []:
+        if not p:
+            continue
+        folder = p.rsplit('/', 1)[0] if '/' in p else ''
+        groups.setdefault(folder, []).append(os.path.basename(p) or p)
+    out = []
+    for folder in sorted(groups):
+        files = sorted(groups[folder])
+        out.append({'folder': folder,
+                    'name': os.path.basename(folder) or folder,
+                    'count': len(files), 'files': files})
+    return out

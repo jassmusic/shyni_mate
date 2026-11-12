@@ -27,12 +27,9 @@ class ModuleBase(PluginModuleBase):
             f'{self.name}_db_user' : 'shyni_ro',
             f'{self.name}_db_password' : '',
             f'{self.name}_db_ok_hash' : '',
-            # 고급 설정 — 시간 제한 (초). 응답이 늦으면 그 주기는 건너뛰고 다음 주기에 다시 시도한다
-            f'{self.name}_timeout_query' : '15',
-            f'{self.name}_timeout_send' : '30',
-            f'{self.name}_timeout_poll' : '15',
-            f'{self.name}_timeout_callback' : '10',
-            f'{self.name}_timeout_vfs_rc' : '600',
+            # 시간 제한(base_timeout_*) 기본값은 스캔 모듈(mod_scan.py)의
+            # db_default에 한 곳으로 모았다 — 두 곳에 두면 한쪽만 바뀌는
+            # 함정이 된다.
             # 현황·건강도 — 휴지통 개수 자동 갱신 주기 (시간). 0이면 통계 때마다 읽는다
             f'{self.name}_trash_counts_refresh_hours' : '12',
         }

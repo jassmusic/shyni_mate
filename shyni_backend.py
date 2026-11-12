@@ -251,7 +251,7 @@ class ShyniBackend:
             body = {
                 'path': shyni_path,
                 'mode': scan_mode,
-                'wait': max(P.ModelSetting.get_int('scan_max_wait_time'), 1) * 60,
+                'wait': max(P.ModelSetting.get_int('scan_max_wait_time') or 5, 1) * 60,
             }
             if scan_mode == 'add':
                 body.update(ShyniBackend.gather_probe_payload(db_item, shyni_path))
@@ -261,7 +261,7 @@ class ShyniBackend:
                 if getattr(db_item, 'reset_done', None):
                     try:
                         # 이 조회는 실제로 수십 초 걸릴 수 있어 제한 시간을 설정으로 받는다
-                        probe_timeout = max(P.ModelSetting.get_int('scan_probe_timeout_sec'), 10)
+                        probe_timeout = max(P.ModelSetting.get_int('scan_probe_timeout_sec') or 60, 10)
                         probe = requests.get(
                             f'{url}/compat/metadata_by_path',
                             params=ShyniBackend._by_path_params(
@@ -397,7 +397,7 @@ class ShyniBackend:
             if not url or not token:
                 return
             headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
-            timeout = max(P.ModelSetting.get_int('scan_probe_timeout_sec'), 10)
+            timeout = max(P.ModelSetting.get_int('scan_probe_timeout_sec') or 60, 10)
             path = ShyniBackend._refresh_path(db_item.target)
             section = ShyniBackend._section_of(db_item)
             res = requests.get(f'{url}/compat/metadata_by_path',
@@ -486,7 +486,7 @@ class ShyniBackend:
                 logger.warning(f'[Shyni] 메타 새로고침(수동): 연결 설정이 없어 중단: item={item_id}')
                 return
             headers = {'X-Plex-Token': token, 'Accept': 'application/json'}
-            timeout = max(P.ModelSetting.get_int('scan_probe_timeout_sec'), 10)
+            timeout = max(P.ModelSetting.get_int('scan_probe_timeout_sec') or 60, 10)
             res = requests.get(f'{url}/compat/metadata_by_path',
                                params=ShyniBackend._by_path_params(
                                    ShyniBackend._refresh_path(db_item.target),
@@ -535,7 +535,7 @@ class ShyniBackend:
                            params=ShyniBackend._by_path_params(
                                shyni_path, ShyniBackend._section_of(db_item)),
                            headers=headers,
-                           timeout=max(P.ModelSetting.get_int('scan_probe_timeout_sec'), 10))
+                           timeout=max(P.ModelSetting.get_int('scan_probe_timeout_sec') or 60, 10))
         if res.status_code == 404:
             return False
         res.raise_for_status()
@@ -572,7 +572,7 @@ class ShyniBackend:
             return
         section_id = section['section_id']
         ShyniBackend._record_section(db_item, url, headers, section)
-        wait = max(P.ModelSetting.get_int('scan_max_wait_time'), 1) * 60
+        wait = max(P.ModelSetting.get_int('scan_max_wait_time') or 5, 1) * 60
         attempt = ShyniBackend._next_attempt(db_item)
         body = {'path': shyni_path, 'mode': 'add', 'wait': wait}
         body.update(ShyniBackend.gather_probe_payload(db_item, shyni_path))
@@ -682,8 +682,8 @@ class ShyniBackend:
             if item.process_finish_time is None:
                 item.process_finish_time = datetime.now()
                 if item.process_start_time is not None:
-                    item.process_duration = str(
-                        item.process_finish_time - item.process_start_time).split('.')[0]
+                    item.process_duration = int(
+                        (item.process_finish_time - item.process_start_time).total_seconds())
             return
         # 다른 ADD 스캔과 겹쳐 already_running으로 끝난 경우에도 다음 주기에 재조회한다.
         # 대기 중 scan을 반복 발사하거나 섹션 전체를 refresh하지 않는다.
@@ -714,6 +714,10 @@ class ShyniBackend:
         설정이 0이면 이 기능을 끈다. 실패로 바꾸면 True를 돌려준다."""
         if fail_min is None:
             fail_min = P.ModelSetting.get_int('scan_analyze_fail_min')
+            # 0은 '기능 끔'이라 의미가 있어 or 기본값이 아니라
+            # None일 때만 기본값(60분)으로 채운다
+            if fail_min is None:
+                fail_min = 60
         if fail_min <= 0:
             return False
         if item.shyni_status != 'RUNNING':
@@ -736,8 +740,8 @@ class ShyniBackend:
         if item.process_finish_time is None:
             item.process_finish_time = now
             if item.process_start_time is not None:
-                item.process_duration = str(
-                    item.process_finish_time - item.process_start_time).split('.')[0]
+                item.process_duration = int(
+                    (item.process_finish_time - item.process_start_time).total_seconds())
         logger.warning(f'[Shyni] analyze 후 대기 시간({fail_min}분) 초과로 실패 처리: '
                        f'item={item.id} job={item.shyni_job_id} '
                        f'경과={str(now - started).split(".")[0]}')
@@ -886,12 +890,20 @@ class ShyniBackend:
         try:
             if not ShyniBackend.enabled():
                 return
+            from sqlalchemy import func, or_
             from .model_scan import ModelScanItem
             with F.app.app_context():
+                # 처리 대상(앨범 정보가 없고 아직 확인하지 않은 항목)만
+                # 최대 50개까지 조회한다 — 완료 항목 전체를 매 주기 전부
+                # 읽으면 테이블이 커질수록 낭비가 커진다. JSON 필터는
+                # SQLite·MySQL 모두 json_extract로 동작한다.
                 pairs = (F.db.session.query(ModelScanItem.id, ModelScanItem.meta_info)
                          .filter(ModelScanItem.status == 'FINISH_SHYNI',
-                                 ModelScanItem.mode == 'ADD')
-                         .order_by(ModelScanItem.id.asc()).all())
+                                 ModelScanItem.mode == 'ADD',
+                                 or_(func.json_extract(ModelScanItem.meta_info, '$[0].album_title').is_(None),
+                                     func.json_extract(ModelScanItem.meta_info, '$[0].album_title') == ''),
+                                 func.json_extract(ModelScanItem.meta_info, '$[0].meta_checked').is_(None))
+                         .order_by(ModelScanItem.id.asc()).limit(50).all())
                 target_ids = []
                 for iid, minfo in pairs:
                     first = {}
