@@ -2,6 +2,7 @@
 <style>
 #text_div ol, #text_div ul { padding-left: 0; margin-left: 0; list-style-position: inside; }
 #text_div ol ol, #text_div ol ul, #text_div ul ol, #text_div ul ul { padding-left: 1.5em; }
+#text_div li > p { display: inline; }
 </style>
 
 # SHYNI MATE
@@ -18,7 +19,7 @@ shyni 전용 스캔 매니저.
 
 ## 기능
 
-- 모드: ADD, REMOVE_FILE, REMOVE_FOLDER, REFRESH
+- 모드: ADD, `REMOVE_FILE`, `REMOVE_FOLDER`, REFRESH
 - 스캔 전송 전 rclone VFS 새로고침 (사용 여부 선택 가능, 규칙 기반 경로 변환)
 - shyni job 폴링으로 완료/실패 확정, 완료 시 콜백 통지
 - 탐색 페이지에서 우클릭으로 새로고침·스캔 실행
