@@ -157,7 +157,11 @@ function renderDetail(d) {
     if (d.stat_missing != null && d.stat_missing > 0) bits.push('누락 ' + d.stat_missing);
     if (d.stat_registered != null && d.stat_registered > 0) bits.push('등록 ' + d.stat_registered);
     if (d.stat_failed != null && d.stat_failed > 0) bits.push('실패 ' + d.stat_failed);
-    str += '<div><strong>집계</strong> — ' + (bits.length ? bits.join(' · ') : '변화가 없습니다.') + '</div>';
+    var aggTxt = bits.length ? bits.join(' · ') : '변화가 없습니다.';
+    if (d.stat_missing != null && d.stat_missing > 0 && d.section_key) {
+      aggTxt += ' · <a href="#" class="trash-goto" data-key="' + d.section_key + '">휴지통 보러가기</a>';
+    }
+    str += '<div><strong>집계</strong> — ' + aggTxt + '</div>';
   } else {
     str += '<div style="color:#888">집계가 없습니다. (이 실행은 결과 저장이 되기 전에 기록됐습니다.)</div>';
   }
@@ -289,6 +293,16 @@ $(document).ready(function () {
     var gidx = $(this).data('gidx');
     var id = $(this).data('id');
     $('.append-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
+  });
+
+  // 누락이 있으면 휴지통으로 — 대시보드 '휴지통 상세'와 같은 이동 방식이다.
+  // ?key=로 라이브러리를 넘기면 휴지통 페이지가 그 라이브러리를 미리 골라 둔다.
+  $(document).off('click', '.trash-goto').on('click', '.trash-goto', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var key = $(this).data('key');
+    if (key === null || key === undefined || key === '') return;
+    location.href = '/' + location.pathname.split('/')[1] + '/scan/trash?key=' + key;
   });
 
   $('#histRefreshBtn').off('click').on('click', function () {

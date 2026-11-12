@@ -5,6 +5,7 @@ import requests
 import xmltodict
 
 from .setup import *
+from .version_info import RUNNING_VERSION, read_disk_version
 
 logger = P.logger
 
@@ -49,6 +50,10 @@ class ModuleBase(PluginModuleBase):
 
     def process_menu(self, sub, req):
         arg = P.ModelSetting.to_dict()
+        if sub == 'setting':
+            # 현재 버전(실행 중)과 디스크 버전 — 다르면 새 버전이 배포된 상태다.
+            arg['plugin_version'] = RUNNING_VERSION or '-'
+            arg['plugin_disk_version'] = read_disk_version() or ''
         if sub == 'advanced':
             try:
                 from .db_support import db_ready

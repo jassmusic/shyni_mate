@@ -1,8 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
+<div style="display:flex; flex-wrap:wrap; align-items:center">
 {{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장']])}}
+<span style="font-size:13px; color:#888">현재 버전 <strong style="color:#333">{{ arg.get('plugin_version', '-') }}</strong></span>
+</div>
 {{ macros.m_row_start('5') }}
 {{ macros.m_row_end() }}
+
+{% if arg.get('plugin_disk_version') and arg.get('plugin_disk_version') != arg.get('plugin_version') %}
+<div style="border:1px solid #90cdf4; background:#ebf8ff; color:#2b6cb0; border-radius:6px; padding:8px 12px; font-size:13px; margin-bottom:12px">새 버전 <strong>{{ arg.get('plugin_disk_version') }}</strong>가 있습니다. 재시작하세요.</div>
+{% endif %}
 
 <nav>
   {{ macros.m_tab_head_start() }}
