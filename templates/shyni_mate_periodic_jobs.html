@@ -14,7 +14,15 @@
       <strong style="font-size:15px">라이브러리 선택</strong>
       <span id="libPickCount" style="color:#888; font-size:12.5px"></span>
     </div>
-    <input type="text" id="libPickSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="margin:10px 0 8px">
+    <div style="display:flex; gap:6px; margin:10px 0 8px">
+      <input type="text" id="libPickSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="flex:1; min-width:0">
+      <select id="libPickSort" class="form-control input-sm" style="width:100px; flex:none">
+        <option value="default_asc">기본↑</option>
+        <option value="default_desc">기본↓</option>
+        <option value="name_asc">이름↑</option>
+        <option value="name_desc">이름↓</option>
+      </select>
+    </div>
     <div style="margin-bottom:8px">
       <button type="button" class="btn btn-xs btn-default" id="libPickAll">보이는 항목 전체 선택</button>
       <button type="button" class="btn btn-xs btn-default" id="libPickNone">보이는 항목 전체 해제</button>
@@ -129,6 +137,17 @@ function loadSections() {
 
 var pickIdx = -1;
 var pickSel = {};
+var PICK_SORT = "{{ arg['lib_pick_sort'] }}";
+if (['default_asc', 'default_desc', 'name_asc', 'name_desc'].indexOf(PICK_SORT) < 0) PICK_SORT = 'default_asc';
+
+// 라이브러리 선택 목록 정렬 — 기본은 shyni가 주는 순서, 이름은 가나다순이다.
+function sortedLibs() {
+  var arr = LIBS.slice();
+  if (PICK_SORT == 'name_asc') arr.sort(function (a, b) { return String(a.title).localeCompare(String(b.title), 'ko'); });
+  else if (PICK_SORT == 'name_desc') arr.sort(function (a, b) { return String(b.title).localeCompare(String(a.title), 'ko'); });
+  else if (PICK_SORT == 'default_desc') arr.reverse();
+  return arr;
+}
 
 function updatePickCount() {
   var cnt = Object.keys(pickSel).length;
@@ -139,8 +158,9 @@ function renderPickList() {
   var q = ($('#libPickSearch').val() || '').trim().toLowerCase();
   var str = '';
   var shown = 0;
-  for (var k = 0; k < LIBS.length; k++) {
-    var lib = LIBS[k];
+  var libs = sortedLibs();
+  for (var k = 0; k < libs.length; k++) {
+    var lib = libs[k];
     if (q && String(lib.title).toLowerCase().indexOf(q) < 0) continue;
     shown++;
     var checked = pickSel[String(lib.key)] ? ' checked' : '';
@@ -271,6 +291,13 @@ $(document).ready(function () {
 
   $('#libPickSearch').off('input').on('input', renderPickList);
 
+  $('#libPickSort').val(PICK_SORT);
+  $('#libPickSort').off('change').on('change', function () {
+    PICK_SORT = $(this).val();
+    renderPickList();
+    $.ajax({type: 'POST', url: API_BASE + 'pick_sort', data: {sort: PICK_SORT}, global: false});
+  });
+
   $(document).off('change', '.pick-sec').on('change', '.pick-sec', function () {
     if ($(this).is(':checked')) pickSel[String($(this).val())] = true;
     else delete pickSel[String($(this).val())];
@@ -292,6 +319,11 @@ $(document).ready(function () {
     var secs = [];
     for (var k = 0; k < LIBS.length; k++) if (pickSel[String(LIBS[k].key)]) secs.push(String(LIBS[k].key));
     jobs[pickIdx].sections = secs;
+    // 작업 이름이 비어 있으면 선택한 라이브러리 이름을 넣어준다.
+    // 여러 개를 골라도 대표로 하나만 넣는다. 직접 쓴 이름은 건드리지 않는다.
+    if (!(jobs[pickIdx].name || '').trim() && secs.length) {
+      jobs[pickIdx].name = libTitle(secs[0]);
+    }
     closeLibPicker();
     renderJobs();
   });

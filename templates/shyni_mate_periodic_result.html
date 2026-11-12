@@ -1,16 +1,28 @@
 {% extends "base.html" %}
 {% block content %}
 
+<style>
+/* 결과 목록 표 — Plex Mate식 간결 표 + 폰 고정 폭 */
+.hist-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+.hist-table th, .hist-table td { padding:5px 4px; border-top:1px solid #dee2e6; vertical-align:top; }
+.hist-table thead th { background:#343a40; color:#fff; border:none; font-size:11px; font-weight:bold; }
+.hist-table .c-time { text-align:center; }
+.hist-table .c-name { text-align:left; word-break:keep-all; overflow-wrap:break-word; }
+.hist-table .c-status { text-align:center; }
+.hist-table .c-num { text-align:right; }
+.hist-table .c-num .missing { display:block; font-size:11px; color:#dc3545; }
+</style>
+
 <div id="periodic_current_div" style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">
   진행 상태를 불러오는 중입니다.
 </div>
 
 <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:10px 0">
-  <select id="histLibSel" class="form-control input-sm" style="width:170px">
+  <select id="histLibSel" class="form-control input-sm" style="flex:1 1 130px">
     <option value="">전체 라이브러리</option>
   </select>
   <label style="font-weight:normal; margin:0"><input type="checkbox" id="histOnlyAppend" name="tmp_hist_only_append"> 추가된 항목만</label>
-  <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·파일 경로 검색" style="width:230px">
+  <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·파일 경로 검색" style="flex:1 1 160px">
   <button type="button" class="btn btn-sm btn-default" id="histSearchBtn">검색</button>
   <button type="button" class="btn btn-sm btn-default" id="histResetBtn">초기화</button>
   <span style="margin-left:auto">
@@ -36,12 +48,20 @@ function statText(v) {
   return String(v);
 }
 
+// 목록 시각은 분까지만 — 초까지 있으면 열이 넓어져 작업명·라이브러리가 쪼그라든다.
+// 서버는 %m-%d %H:%M:%S (14자)로 주므로 앞 11자가 MM-DD HH:MM이다.
+function fmtTimeShort(t) {
+  if (t == null) return '';
+  return String(t).substring(0, 11);
+}
+
 function fmtDur(sec) {
   if (sec == null) return '-';
   sec = parseInt(sec, 10);
   if (isNaN(sec) || sec < 0) return '-';
   if (sec < 60) return sec + '초';
-  return Math.floor(sec / 60) + '분 ' + (sec % 60) + '초';
+  // 분·초 단위 사이에서만 꺾이게 — '2분 37초'가 '2분'/'37초'로 나뉜다.
+  return '<span style="white-space:nowrap">' + Math.floor(sec / 60) + '분</span> <span style="white-space:nowrap">' + (sec % 60) + '초</span>';
 }
 
 function stageLabel(stage) {
@@ -79,13 +99,6 @@ function statusText(s) {
   return s;
 }
 
-function statCell(h) {
-  var str = '';
-  str += '신규 ' + statText(h.stat_new) + ' · 전체 ' + statText(h.stat_total);
-  if (h.stat_missing != null && h.stat_missing > 0) str += ' · 누락 ' + h.stat_missing;
-  return str;
-}
-
 var histPage = 1;
 var expandedIds = {};
 var detailCache = {};
@@ -97,26 +110,27 @@ function renderHistory(data) {
   }
   histPage = data.page;
   var rows = data.list || [];
-  var str = '<table class="table table-sm" style="font-size:13px"><thead><tr><th>시작</th><th>종료</th><th>작업명</th><th>라이브러리</th><th>상태</th><th>소요</th><th>결과</th></tr></thead><tbody>';
+  var str = '<table class="hist-table"><colgroup><col style="width:11%"><col style="width:11%"><col style="width:14%"><col style="width:18%"><col style="width:10%"><col style="width:10%"><col style="width:12%"><col style="width:14%"></colgroup><thead><tr><th class="c-time">시작</th><th class="c-time">종료</th><th class="c-name">작업명</th><th class="c-name">라이브러리</th><th class="c-status">상태</th><th class="c-num">소요</th><th class="c-num">신규</th><th class="c-num">전체</th></tr></thead><tbody>';
   for (var i = 0; i < rows.length; i++) {
     var h = rows[i];
     var expanded = !!expandedIds[h.id];
     str += '<tr class="hist-row" data-id="' + h.id + '" style="cursor:pointer' + (expanded ? '; background:#f7fafc' : '') + '">';
-    str += '<td style="white-space:nowrap">' + h.start_time + '</td>';
-    str += '<td style="white-space:nowrap">' + (h.finish_time || '') + '</td>';
-    str += '<td>' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#888; font-size:11px">(수동)</span>' : '') + '</td>';
-    str += '<td>' + esc(h.section_title) + '</td>';
-    str += '<td style="white-space:nowrap">' + statusText(h.status) + '</td>';
-    str += '<td style="white-space:nowrap">' + fmtDur(h.duration) + '</td>';
-    str += '<td style="white-space:nowrap">' + statCell(h) + '</td></tr>';
+    str += '<td class="c-time">' + fmtTimeShort(h.start_time) + '</td>';
+    str += '<td class="c-time">' + fmtTimeShort(h.finish_time) + '</td>';
+    str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#888; font-size:11px">(수동)</span>' : '') + '</td>';
+    str += '<td class="c-name">' + esc(h.section_title) + '</td>';
+    str += '<td class="c-status">' + statusText(h.status) + '</td>';
+    str += '<td class="c-num">' + fmtDur(h.duration) + '</td>';
+    str += '<td class="c-num">' + statText(h.stat_new) + '</td>';
+    str += '<td class="c-num">' + statText(h.stat_total) + (h.stat_missing != null && h.stat_missing > 0 ? '<span class="missing">누락 ' + h.stat_missing + '</span>' : '') + '</td></tr>';
     if (expanded) {
-      str += '<tr class="hist-detail-row" data-id="' + h.id + '"><td colspan="7" style="background:#f7fafc"><div class="hist-detail" data-id="' + h.id + '">';
+      str += '<tr class="hist-detail-row" data-id="' + h.id + '"><td colspan="8" style="background:#f7fafc"><div class="hist-detail" data-id="' + h.id + '">';
       str += detailCache[h.id] ? renderDetail(detailCache[h.id]) : '불러오는 중입니다.';
       str += '</div></td></tr>';
     }
   }
   str += '</tbody></table>';
-  str += '<div style="display:flex; justify-content:space-between; align-items:center">';
+  str += '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px">';
   str += '<span style="color:#888">전체 ' + data.count + '개</span>';
   str += '<span><button type="button" class="btn btn-xs btn-default" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
   str += data.page + ' / ' + data.pages + ' 페이지 ';
@@ -139,6 +153,23 @@ function folderStatLine(f) {
 
 function renderDetail(d) {
   var str = '<div style="font-size:13px; line-height:1.8">';
+  // 상세 첫 줄 — 목록에서 줄인 초 단위 시각·전체 작업명을 보완한다.
+  // 끝난 시각은 같은 날이면 시:분:초만, 자정을 넘겼으면 날짜까지 보여준다.
+  var headName = d.job_name ? esc(d.job_name) + (d.mode == 'manual' ? ' (수동)' : '') : '';
+  var headTime = '';
+  if (d.start_time) {
+    headTime = esc(d.start_time);
+    if (d.finish_time) {
+      headTime += ' → ' + esc(d.finish_time.substring(0, 5) === d.start_time.substring(0, 5) ? d.finish_time.substring(6) : d.finish_time);
+    } else {
+      headTime += ' 시작';
+    }
+  }
+  var head = '';
+  if (headName) head += '<strong>' + headName + '</strong>';
+  if (d.section_title) head += (head ? ' — ' : '') + esc(d.section_title);
+  if (headTime) head += (head ? ' · ' : '') + '<span style="color:#888">' + headTime + '</span>';
+  if (head) str += '<div style="font-size:13px; margin-bottom:2px">' + head + '</div>';
   // 단계별 소요
   var steps = [];
   if (d.vfs_duration != null) steps.push('VFS 새로고침 ' + fmtDur(d.vfs_duration));
@@ -162,6 +193,8 @@ function renderDetail(d) {
       aggTxt += ' · <a href="#" class="trash-goto" data-key="' + d.section_key + '">휴지통 보러가기</a>';
     }
     str += '<div><strong>집계</strong> — ' + aggTxt + '</div>';
+  } else if (d.status == 'running') {
+    str += '<div style="color:#888">스캔이 끝나면 집계가 표시됩니다.</div>';
   } else {
     str += '<div style="color:#888">집계가 없습니다. (이 실행은 결과 저장이 되기 전에 기록됐습니다.)</div>';
   }
@@ -175,10 +208,13 @@ function renderDetail(d) {
   }
   // 추가 파일 목록 — 앨범(폴더) 단위 묶음
   str += '<div style="margin-top:6px"><strong>추가된 파일</strong> ';
-  if (d.append_total == null) {
+  // Relay가 꺼져 있으면 목록이 저장되지 않으니 실행 중에도 Relay 문구를 보여준다.
+  if (d.status == 'running' && d.db_ready !== false) {
+    str += '<span style="color:#888">스캔이 끝나면 목록이 표시됩니다.</span>';
+  } else if (d.append_total == null) {
     str += '<span style="color:#888">파일 목록을 볼 수 없습니다. Relay가 꺼져 있으면 목록은 저장되지 않습니다.</span>';
   } else if (!d.append_total) {
-    str += '<span style="color:#888">추가된 파일이 없습니다.</span>';
+    str += '<span style="color:#888">없습니다.</span>';
   } else {
     str += '<span style="color:#888">전체 ' + d.append_count + '개' + (d.append_truncated ? ' (외 ' + (d.append_count - d.append_total) + '개 더 있음)' : '') + '</span>';
     var groups = d.append_groups || [];
@@ -200,7 +236,8 @@ function renderDetail(d) {
 }
 
 function loadDetail(id) {
-  if (detailCache[id]) return;
+  // 실행 중이던 상세는 끝나면 다시 읽어와야 최종 결과가 보인다.
+  if (detailCache[id] && detailCache[id].status != 'running') return;
   $.ajax({
     type: 'POST', url: API_BASE + 'history_detail', data: {id: id}, global: false,
     success: function (ret) {
@@ -217,6 +254,18 @@ function loadDetail(id) {
   });
 }
 
+// 펼쳐 둔 행이 끝났는데 상세 캐시가 실행 중 상태면 다시 읽어온다 —
+// 끝나고도 '끝나면 표시됩니다'가 남아 있으면 헷갈리기 때문이다.
+function refreshStaleDetails(rows) {
+  for (var i = 0; i < rows.length; i++) {
+    var h = rows[i];
+    if (expandedIds[h.id] && h.status != 'running' &&
+        detailCache[h.id] && detailCache[h.id].status == 'running') {
+      loadDetail(h.id);
+    }
+  }
+}
+
 function loadHistory(page, cb) {
   if (page == null) page = histPage;
   $.ajax({
@@ -228,7 +277,10 @@ function loadHistory(page, cb) {
       search: $('#histSearch').val() || ''
     },
     success: function (ret) {
-      if (ret.ret == 'success') renderHistory(ret.data);
+      if (ret.ret == 'success') {
+        renderHistory(ret.data);
+        refreshStaleDetails(ret.data.list || []);
+      }
       if (cb) cb();
     }
   });

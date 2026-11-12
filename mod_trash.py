@@ -9,6 +9,10 @@ from .task_trash import (ACTION_LABEL, TaskTrash, get_trash_current,
 name = 'trash'
 logger = P.logger
 
+# 라이브러리 선택 목록 정렬 — 주기적 스캔·휴지통 작업이 같은 설정을 쓴다.
+PICK_SORTS = ('default_asc', 'default_desc', 'name_asc', 'name_desc')
+PICK_SORT_KEY = 'jobs_lib_pick_sort'
+
 
 class ModuleTrash(PluginModuleBase):
     """휴지통 주기 작업 — 라이브러리와 동작(새로고침/스캔/비우기 조합)을 골라
@@ -134,6 +138,8 @@ class ModuleTrash(PluginModuleBase):
             # 불러온다 — shyni 응답을 기다리느라 페이지가 늦게 뜨지 않게.
             if sub == 'jobs':
                 arg['trash_jobs_json'] = P.ModelSetting.get('trash_jobs') or '[]'
+                sort = P.ModelSetting.get(PICK_SORT_KEY) or 'default_asc'
+                arg['lib_pick_sort'] = sort if sort in PICK_SORTS else 'default_asc'
             return render_template(f'{P.package_name}_{self.name}_{sub}.html', arg=arg)
         except Exception as e:
             logger.error(f'Exception:{str(e)}')
@@ -235,6 +241,12 @@ class ModuleTrash(PluginModuleBase):
             return jsonify({'ret': 'success', 'data': sections})
         if sub == 'current':
             return jsonify({'ret': 'success', 'data': get_trash_current()})
+        if sub == 'pick_sort':
+            sort = (req.form.get('sort') or '').strip()
+            if sort not in PICK_SORTS:
+                return jsonify({'ret': 'fail', 'msg': '정렬 조건이 올바르지 않습니다.'})
+            P.ModelSetting.set(PICK_SORT_KEY, sort)
+            return jsonify({'ret': 'success'})
         if sub == 'history':
             try:
                 page = int(req.form.get('page') or 1)

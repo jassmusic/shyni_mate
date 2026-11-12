@@ -387,6 +387,15 @@ class ModuleStatus(PluginModuleBase):
             for k in ('total', 'new', 'missing', 'registered'):
                 v = stats.get(k)
                 rec[k] = int(v) if isinstance(v, (int, float)) else None
+            # 도서 스캔 stats는 total/missing 키가 없고
+            # entries/missing_files 키를 쓴다. 신규 키는 없어서
+            # 도서 신규는 '-'로 남는다.
+            if rec['total'] is None:
+                v = stats.get('entries')
+                rec['total'] = int(v) if isinstance(v, (int, float)) else None
+            if rec['missing'] is None:
+                v = stats.get('missing_files')
+                rec['missing'] = int(v) if isinstance(v, (int, float)) else None
             rec['time_text'] = cls._to_kst(ts)
             out[str(sec)] = rec
         return out

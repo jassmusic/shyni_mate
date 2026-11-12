@@ -194,4 +194,12 @@ class ModelTrashItem(ModelBase):
             out['append_truncated'] = bool(
                 r.append_count is not None and files is not None
                 and len(files) < r.append_count)
+            # 실행 중 목록 문구용 — 목록 저장 게이트(db_ready)와 같은
+            # 판정을 함께 내려준다. 읽기 실패 시에는 '끝나면 표시됩니다'
+            # 쪽을 기본으로 한다(실행 중 상세는 펼칠 때마다 다시 읽는다).
+            try:
+                from . import db_support
+                out['db_ready'] = bool(db_support.db_ready())
+            except Exception:
+                out['db_ready'] = True
             return out

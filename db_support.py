@@ -844,16 +844,22 @@ def collect_append_paths(library_id, metadata_item_ids, max_id_before, stat_new,
     """추가 파일 목록을 수집한다. (파일 경로 목록, 전체 수)를 돌려준다.
 
     파일 목록이 없으면 (None, None) — Relay가 꺼져 있거나 수집할 방법이
-    없을 때다. 신규가 없으면 ([], 0)이다.
+    없을 때다. 신규가 없으면 ([], 0)이다. stat_new이 None이면 신규 수를
+    모른다는 뜻(도서 스캔은 shyni stats에 신규 키가 없음)이라 1·2차
+    방법으로 직접 세어 본다.
     """
     if not db_ready():
         return None, None
-    try:
-        stat_new = int(stat_new) if stat_new is not None else 0
-    except Exception:
-        stat_new = 0
-    if stat_new <= 0:
-        return [], 0
+    # stat_new이 None이면 '모름' — 도서 스캔은 shyni stats에 신규 키가
+    # 없어서 1·2차 방법으로 직접 세어 본다. 명시적 0 이하일 때만
+    # 조기 반환한다.
+    if stat_new is not None:
+        try:
+            stat_new = int(stat_new)
+        except Exception:
+            stat_new = 0
+        if stat_new <= 0:
+            return [], 0
     # 1차: 이 job이 분석한 항목 id로 경로를 바로 구한다
     ids = [i for i in (metadata_item_ids or []) if i is not None]
     if ids:

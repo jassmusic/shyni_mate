@@ -58,6 +58,20 @@ def _stat_int(v):
     return int(v) if isinstance(v, (int, float)) else None
 
 
+def _stat_first(stats, *keys):
+    """여러 stats 키 중 첫 번째로 값이 있는 것을 int로 돌려준다.
+
+    도서 스캐너(book_scanner.scan_book_section)는 total/missing 대신
+    entries/missing_files 키를 쓰므로, 음악 키가 없으면 도서 키로
+    대체한다. 0도 유효값이라 `is not None`으로 분기한다.
+    순수 함수(하니스 검증용)."""
+    for k in keys:
+        v = _stat_int(stats.get(k))
+        if v is not None:
+            return v
+    return None
+
+
 def _extract_job_id(res):
     """스캔·비우기 전송 응답에서 shyni job id를 구한다 — 응답 헤더
     X-Job-Id가 없으면 본문의 job_id/jobId/jobID를 본다."""
@@ -127,9 +141,12 @@ def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
     item.scan_duration = scan_duration
     if not isinstance(stats, dict):
         return
-    item.stat_total = _stat_int(stats.get('total'))
+    # 도서 스캔 stats는 total/missing 키가 없고 entries/missing_files
+    # 키를 쓴다. 신규에 대응하는 키는 stats에 없어서 None으로 둔다
+    # (아래에서 추가 파일 비교 수로 채운다).
+    item.stat_total = _stat_first(stats, 'total', 'entries')
     item.stat_new = _stat_int(stats.get('new'))
-    item.stat_missing = _stat_int(stats.get('missing'))
+    item.stat_missing = _stat_first(stats, 'missing', 'missing_files')
     item.stat_updated = _stat_int(stats.get('updated'))
     item.stat_restored = _stat_int(stats.get('restored'))
     item.stat_registered = _stat_int(stats.get('registered'))
@@ -151,6 +168,11 @@ def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
             if files is not None:
                 item.append_files = json.dumps(files, ensure_ascii=False)
                 item.append_count = count
+                # 도서 스캔은 shyni stats에 신규 키가 없어 stat_new이
+                # 비어 있다. 추가 파일 비교로 측정한 수가 있으면 그걸로
+                # 채운다 — shyni 집계가 아니라 플러그인 측정치다.
+                if item.stat_new is None:
+                    item.stat_new = count
     except Exception as e:
         logger.warning(f'[{label}] 추가 파일 목록 수집 실패: {e}')
 
@@ -160,7 +182,7 @@ def scan_summary_text(stats):
     if not isinstance(stats, dict):
         return None
     new = _stat_int(stats.get('new'))
-    total = _stat_int(stats.get('total'))
+    total = _stat_first(stats, 'total', 'entries')
     if new is None and total is None:
         return None
     parts = []
