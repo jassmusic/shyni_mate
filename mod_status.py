@@ -725,13 +725,13 @@ class ModuleStatus(PluginModuleBase):
                 except Exception as e:
                     logger.warning(f'[Status] 대시보드 목록 캐시 저장 실패: {e}')
             rows = base['data']
-            # 진행 중으로 표시된 작업이 있으면, 캐시로 답하는 경우에도 상태만큼은
-            # 그 자리에서 다시 확인한다 (끝난 작업이 다음 주기까지 '진행 중'으로 남지 않게)
-            for sec in rows:
-                st = sec.get('state') or {}
-                vfs_st = (st.get('vfs') or {}).get('status')
-                scan_st = (st.get('scan') or {}).get('status')
-                if vfs_st == 'running' or scan_st in ('running', 'requested'):
+            if from_cache:
+                # 캐시로 답하는 경우에도 상태만큼은 그 자리에서 다시 확인한다 —
+                # 캐시를 만든 뒤에 시작한 작업도 바로 보이고, 끝난 작업이
+                # '진행 중'으로 남지도 않는다. (이전에는 캐시에 이미 진행 중으로
+                # 표시된 경우에만 다시 확인해, 새로 시작한 작업이 다음 주기까지
+                # 화면에 안 나왔다 — 2026-11-12 국내 모음 새로고침 후 스캔에서 확인됨)
+                for sec in rows:
                     try:
                         sec['state'] = self._refresh_state(sec['key'], self._get_state(sec['key']))
                     except Exception:

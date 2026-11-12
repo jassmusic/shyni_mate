@@ -11,6 +11,9 @@
 - webhook_library_buffer : 신규 항목 버퍼
   {'libs': {라이브러리명: {'groups': {...}, 'thumb_b64'}},
    'last_at': 마지막 수신 시각, 'dropped': 상한으로 버린 건수}
+- webhook_player_names   : 기기 ID별 마지막 기기명
+  {uuid: {'name': 기기명, 'ts': 마지막으로 본 시각}} — Player.title이
+  기본값 'Shyni'로 올 때 채워넣는 데 쓴다 (최대 50개, 오래된 것부터 버림)
 
 원자성 설계 (W6):
 - 웹 프로세스(쌓기)와 Celery 워커(비우기)는 별도 프로세스라 `_lock`
@@ -60,6 +63,11 @@ EVENT_STYLE = {
     'media.stop': ('🟥 ⏹️', '중지했습니다.', 15158332),
 }
 LIBRARY_NEW_COLOR = 10181046
+PLAYER_NAMES_KEY = 'webhook_player_names'
+# shyni가 Player.title에 넣는 기본값 (plex_webhook_payload.py: session에
+# 기기명이 없으면 "Shyni"). 이 값으로 오면 기억해 둔 기기명으로 채운다.
+PLAYER_NAME_DEFAULT = 'Shyni'
+MAX_PLAYER_NAMES = 50
 
 _lock = threading.Lock()
 
@@ -280,6 +288,54 @@ def _episode_code(meta):
         return ''
 
 
+# ---------- 재생 기기명 기억 ----------
+def _remember_player_name(uuid, name):
+    """기기 ID별로 마지막으로 본 기기명을 기억해 둔다.
+
+    shyni가 보내는 Player.title은 세션마다 다르고, HTTP 보고 경로에서는
+    기기명이 비어 기본값 'Shyni'로 온다. 실제 기기명이 온 경우에만
+    기억해 두고, 기본값으로 올 때 채워넣는 데 쓴다. 이름이 바뀌면
+    새 이름으로 덮어쓴다.
+    """
+    if not uuid or not name or name == PLAYER_NAME_DEFAULT:
+        return
+    with _lock:
+        names = _read_json(PLAYER_NAMES_KEY, {})
+        if not isinstance(names, dict):
+            names = {}
+        prev = names.get(uuid)
+        if isinstance(prev, dict) and prev.get('name') == name:
+            return
+        names[uuid] = {'name': name, 'ts': time.time()}
+        if len(names) > MAX_PLAYER_NAMES:
+            # 오래 본 것부터 지워 상한을 지킨다
+            ordered = sorted(names.items(),
+                             key=lambda kv: (kv[1] or {}).get('ts') or 0)
+            for old_uuid, _ in ordered[:len(names) - MAX_PLAYER_NAMES]:
+                names.pop(old_uuid, None)
+        _write_json(PLAYER_NAMES_KEY, names)
+
+
+def _resolve_player_name(payload):
+    """재생 기기명을 정한다. 기본값 'Shyni'로 오면 기억해 둔 이름을 채운다."""
+    player = payload.get('Player')
+    if not isinstance(player, dict):
+        player = {}
+    title = player.get('title') or ''
+    uuid = player.get('uuid') or ''
+    if title and title != PLAYER_NAME_DEFAULT:
+        if uuid:
+            _remember_player_name(uuid, title)
+        return title
+    if uuid:
+        names = _read_json(PLAYER_NAMES_KEY, {})
+        if isinstance(names, dict):
+            remembered = names.get(uuid)
+            if isinstance(remembered, dict) and remembered.get('name'):
+                return remembered['name']
+    return title
+
+
 def build_play_embed(payload):
     meta = payload.get('Metadata') or {}
     event = payload.get('event') or ''
@@ -319,7 +375,7 @@ def build_play_embed(payload):
         # 정보가 없으면 직접 재생으로 표시한다.
         method = '직접 재생 (Direct Play)'
     fields.append({'name': '재생 방식', 'value': method, 'inline': False})
-    player = (payload.get('Player') or {}).get('title')
+    player = _resolve_player_name(payload)
     if player:
         fields.append({'name': '재생 기기',
                        'value': str(player)[:1024], 'inline': False})
