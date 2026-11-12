@@ -1,7 +1,7 @@
 <!-- FF 매뉴얼 화면에서 제목·본문·목록의 왼쪽 열을 맞추기 위한 스타일입니다. GitHub 렌더링에는 영향을 주지 않습니다. -->
 <style>
-#text_div ol, #text_div ul { padding-left: 0; margin-left: 0; list-style-position: inside; }
-#text_div ol ol, #text_div ol ul, #text_div ul ol, #text_div ul ul { padding-left: 1.5em; }
+#text_div ol, #text_div ul { padding-left: 1.4em; margin-left: 0; list-style-position: outside; }
+#text_div ol ol, #text_div ol ul, #text_div ul ol, #text_div ul ul { padding-left: 1.4em; }
 #text_div li > p { display: inline; }
 </style>
 
