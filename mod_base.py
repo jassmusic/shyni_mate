@@ -5,7 +5,8 @@ import requests
 import xmltodict
 
 from .setup import *
-from .version_info import RUNNING_VERSION, read_disk_version
+from .version_info import (RUNNING_VERSION, get_github_version,
+                           is_newer, refresh_github_version_async)
 
 logger = P.logger
 
@@ -46,14 +47,23 @@ class ModuleBase(PluginModuleBase):
                 logger.error(f'Exception:{str(e)}')
                 logger.error(traceback.format_exc())
         threading.Thread(target=_prep, daemon=True).start()
+        # GitHub 최신 버전 캐시를 미리 채워 둔다 (실패해도 무시한다)
+        try:
+            refresh_github_version_async()
+        except Exception:
+            pass
 
 
     def process_menu(self, sub, req):
         arg = P.ModelSetting.to_dict()
         if sub == 'setting':
-            # 현재 버전(실행 중)과 디스크 버전 — 다르면 새 버전이 배포된 상태다.
+            # 현재 버전(실행 중)은 기동 시 한 번 읽은 값이다.
+            # 새 버전은 GitHub에서만 확인한다 (디스크는 매번 읽지 않는다).
             arg['plugin_version'] = RUNNING_VERSION or '-'
-            arg['plugin_disk_version'] = read_disk_version() or ''
+            github = get_github_version()
+            arg['plugin_github_version'] = github or ''
+            arg['plugin_github_newer'] = bool(
+                github and is_newer(github, RUNNING_VERSION))
         if sub == 'advanced':
             try:
                 from .db_support import db_ready

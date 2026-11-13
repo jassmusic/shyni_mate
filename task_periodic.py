@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 
 import requests
@@ -231,6 +232,16 @@ def _cancel_requested():
     return (P.ModelSetting.get(CANCEL_KEY) or '') == '1'
 
 
+def _clear_resume_current(item_id):
+    """복구용 진행 상태면 지운다 — 새 실행의 진행 상태를 건드리지 않는다."""
+    try:
+        cur = get_current()
+        if isinstance(cur, dict) and str(cur.get('resume_item_id')) == str(item_id):
+            _set_current(None)
+    except Exception:
+        pass
+
+
 def request_cancel():
     P.ModelSetting.set(CANCEL_KEY, '1')
 
@@ -405,6 +416,10 @@ class TaskPeriodic:
                     item.vfs_duration = vfs_duration
                     item.finish('done', 'VFS 새로고침이 완료됐습니다.')
                     return False
+                # VFS 소요를 미리 저장해 둔다 — 스캔 중 재시작돼도
+                # 복구한 이력의 상세에 VFS 소요가 남는다.
+                item.vfs_duration = vfs_duration
+                item.save()
                 cur['stage'] = 'scan'
                 _set_current(cur)
             # 스캔 시작 전 MAX(media_parts.id)를 기록해 둔다 —
@@ -416,6 +431,11 @@ class TaskPeriodic:
                     pre_max_id = db_support.parts_max_id()
             except Exception as e:
                 logger.warning(f'[주기적 스캔] 추가 파일 기준점 기록 실패: {e}')
+            if pre_max_id is not None:
+                # 추가 파일 2차 방법(전후 비교)용 기준점 — 재시작 후
+                # 복구해도 쓸 수 있게 진행 상태에 함께 남긴다.
+                cur['pre_max_id'] = pre_max_id
+                _set_current(cur)
             scan_started = _now_text()
             _write_status(key, 'scan', {
                 'job': None, 'path': sec.get('path', ''),
@@ -426,6 +446,10 @@ class TaskPeriodic:
             def _on_scan_job(scan_jobid):
                 cur['scan_job'] = scan_jobid
                 _set_current(cur)
+                # shyni 작업 번호를 이력 행에도 남긴다 — 재시작 후
+                # 복구가 이 번호로 스캔 완료를 이어서 확인할 수 있다.
+                item.shyni_job_id = scan_jobid
+                item.save()
                 _write_status(key, 'scan', {
                     'job': scan_jobid, 'path': sec.get('path', ''),
                     'started_at': scan_started, 'finished_at': None,
@@ -582,6 +606,15 @@ class TaskPeriodic:
             except Exception:
                 pass
         logger.info(f"주기적 스캔: {sec.get('title')} 스캔 전송 (job {job_id})")
+        return TaskPeriodic._poll_scan_job(url, token, job_id, t0)
+
+    @staticmethod
+    def _poll_scan_job(url, token, job_id, t0):
+        """compat job 완료까지 폴링한다. _do_scan과 재시작 복구가 함께 쓴다.
+        {'status': done|failed|cancelled, 'message', 'job_id', 'stats',
+         'duration': 초}를 돌려준다. 6시간 기한이 있고, 폴링 중 일시적
+        오류는 재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7).
+        job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3)."""
         deadline = time.time() + WAIT_TIMEOUT_SEC
         fail_count = 0
         while time.time() < deadline:
@@ -615,7 +648,7 @@ class TaskPeriodic:
                         'job_id': job_id, 'stats': None,
                         'duration': int(time.time() - t0)}
             if outcome == 'done':
-                logger.info(f"주기적 스캔: {sec.get('title')} 스캔 완료 (job {job_id})")
+                logger.info(f"주기적 스캔 완료 (job {job_id})")
                 return {'status': 'done', 'message': msg,
                         'job_id': job_id,
                         'stats': (job or {}).get('stats') or {},
@@ -639,3 +672,185 @@ class TaskPeriodic:
                 'message': '스캔이 기한 안에 끝나지 않았습니다.',
                 'job_id': job_id, 'stats': None,
                 'duration': int(time.time() - t0)}
+
+    @F.celery.task
+    def resume(item_id):
+        """재시작 복구 — 스캔 중이던 이력의 완료 확인을 이어서 한다."""
+        with F.app.app_context():
+            try:
+                TaskPeriodic._resume(item_id)
+            except Exception as e:
+                logger.error(f'주기적 스캔 복구 실패: {e}')
+                logger.error(traceback.format_exc())
+                try:
+                    item = (F.db.session.query(ModelPeriodicItem)
+                            .filter(ModelPeriodicItem.id == int(item_id)).first())
+                    if item is not None and item.status == 'running':
+                        item.finish('failed', f'복구 중 오류가 발생했습니다: {e}')
+                except Exception:
+                    pass
+                _clear_resume_current(item_id)
+
+    @staticmethod
+    def _resume(item_id):
+        item = (F.db.session.query(ModelPeriodicItem)
+                .filter(ModelPeriodicItem.id == int(item_id)).first())
+        if item is None or item.status != 'running':
+            logger.info(f'주기적 스캔 복구: 이력 {item_id}이 이미 정리돼 있어 건너뜁니다.')
+            _clear_resume_current(item_id)
+            return
+        job_id = item.shyni_job_id
+        key = item.section_key
+        if not job_id:
+            item.finish('failed', '스캔 작업 번호가 없어 복구할 수 없습니다.')
+            _clear_resume_current(item_id)
+            return
+        cur = get_current() or {}
+        pre_max_id = cur.get('pre_max_id')
+        url, token = ShyniBackend.get_config()
+        if not url or not token:
+            item.finish('failed', 'shyni 주소와 토큰을 먼저 설정해 주세요.')
+            _clear_resume_current(item_id)
+            return
+        logger.info(f'주기적 스캔 복구: {item.section_title} '
+                    f'스캔(job {job_id}) 완료 확인을 이어서 합니다.')
+        res = TaskPeriodic._poll_scan_job(url, token, job_id, time.time())
+        stats = res.get('stats')
+        # 스캔 소요는 섹션 시작부터 끝까지에서 VFS 소요를 뺀 값으로 본다
+        # (재시작으로 멈췄던 시간도 벽시계 기준으로는 스캔 단계에 든 시간이다).
+        scan_duration = res.get('duration')
+        try:
+            if item.start_time:
+                total = int((datetime.now() - item.start_time).total_seconds())
+                scan_duration = max(0, total - (item.vfs_duration or 0))
+        except Exception:
+            pass
+        summary = scan_summary_text(stats)
+        # 대시보드 스캔 슬롯을 마무리한다 — 시작 시각은 원래 값을 유지한다.
+        try:
+            st = ModuleStatus._get_state(int(key))
+            prev = st.get('scan') or {}
+            started = prev.get('started_at')
+            if not started and item.start_time:
+                started = item.start_time.strftime('%Y-%m-%d %H:%M:%S')
+            scan_entry = {
+                'job': job_id, 'path': prev.get('path', ''),
+                'started_at': started, 'finished_at': _now_text(),
+                'status': {'done': 'done', 'failed': 'failed',
+                           'cancelled': 'cancelled'}.get(res['status'], 'failed'),
+                'source': 'periodic', 'job_name': item.job_name or ''}
+            if summary:
+                scan_entry['summary'] = summary
+            _write_status(key, 'scan', scan_entry)
+        except Exception as e:
+            logger.warning(f'[주기적 스캔 복구] 현황 상태 기록 실패: {e}')
+        if res['status'] == 'cancelled':
+            apply_scan_result(item, job_id, stats, item.vfs_duration,
+                              scan_duration, pre_max_id, key,
+                              label='주기적 스캔 복구')
+            item.finish('cancelled', res['message'])
+            _clear_resume_current(item_id)
+            return
+        if res['status'] == 'done':
+            apply_scan_result(item, job_id, stats, item.vfs_duration,
+                              scan_duration, pre_max_id, key,
+                              label='주기적 스캔 복구')
+            msg = res['message']
+            if summary:
+                msg = f'{msg} ({summary})'
+            item.finish('done', msg)
+            try:
+                from .task_trash_view import clear_cache
+                clear_cache(key)
+            except Exception as e:
+                logger.warning(f'[주기적 스캔 복구] 휴지통 상세 캐시 정리 실패: {e}')
+            try:
+                from .task_status import mark_trash_counts_stale
+                mark_trash_counts_stale()
+            except Exception as e:
+                logger.warning(f'[주기적 스캔 복구] 휴지통 개수 캐시 표시 실패: {e}')
+            try:
+                from .task_status import request_stats
+                request_stats()
+            except Exception as e:
+                logger.warning(f'[주기적 스캔 복구] 통계 재계산 요청 실패: {e}')
+            _clear_resume_current(item_id)
+            logger.info(f'주기적 스캔 복구 완료: {item.section_title}')
+            return
+        apply_scan_result(item, job_id, stats, item.vfs_duration,
+                          scan_duration, pre_max_id, key,
+                          label='주기적 스캔 복구')
+        item.finish('failed', res['message'])
+        _clear_resume_current(item_id)
+
+    @staticmethod
+    def resume_running(start_celery):
+        """플러그인 로드 시 스캔 중이던 이력을 찾아 완료 확인을 이어서 한다.
+
+        스캔 전송까지 끝난 이력(작업 번호가 이력 행에 있음)만 복구한다.
+        VFS 단계에서 멈춘 이력은 복구하지 않는다 — 다음 실행 때 VFS부터
+        다시 하면 된다. 복구를 시작했으면 True, 복구할 게 없으면 False."""
+        with F.app.app_context():
+            try:
+                rows = (F.db.session.query(ModelPeriodicItem)
+                        .filter(ModelPeriodicItem.status == 'running')
+                        .order_by(ModelPeriodicItem.id.desc()).all())
+            except Exception as e:
+                logger.error(f'[주기적 스캔 복구] 이력 조회 실패: {e}')
+                return False
+            target = None
+            for row in rows:
+                if row.shyni_job_id:
+                    target = row
+                    break
+            if target is None:
+                return False
+            # 세션이 닫히기 전에 필요한 값을 평범한 값으로 뽑아 둔다
+            item_id = target.id
+            job_id = target.shyni_job_id
+            job_name = target.job_name or ''
+            section_key = str(target.section_key)
+            section_title = target.section_title or ''
+            mode = target.mode or ''
+            section_started = (target.start_time.strftime('%Y-%m-%d %H:%M:%S')
+                               if target.start_time else '')
+        # 복구 대상이 아닌 running 이력은 중단됨으로 정리한다
+        try:
+            ModelPeriodicItem.set_terminated(exclude_id=item_id)
+        except Exception as e:
+            logger.error(f'[주기적 스캔 복구] 나머지 이력 정리 실패: {e}')
+        # 진행 중 표시를 복구 상태로 유지한다 — 새 실행을 막고
+        # 대시보드·작업 관리 화면이 진행 중임을 알 수 있게 한다.
+        try:
+            cur = get_current() or {}
+            cur.update({
+                'job_name': job_name,
+                'section_key': section_key,
+                'section_title': section_title,
+                'stage': 'scan',
+                'mode': mode,
+                'section_started_at': section_started,
+                'scan_job': job_id,
+                'resume_item_id': item_id,
+            })
+            _set_current(cur)
+        except Exception as e:
+            logger.error(f'[주기적 스캔 복구] 진행 상태 기록 실패: {e}')
+        logger.info(f'[주기적 스캔 복구] {section_title} '
+                    f'스캔(job {job_id}) 완료 확인을 이어서 합니다.')
+        def _launch():
+            try:
+                start_celery(TaskPeriodic.resume, None, *(item_id,))
+            except Exception as e:
+                logger.error(f'[주기적 스캔 복구] 복구 작업 시작 실패: {e}')
+                try:
+                    with F.app.app_context():
+                        item = (F.db.session.query(ModelPeriodicItem)
+                                .filter(ModelPeriodicItem.id == item_id).first())
+                        if item is not None and item.status == 'running':
+                            item.finish('failed', '복구 작업을 시작하지 못했습니다.')
+                    _clear_resume_current(item_id)
+                except Exception:
+                    pass
+        threading.Thread(target=_launch, daemon=True).start()
+        return True

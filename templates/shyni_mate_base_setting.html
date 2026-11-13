@@ -7,8 +7,8 @@
 {{ macros.m_row_start('5') }}
 {{ macros.m_row_end() }}
 
-{% if arg.get('plugin_disk_version') and arg.get('plugin_disk_version') != arg.get('plugin_version') %}
-<div style="border:1px solid #90cdf4; background:#ebf8ff; color:#2b6cb0; border-radius:6px; padding:8px 12px; font-size:13px; margin-bottom:12px">새 버전 <strong>{{ arg.get('plugin_disk_version') }}</strong>가 있습니다. 재시작하세요.</div>
+{% if arg.get('plugin_github_newer') %}
+<div style="border:1px solid #90cdf4; background:#ebf8ff; color:#2b6cb0; border-radius:6px; padding:8px 12px; font-size:13px; margin-bottom:12px">GitHub에 새 버전 <strong>{{ arg.get('plugin_github_version') }}</strong>가 있습니다. 재시작하면 업데이트됩니다.</div>
 {% endif %}
 
 <nav>

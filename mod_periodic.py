@@ -62,8 +62,16 @@ class ModulePeriodic(PluginModuleBase):
 
     def plugin_load(self):
         self.migration()
-        ModelPeriodicItem.set_terminated()
-        P.ModelSetting.set('periodic_current', '')
+        # 재시작 복구: 스캔 중이던 이력이 있으면 완료 확인을 이어서 하고,
+        # 복구할 게 없으면 running 이력을 중단됨으로 정리한다.
+        resumed = False
+        try:
+            resumed = TaskPeriodic.resume_running(self.start_celery)
+        except Exception as e:
+            logger.error(f'[Periodic] 재시작 복구 확인 실패: {e}')
+        if not resumed:
+            ModelPeriodicItem.set_terminated()
+            P.ModelSetting.set('periodic_current', '')
         P.ModelSetting.set('periodic_cancel', '')
         self.start()
 

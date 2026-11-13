@@ -3,14 +3,15 @@
 
 <style>
 /* 결과 목록 표 — Plex Mate식 간결 표 + 폰 고정 폭 */
-.hist-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+/* 본문 색상은 명시한다 — 상위 div가 #888이라 안 하면 회색으로 보인다 */
+.hist-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:14px; color:#212529; }
 .hist-table th, .hist-table td { padding:5px 4px; border-top:1px solid #dee2e6; vertical-align:top; }
-.hist-table thead th { background:#343a40; color:#fff; border:none; font-size:11px; font-weight:bold; }
+.hist-table thead th { background:none; color:#212529; border:none; border-top:2px solid #dee2e6; border-bottom:2px solid #dee2e6; font-size:12px; font-weight:bold; }
 .hist-table .c-time { text-align:center; }
 .hist-table .c-name { text-align:left; word-break:keep-all; overflow-wrap:break-word; }
 .hist-table .c-status { text-align:center; }
 .hist-table .c-num { text-align:right; }
-.hist-table .c-num .missing { display:block; font-size:11px; color:#dc3545; }
+.hist-table .c-num .missing { display:block; font-size:13px; color:#dc3545; }
 </style>
 
 <div id="periodic_current_div" style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">
@@ -117,7 +118,7 @@ function renderHistory(data) {
     str += '<tr class="hist-row" data-id="' + h.id + '" style="cursor:pointer' + (expanded ? '; background:#f7fafc' : '') + '">';
     str += '<td class="c-time">' + fmtTimeShort(h.start_time) + '</td>';
     str += '<td class="c-time">' + fmtTimeShort(h.finish_time) + '</td>';
-    str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#888; font-size:11px">(수동)</span>' : '') + '</td>';
+    str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + '</td>';
     str += '<td class="c-name">' + esc(h.section_title) + '</td>';
     str += '<td class="c-status">' + statusText(h.status) + '</td>';
     str += '<td class="c-num">' + fmtDur(h.duration) + '</td>';

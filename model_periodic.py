@@ -66,11 +66,15 @@ class ModelPeriodicItem(ModelBase):
         self.save()
 
     @classmethod
-    def set_terminated(cls):
-        """플러그인 재시작 시 running으로 남은 이력을 정리한다."""
+    def set_terminated(cls, exclude_id=None):
+        """플러그인 재시작 시 running으로 남은 이력을 정리한다.
+        exclude_id가 있으면 그 행은 남긴다 (복구 대상)."""
         with F.app.app_context():
             try:
-                rows = F.db.session.query(cls).filter(cls.status == 'running').all()
+                query = F.db.session.query(cls).filter(cls.status == 'running')
+                if exclude_id is not None:
+                    query = query.filter(cls.id != exclude_id)
+                rows = query.all()
                 for row in rows:
                     row.status = 'terminated'
                     row.finish_time = datetime.now()
