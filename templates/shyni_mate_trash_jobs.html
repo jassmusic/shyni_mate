@@ -72,10 +72,10 @@ function sectionChips(sections) {
   var str = '';
   var show = Math.min(secs.length, 8);
   for (var k = 0; k < show; k++) {
-    str += '<span style="background:#edf2f7; border:1px solid #e2e8f0; border-radius:10px; padding:1px 8px; font-size:12px">' + esc(libTitle(secs[k])) + '</span>';
+    str += '<span style="background:#edf2f7; border:1px solid #e2e8f0; border-radius:10px; padding:1px 8px; font-size:14px">' + esc(libTitle(secs[k])) + '</span>';
   }
-  if (secs.length > show) str += '<span style="font-size:12px; color:#4a5568">외 ' + (secs.length - show) + '개</span>';
-  str += '<span style="font-size:12px; color:#888">총 ' + secs.length + '개</span>';
+  if (secs.length > show) str += '<span style="font-size:14px; color:#4a5568">외 ' + (secs.length - show) + '개</span>';
+  str += '<span style="font-size:14px; color:#888">총 ' + secs.length + '개</span>';
   return str;
 }
 
@@ -199,31 +199,31 @@ function renderJobs() {
     var isRunning = (i === runningIdx());
     var dis = isRunning ? ' disabled' : '';
     str += '<div class="job-row" data-idx="' + i + '" style="border:' + (isRunning ? '2px solid #3182ce' : '1px solid #ddd') + '; border-radius:6px; padding:6px 10px; margin-bottom:6px; background:' + (isRunning ? '#ebf4ff' : '#fff') + '">';
-    if (isRunning) str += '<div style="font-size:12.5px; color:#2b6cb0; margin-bottom:4px">🔄 <strong>진행 중</strong> — ' + esc(runningCur.section_title) + ' ' + stageLabel(runningCur.stage) + ' · 수정하려면 먼저 취소해 주세요</div>';
+    if (isRunning) str += '<div style="font-size:14px; color:#2b6cb0; margin-bottom:4px">🔄 <strong>진행 중</strong> — ' + esc(runningCur.section_title) + ' ' + stageLabel(runningCur.stage) + ' · 수정하려면 먼저 취소해 주세요</div>';
     str += '<div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center">';
-    str += '<input type="text" class="form-control input-sm j-name" placeholder="작업 이름" value="' + esc(j.name) + '" style="width:150px; height:26px; padding:3px 8px; font-size:12px"' + dis + '>';
-    str += '<input type="text" class="form-control input-sm j-cron" placeholder="cron 예: 0 5 * * *" value="' + esc(j.cron) + '" style="width:120px; height:26px; padding:3px 8px; font-size:12px"' + dis + '>';
-    str += '<select class="form-control input-sm j-action" style="width:210px; height:26px; padding:3px 8px; font-size:12px"' + dis + '>';
+    str += '<input type="text" class="form-control input-sm j-name" placeholder="작업 이름" value="' + esc(j.name) + '" style="width:150px; height:26px; padding:3px 8px; font-size:14px"' + dis + '>';
+    str += '<input type="text" class="form-control input-sm j-cron" placeholder="cron 예: 0 5 * * *" value="' + esc(j.cron) + '" style="width:120px; height:26px; padding:3px 8px; font-size:14px"' + dis + '>';
+    str += '<select class="form-control input-sm j-action" style="width:210px; height:26px; padding:3px 8px; font-size:14px"' + dis + '>';
     for (var a = 0; a < ACTIONS.length; a++) {
       str += '<option value="' + ACTIONS[a][0] + '"' + (j.action == ACTIONS[a][0] ? ' selected' : '') + '>' + ACTIONS[a][1] + '</option>';
     }
     str += '</select>';
-    str += '<label style="font-weight:normal; font-size:12px; margin:0"><input type="checkbox" class="j-use" name="tmp_j_use"' + (j.use ? ' checked' : '') + dis + '> 사용</label>';
+    str += '<label style="font-weight:normal; font-size:14px; margin:0"><input type="checkbox" class="j-use" name="tmp_j_use"' + (j.use ? ' checked' : '') + dis + '> 사용</label>';
     str += '<span style="margin-left:auto">';
     if (isRunning) {
-      str += '<button type="button" class="btn btn-sm btn-danger job-cancel" data-idx="' + i + '" style="padding:3px 8px; font-size:12px">취소</button> ';
+      str += '<button type="button" class="btn btn-sm btn-danger job-cancel" data-idx="' + i + '" style="padding:3px 8px; font-size:14px">취소</button> ';
     } else {
-      str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '" style="padding:3px 8px; font-size:12px">지금 실행</button> ';
+      str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '" style="padding:3px 8px; font-size:14px">지금 실행</button> ';
     }
-    str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '" style="padding:3px 8px; font-size:12px"' + dis + '>삭제</button>';
+    str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '" style="padding:3px 8px; font-size:14px"' + dis + '>삭제</button>';
     str += '</span></div>';
     str += '<div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:5px; align-items:center">';
     if (LIBS_STATE == 'loading') {
-      str += '<span style="color:#888; font-size:12.5px">라이브러리 목록을 불러오는 중입니다.</span>';
+      str += '<span style="color:#888; font-size:14px">라이브러리 목록을 불러오는 중입니다.</span>';
     } else if (!LIBS.length) {
       str += '<span style="color:#c0392b">라이브러리 목록을 가져오지 못했습니다. 기본 설정의 shyni 연결을 확인해 주세요.</span>';
     } else {
-      str += '<button type="button" class="btn btn-sm btn-default job-libs" data-idx="' + i + '" style="padding:3px 8px; font-size:12px"' + dis + '>라이브러리 선택</button>';
+      str += '<button type="button" class="btn btn-sm btn-default job-libs" data-idx="' + i + '" style="padding:3px 8px; font-size:14px"' + dis + '>라이브러리 선택</button>';
       str += sectionChips(j.sections);
     }
     str += '</div></div>';
