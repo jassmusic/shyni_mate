@@ -65,6 +65,29 @@ function fmtDur(sec) {
   return '<span style="white-space:nowrap">' + Math.floor(sec / 60) + '분</span> <span style="white-space:nowrap">' + (sec % 60) + '초</span>';
 }
 
+// 대기 시간 표시 — 45초 · 12분 3초 · 6시간 5분
+function fmtWait(sec) {
+  if (sec == null) return '-';
+  sec = parseInt(sec, 10);
+  if (isNaN(sec) || sec < 0) sec = 0;
+  if (sec < 60) return sec + '초';
+  if (sec < 3600) {
+    var m = Math.floor(sec / 60);
+    var s = sec % 60;
+    return s ? m + '분 ' + s + '초' : m + '분';
+  }
+  var h = Math.floor(sec / 3600);
+  var mm = Math.floor((sec % 3600) / 60);
+  return mm ? h + '시간 ' + mm + '분' : h + '시간';
+}
+
+// 소요 칸 — 대기 중이면 대기 경과, 실행 중이면 기다린 시간, 끝나면 전체 소요
+function durCell(h) {
+  if (h.status == 'waiting') return '대기 ' + fmtDur(h.waiting_seconds);
+  if (h.status == 'running' && h.wait_seconds != null) return '대기 ' + fmtDur(h.wait_seconds);
+  return fmtDur(h.duration);
+}
+
 function stageLabel(stage) {
   if (stage == 'refresh') return '새로고침 중';
   if (stage == 'scan') return '스캔 중';
@@ -97,6 +120,7 @@ function statusText(s) {
   if (s == 'failed') return '<span style="color:#c0392b">실패</span>';
   if (s == 'cancelled') return '<span style="color:#b7791f">취소</span>';
   if (s == 'running') return '<span style="color:#2b6cb0">실행 중</span>';
+  if (s == 'waiting') return '<span style="color:#6b46c1">대기 중</span>';
   if (s == 'terminated') return '<span style="color:#888">중단됨(재시작)</span>';
   return s;
 }
@@ -122,7 +146,7 @@ function renderHistory(data) {
     str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + '</td>';
     str += '<td class="c-name">' + esc(h.section_title) + '</td>';
     str += '<td class="c-status">' + statusText(h.status) + '</td>';
-    str += '<td class="c-num">' + fmtDur(h.duration) + '</td>';
+    str += '<td class="c-num">' + durCell(h) + '</td>';
     var totalCell = statText(h.stat_total);
     if (h.stat_total != null && h.total_label === '처리') totalCell = '처리 ' + statText(h.stat_total);
     str += '<td class="c-num">' + totalCell + (h.stat_missing != null && h.stat_missing > 0 ? '<span class="missing">누락 ' + h.stat_missing + '</span>' : '') + '</td>';
@@ -177,14 +201,26 @@ function renderDetail(d) {
   if (d.section_title) head += (head ? ' — ' : '') + esc(d.section_title);
   if (headTime) head += (head ? ' · ' : '') + '<span style="color:#888">' + headTime + '</span>';
   if (head) str += '<div style="font-size:13px; margin-bottom:2px">' + head + '</div>';
-  // 단계별 소요
+  // 단계별 소요 — 대기 중이면 대기 경과를 초 단위로 올리는 타이머,
+  // 기다렸다 시작한 행은 대기 시간을 맨 앞에 붙인다.
   var steps = [];
-  if (d.vfs_duration != null) steps.push('새로고침 ' + fmtDur(d.vfs_duration));
-  if (d.scan_duration != null) steps.push('스캔 ' + fmtDur(d.scan_duration));
-  steps.push('전체 ' + fmtDur(d.duration));
+  if (d.status == 'waiting') {
+    steps.push('대기 <span class="wait-timer" data-secs="' + (d.waiting_seconds || 0) + '">' + fmtWait(d.waiting_seconds || 0) + '</span>');
+  } else {
+    if (d.wait_seconds != null) steps.push('대기 ' + fmtDur(d.wait_seconds));
+    if (d.vfs_duration != null) steps.push('새로고침 ' + fmtDur(d.vfs_duration));
+    if (d.scan_duration != null) steps.push('스캔 ' + fmtDur(d.scan_duration));
+    steps.push('전체 ' + fmtDur(d.duration));
+  }
   str += '<div><strong>소요</strong> — ' + steps.join(' · ') + '</div>';
   // 비운 개수
   if (d.emptied_count != null) str += '<div><strong>비운 개수</strong> — ' + d.emptied_count + '개</div>';
+  // 작업 단위 행(대기 행·시작 실패 행)은 라이브러리별 결과가 없다 —
+  // 집계·폴더·추가 파일 대신 아래 행을 보라는 안내만 보여준다.
+  var isJobRow = !d.section_key;
+  if (isJobRow) {
+    str += '<div style="color:#888">라이브러리별 결과는 같은 작업명의 아래 행에서 확인해 주세요.</div>';
+  } else {
   // 집계 한 줄 (0인 항목은 빼고 간결하게)
   var hasStats = d.stat_total != null || d.stat_new != null || d.stat_missing != null ||
     d.stat_updated != null || d.stat_restored != null || d.stat_registered != null || d.stat_failed != null;
@@ -239,14 +275,15 @@ function renderDetail(d) {
     str += '</ul>';
   }
   str += '</div>';
+  }
   if (d.message) str += '<div style="color:#888; margin-top:4px">' + esc(d.message) + '</div>';
   str += '</div>';
   return str;
 }
 
 function loadDetail(id) {
-  // 실행 중이던 상세는 끝나면 다시 읽어와야 최종 결과가 보인다.
-  if (detailCache[id] && detailCache[id].status != 'running') return;
+  // 실행 중·대기 중이던 상세는 끝나면 다시 읽어와야 최종 결과가 보인다.
+  if (detailCache[id] && detailCache[id].status != 'running' && detailCache[id].status != 'waiting') return;
   $.ajax({
     type: 'POST', url: API_BASE + 'history_detail', data: {id: id}, global: false,
     success: function (ret) {
@@ -268,8 +305,8 @@ function loadDetail(id) {
 function refreshStaleDetails(rows) {
   for (var i = 0; i < rows.length; i++) {
     var h = rows[i];
-    if (expandedIds[h.id] && h.status != 'running' &&
-        detailCache[h.id] && detailCache[h.id].status == 'running') {
+    if (expandedIds[h.id] && h.status != 'running' && h.status != 'waiting' &&
+        detailCache[h.id] && (detailCache[h.id].status == 'running' || detailCache[h.id].status == 'waiting')) {
       loadDetail(h.id);
     }
   }
@@ -321,7 +358,21 @@ $(document).ready(function () {
   loadSections();
   loadCurrent();
   loadHistory();
-  setInterval(function () { loadCurrent(); }, 15000);
+  setInterval(function () {
+    loadCurrent();
+    // 펼쳐 둔 대기중·실행중 상세는 상태가 바뀌면 다시 읽어온다.
+    for (var id in expandedIds) loadDetail(id);
+  }, 15000);
+  // 대기 중인 상세의 대기 시간을 초 단위로 올린다 — 서버가 준 기준점
+  // (waiting_seconds)에서 시작해 1초마다 1씩 더한다.
+  setInterval(function () {
+    $('.wait-timer').each(function () {
+      var secs = parseInt($(this).data('secs'), 10) || 0;
+      secs += 1;
+      $(this).data('secs', secs);
+      $(this).text(fmtWait(secs));
+    });
+  }, 1000);
 
   $(document).off('click', '#trashCancelBtn').on('click', '#trashCancelBtn', function () {
     globalSendCommand('cancel_current', null);

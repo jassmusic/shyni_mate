@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import time
 
 import requests
@@ -20,6 +21,11 @@ logger = P.logger
 TRASH_JOBS_KEY = 'trash_jobs'
 TRASH_CURRENT_KEY = 'trash_current'
 TRASH_CANCEL_KEY = 'trash_cancel'
+TRASH_MAX_WAIT_KEY = 'trash_max_wait_min'
+# 대기 확인 간격(초) — 앞선 작업이 끝났는지 확인하는 주기.
+WAIT_POLL_SEC = 10
+# 기본 최대 대기 시간(분) — 설정이 없거나 읽지 못하면 이 값을 쓴다.
+DEFAULT_MAX_WAIT_MIN = 360
 # 가장 최근 시작 실패 — 작업 관리 배너가 읽는다 (주기적 스캔과 같은 구조).
 TRASH_START_ERROR_KEY = 'trash_last_start_error'
 # 시작 실패 기록 보관 기한(초) — 이보다 오래된 오류는 배너에 띄우지 않는다.
@@ -98,6 +104,134 @@ def _set_trash_current(cur):
         P.ModelSetting.set(TRASH_CURRENT_KEY, '')
     else:
         P.ModelSetting.set(TRASH_CURRENT_KEY, json.dumps(cur, ensure_ascii=False))
+
+
+def _max_wait_min():
+    """최대 대기 시간(분) — 설정값, 없거나 숫자가 아니면 기본 360분.
+    음수는 기본값으로 취급한다. 0이면 기다리지 않는다."""
+    try:
+        val = P.ModelSetting.get_int(TRASH_MAX_WAIT_KEY)
+    except Exception:
+        val = None
+    if val is None or val < 0:
+        return DEFAULT_MAX_WAIT_MIN
+    return val
+
+
+def _fmt_wait(sec):
+    """대기 시간 표시 — 45초 · 12분 3초 · 6시간 5분. 순수 함수(하니스 검증용)."""
+    sec = int(sec)
+    if sec < 0:
+        sec = 0
+    if sec < 60:
+        return f'{sec}초'
+    if sec < 3600:
+        m, s = divmod(sec, 60)
+        return f'{m}분 {s}초' if s else f'{m}분'
+    h, m = divmod(sec, 3600)
+    m //= 60
+    return f'{h}시간 {m}분' if m else f'{h}시간'
+
+
+def _same_job_busy(name):
+    """같은 이름의 작업이 이미 돌거나 기다리고 있으면 True.
+    스케줄이 겹쳐 같은 작업이 두 번 도는 것을 막는다."""
+    try:
+        cur = get_trash_current()
+        if cur is not None and (cur.get('job_name') or '') == (name or ''):
+            return True
+    except Exception:
+        pass
+    try:
+        from .model_trash import ModelTrashItem
+        row = (F.db.session.query(ModelTrashItem.id)
+               .filter(ModelTrashItem.job_name == name,
+                       ModelTrashItem.status == 'waiting').first())
+        return row is not None
+    except Exception as e:
+        logger.warning(f'[휴지통 작업] 대기 중 작업 조회 실패: {e}')
+        return False
+
+
+def _try_claim(idx, name, mode, job_started, job_row_id):
+    """차례를 차지한다 — 진행 상태를 이 작업 것으로 쓰고 다시 읽어
+    확인한다. 차지했으면 True.
+    두 작업이 거의 동시에 차지하려는 틈을 줄이기 위해 쓰고 잠깐 쉰
+    뒤에 확인한다. 확인에 실패하면 상대가 차지한 것이니 기다린다."""
+    claim_id = (f'wait-{job_row_id}' if job_row_id
+                else f'run-{idx}-{int(time.time() * 1000)}')
+    _set_trash_current({
+        'job_idx': idx, 'job_name': name, 'section_key': '',
+        'section_title': '전체', 'stage': 'scan', 'mode': mode,
+        'job_started_at': job_started, 'section_started_at': _now_text(),
+        'claim_id': claim_id, 'job_row_id': job_row_id})
+    time.sleep(random.uniform(0.3, 1.0))
+    cur = get_trash_current() or {}
+    return cur.get('claim_id') == claim_id
+
+
+def _finish_job_row(row_id, status, message):
+    """대기 행을 끝낸다 — 행을 id로 다시 읽어 끝낸다.
+    (세션이 달라져도 찾을 수 있게 객체를 들고 있지 않는다.)"""
+    try:
+        from .model_trash import ModelTrashItem
+        item = (F.db.session.query(ModelTrashItem)
+                .filter(ModelTrashItem.id == row_id).first())
+        if item is not None:
+            item.finish(status, message)
+    except Exception as e:
+        logger.warning(f'[휴지통 작업] 대기 행 정리 실패: {e}')
+
+
+def _wait_for_turn(idx, name, mode, job_started):
+    """차례를 기다렸다가 차지한다.
+    (대기 행 id 또는 None, 기다린 초 또는 None)을 돌려준다.
+    바로 시작하면 (None, 0), 기다렸다 시작하면 (행 id, 기다린 초),
+    기다리다 시간 초과하면 (None, None) — 이 때는 실패 행을 남긴다.
+    최대 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다."""
+    from .model_trash import ModelTrashItem
+    if get_trash_current() is None and _try_claim(idx, name, mode, job_started, None):
+        return (None, 0)
+    max_min = _max_wait_min()
+    if max_min <= 0:
+        fail_trash_start(name, mode, '이미 진행 중인 휴지통 작업이 있어 시작하지 못했습니다.')
+        return (None, None)
+    running_name = (get_trash_current() or {}).get('job_name') or ''
+    if running_name:
+        wait_msg = f'앞선 작업({running_name}) 진행 중으로 끝나면 이어서 진행합니다.'
+    else:
+        wait_msg = '앞선 작업 진행 중으로 끝나면 이어서 진행합니다.'
+    item = ModelTrashItem(name, '', '전체', mode)
+    item.status = 'waiting'
+    item.message = wait_msg
+    try:
+        item.save()
+    except Exception as e:
+        logger.error(f'[휴지통 작업] 대기 행 저장 실패: {e}')
+        fail_trash_start(name, mode, '대기 기록을 남기지 못했습니다.')
+        return (None, None)
+    row_id = item.id
+    t0 = time.time()
+    deadline = t0 + max_min * 60
+    while time.time() < deadline:
+        time.sleep(WAIT_POLL_SEC)
+        if get_trash_current() is None and _try_claim(idx, name, mode, job_started, row_id):
+            waited = int(time.time() - t0)
+            try:
+                row = (F.db.session.query(ModelTrashItem)
+                       .filter(ModelTrashItem.id == row_id).first())
+                if row is not None:
+                    row.status = 'running'
+                    row.wait_seconds = waited
+                    row.message = f'대기 {_fmt_wait(waited)} 후 시작했습니다.'
+                    row.save()
+            except Exception as e:
+                logger.warning(f'[휴지통 작업] 대기 행 시작 기록 실패: {e}')
+            return (row_id, waited)
+    _finish_job_row(row_id, 'failed',
+                    f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (최대 대기 {_fmt_wait(max_min * 60)})')
+    logger.warning(f'[휴지통 작업] {name}: 최대 대기 시간 초과로 시작하지 않습니다.')
+    return (None, None)
 
 
 def _record_trash_start_error(job_name, reason):
@@ -300,7 +434,16 @@ class TaskTrash:
             except Exception as e:
                 logger.error(f'휴지통 주기 작업 실행 실패: {e}')
                 logger.error(traceback.format_exc())
+                try:
+                    row_id = (get_trash_current() or {}).get('job_row_id')
+                except Exception:
+                    row_id = None
                 _set_trash_current(None)
+                if row_id:
+                    # 기다렸다 시작한 작업이면 대기 행을 실패로 끝낸다 —
+                    # fail_trash_start로 또 행을 만들면 두 개가 된다.
+                    _finish_job_row(row_id, 'failed', f'실행 중 오류가 발생했습니다: {e}')
+                    return
                 try:
                     jobs = get_trash_jobs()
                     job = jobs[idx] if 0 <= idx < len(jobs) else None
@@ -341,9 +484,9 @@ class TaskTrash:
             return
         job = jobs[idx]
         name = job.get('name') or f'작업 {idx + 1}'
-        if get_trash_current() is not None:
-            logger.warning('[휴지통 작업] 이미 진행 중인 작업이 있어 시작하지 않습니다.')
-            fail_trash_start(name, mode, '이미 진행 중인 휴지통 작업이 있어 시작하지 못했습니다.')
+        # 같은 작업이 이미 돌거나 기다리고 있으면 중복으로 세지 않는다.
+        if _same_job_busy(name):
+            logger.info(f'[휴지통 작업] {name}: 이미 실행 중이거나 대기 중이라 건너뜁니다.')
             return
         action = job.get('action') or 'empty'
         steps = ACTION_STEPS.get(action, ['empty'])
@@ -376,6 +519,12 @@ class TaskTrash:
             fail_trash_start(name, mode, '기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.')
             return
         _clear_trash_start_error()
+
+        # 앞선 작업이 돌고 있으면 기다렸다가 차례가 되면 실행한다.
+        # 기다리다 시간 초과하면 _wait_for_turn이 실패 행을 남긴다.
+        job_row_id, _waited = _wait_for_turn(idx, name, mode, job_started)
+        if _waited is None:
+            return
 
         for sec in targets:
             key = str(sec['key'])
@@ -418,10 +567,11 @@ class TaskTrash:
                         status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                         break
                     _set_trash_current({
-                        'job_name': name, 'section_key': key, 'section_title': title,
+                        'job_idx': idx, 'job_name': name, 'section_key': key,
+                        'section_title': title,
                         'stage': step, 'job_started_at': job_started,
                         'section_started_at': _now_text(),
-                        'mode': mode})
+                        'mode': mode, 'job_row_id': job_row_id})
                     try:
                         if step == 'refresh':
                             addr, remote = ModuleStatus._rc_target(sec['path'])
@@ -657,6 +807,13 @@ class TaskTrash:
                     request_stats()
                 except Exception as e:
                     logger.warning(f'[휴지통 작업] 통계 재계산 요청 실패: {e}')
-            _set_trash_current(None)
+        # 진행 상태는 작업이 끝날 때까지 유지한다 — 라이브러리마다
+        # 지우면 지운 틈에 다른 작업이 비어 있다고 보고 시작해버린다.
+        # (주기적 스캔은 처음부터 끝날 때만 지운다.)
+        if job_row_id is not None:
+            if _trash_cancel_requested():
+                _finish_job_row(job_row_id, 'cancelled', '취소 요청으로 중단했습니다.')
+            else:
+                _finish_job_row(job_row_id, 'done', '완료됐습니다.')
         _set_trash_current(None)
         logger.info(f'[휴지통 작업] 종료: {name}')

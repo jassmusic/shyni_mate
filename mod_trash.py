@@ -32,6 +32,9 @@ class ModuleTrash(PluginModuleBase):
             # 진행 중 표시 정리 시간(분) — 진행 상태를 확인할 방법이 없을 때
             # 이 시간이 지나면 '중단됨'으로 정리한다. 0이면 끈다 (기본값 30)
             f'{self.name}_stuck_timeout_min': '30',
+            # 최대 대기 시간(분) — 앞선 작업이 돌고 있을 때 이 시간까지
+            # 기다렸다가 끝나면 이어서 실행한다. 0이면 기다리지 않는다 (기본값 360)
+            f'{self.name}_max_wait_min': '360',
         }
         self.web_list_model = ModelTrashItem
 
@@ -53,6 +56,7 @@ class ModuleTrash(PluginModuleBase):
                         ('vfs_duration', 'INTEGER'), ('scan_duration', 'INTEGER'),
                         ('append_files', 'TEXT'), ('append_count', 'INTEGER'),
                         ('stat_folders', 'TEXT'), ('emptied_count', 'INTEGER'),
+                        ('wait_seconds', 'INTEGER'),
                     ]
                     added = [c for c, _ in new_cols if c not in cols]
                     if added:

@@ -17,13 +17,14 @@ class ModelPeriodicItem(ModelBase):
     id = db.Column(db.Integer, primary_key=True)
     created_time = db.Column(db.DateTime)
     mode = db.Column(db.String)            # scheduler | manual
-    status = db.Column(db.String)          # running | done | failed | cancelled | terminated
+    status = db.Column(db.String)          # waiting | running | done | failed | cancelled | terminated
     job_name = db.Column(db.String)
     section_key = db.Column(db.String)
     section_title = db.Column(db.String)
     start_time = db.Column(db.DateTime)
     finish_time = db.Column(db.DateTime)
     duration = db.Column(db.Integer)       # 초
+    wait_seconds = db.Column(db.Integer)   # 초 (앞선 작업을 기다린 시간, 기다리지 않았으면 None)
     message = db.Column(db.String)
     # 스캔 결과 (z38 — 완료 시 job stats와 추가 파일 목록을 저장한다).
     # 업데이트 전에 기록된 행에는 이 값들이 없다(NULL). 읽는 쪽은 NULL을
@@ -67,19 +68,24 @@ class ModelPeriodicItem(ModelBase):
 
     @classmethod
     def set_terminated(cls, exclude_id=None):
-        """플러그인 재시작 시 running으로 남은 이력을 정리한다.
-        exclude_id가 있으면 그 행은 남긴다 (복구 대상)."""
+        """플러그인 재시작 시 running·waiting으로 남은 이력을 정리한다.
+        exclude_id가 있으면 그 행은 남긴다 (복구 대상).
+        대기 중이던 행은 대기가 중단됐다는 문구를 남긴다."""
         with F.app.app_context():
             try:
-                query = F.db.session.query(cls).filter(cls.status == 'running')
+                query = F.db.session.query(cls).filter(
+                    cls.status.in_(['running', 'waiting']))
                 if exclude_id is not None:
                     query = query.filter(cls.id != exclude_id)
                 rows = query.all()
                 for row in rows:
+                    was_waiting = row.status == 'waiting'
                     row.status = 'terminated'
                     row.finish_time = datetime.now()
                     if row.start_time:
                         row.duration = int((row.finish_time - row.start_time).total_seconds())
+                    if was_waiting:
+                        row.message = '다시 시작되면서 대기가 중단됐습니다.'
                     row.save()
             except Exception as e:
                 logger.error(f'set_terminated 실패: {e}')
@@ -88,6 +94,15 @@ class ModelPeriodicItem(ModelBase):
     def _row_dict(cls, r):
         # 결과 컬럼은 예전 행에서 NULL일 수 있다 — None 그대로 내보내고
         # 화면에서 '-'로 표시한다.
+        # 대기 중인 행은 읽는 시점의 대기 경과 초를 함께 내보낸다 —
+        # 화면이 초 단위로 올려서 보여주는 기준점이다.
+        waiting_seconds = None
+        if r.status == 'waiting' and r.start_time:
+            try:
+                waiting_seconds = max(
+                    0, int((datetime.now() - r.start_time).total_seconds()))
+            except Exception:
+                waiting_seconds = None
         return {
             'id': r.id,
             'mode': r.mode,
@@ -98,6 +113,8 @@ class ModelPeriodicItem(ModelBase):
             'start_time': r.start_time.strftime('%m-%d %H:%M:%S') if r.start_time else '',
             'finish_time': r.finish_time.strftime('%m-%d %H:%M:%S') if r.finish_time else '',
             'duration': r.duration,
+            'wait_seconds': r.wait_seconds,
+            'waiting_seconds': waiting_seconds,
             'message': r.message or '',
             'shyni_job_id': r.shyni_job_id,
             'stat_total': r.stat_total,

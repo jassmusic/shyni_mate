@@ -7,6 +7,7 @@
 
 <form id='setting'>
   {{ macros.setting_input_int('periodic_stuck_timeout_min', '진행 중 표시 정리 시간', min=0, value=arg['periodic_stuck_timeout_min'], desc=['기본값 30분 · 단위: 분', '주기적 스캔이 진행 중인데, 스캔을 보냈는데 작업 번호를 받지 못했거나 실행 중에 다시 시작되는 등 진행 상태를 확인할 방법이 없을 때, 이 시간이 지나면 대시보드의 진행 중 표시를 중단됨으로 정리합니다.', '화면 표시만 정리하는 것으로, shyni에서 실제 작업이 계속 돌고 있다면 멈추지 않습니다.', '작업 기록이 사라진 경우에는 시간과 무관하게 바로 정리합니다.', '0으로 두면 이 기능을 끕니다.']) }}
+  {{ macros.setting_input_int('periodic_max_wait_min', '최대 대기 시간', min=0, value=arg['periodic_max_wait_min'], desc=['기본값 360분(6시간) · 단위: 분', '앞선 작업이 돌고 있을 때, 이 시간까지 기다렸다가 끝나면 이어서 실행합니다.', '기다리는 동안에는 작업 결과에 대기중 행이 생깁니다.', '이 시간을 넘겨도 앞선 작업이 끝나지 않으면 시작 실패로 끝납니다.', '0으로 두면 기다리지 않고, 앞선 작업이 돌고 있으면 바로 시작 실패로 끝납니다.']) }}
   {{ macros.m_hr() }}
   {{ macros.setting_input_text_and_buttons('periodic_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','periodic_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['periodic_db_delete_day'], col='6') }}
   {{ macros.setting_checkbox('periodic_db_auto_delete', 'DB 자동 삭제', value=arg['periodic_db_auto_delete'], desc=['켜 두시면, 설정한 기간이 지난 DB 기록을 자동으로 삭제합니다.']) }}
