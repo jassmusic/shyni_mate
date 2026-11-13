@@ -262,6 +262,9 @@ class ModuleStatus(PluginModuleBase):
                 'title': d.get('title'),
                 'type': d.get('type'),
                 'path': locs[0].get('path') if locs else '',
+                # 연결된 폴더 전 목록 — 대시보드에서 폴더를 클릭하면 펼친다.
+                # 'path'(첫 번째)는 다른 곳에서 쓰므로 그대로 둔다.
+                'paths': [loc.get('path') for loc in locs if loc.get('path')],
             })
         try:
             P.ModelSetting.set(ModuleStatus.SECTIONS_CACHE_KEY,

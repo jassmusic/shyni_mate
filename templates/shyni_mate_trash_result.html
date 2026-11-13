@@ -144,12 +144,15 @@ function renderHistory(data) {
 
 function folderStatLine(f) {
   var folder = f.path || f.folder || f.dir || f.name || '';
+  // shyni results 항목은 집계가 result 안에 중첩돼 있다 (쇼 job 47580 확인).
+  // 평평한 구조(구버전)도 대비해 없으면 항목 자체에서 읽는다.
+  var r = (f.result && typeof f.result === 'object') ? f.result : f;
   var bits = [];
-  if (f.new != null && f.new > 0) bits.push('신규 ' + f.new);
-  if (f.total != null) bits.push('전체 ' + f.total);
-  if (f.missing != null && f.missing > 0) bits.push('누락 ' + f.missing);
-  if (f.updated != null && f.updated > 0) bits.push('업데이트 ' + f.updated);
-  if (f.restored != null && f.restored > 0) bits.push('복원 ' + f.restored);
+  if (r.new != null && r.new > 0) bits.push('신규 ' + r.new);
+  if (r.total != null) bits.push('전체 ' + r.total);
+  if (r.missing != null && r.missing > 0) bits.push('누락 ' + r.missing);
+  if (r.updated != null && r.updated > 0) bits.push('업데이트 ' + r.updated);
+  if (r.restored != null && r.restored > 0) bits.push('복원 ' + r.restored);
   return esc(folder) + (bits.length ? ' — ' + bits.join(' · ') : '');
 }
 
