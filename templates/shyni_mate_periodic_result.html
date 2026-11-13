@@ -123,7 +123,9 @@ function renderHistory(data) {
     str += '<td class="c-status">' + statusText(h.status) + '</td>';
     str += '<td class="c-num">' + fmtDur(h.duration) + '</td>';
     str += '<td class="c-num">' + statText(h.stat_new) + '</td>';
-    str += '<td class="c-num">' + statText(h.stat_total) + (h.stat_missing != null && h.stat_missing > 0 ? '<span class="missing">누락 ' + h.stat_missing + '</span>' : '') + '</td></tr>';
+    var totalCell = statText(h.stat_total);
+    if (h.stat_total != null && h.total_label === '처리') totalCell = '처리 ' + statText(h.stat_total);
+    str += '<td class="c-num">' + totalCell + (h.stat_missing != null && h.stat_missing > 0 ? '<span class="missing">누락 ' + h.stat_missing + '</span>' : '') + '</td></tr>';
     if (expanded) {
       str += '<tr class="hist-detail-row" data-id="' + h.id + '"><td colspan="8" style="background:#f7fafc"><div class="hist-detail" data-id="' + h.id + '">';
       str += detailCache[h.id] ? renderDetail(detailCache[h.id]) : '불러오는 중입니다.';
@@ -185,7 +187,7 @@ function renderDetail(d) {
     d.stat_updated != null || d.stat_restored != null || d.stat_registered != null || d.stat_failed != null;
   if (hasStats) {
     var bits = [];
-    if (d.stat_total != null) bits.push('전체 ' + d.stat_total);
+    if (d.stat_total != null) bits.push((d.total_label || '전체') + ' ' + d.stat_total);
     if (d.stat_new != null && d.stat_new > 0) bits.push('신규 ' + d.stat_new);
     if (d.stat_updated != null && d.stat_updated > 0) bits.push('업데이트 ' + d.stat_updated);
     if (d.stat_restored != null && d.stat_restored > 0) bits.push('복원 ' + d.stat_restored);

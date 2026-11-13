@@ -9,7 +9,8 @@ from .setup import *
 from .shyni_backend import ShyniBackend
 from .task_periodic import (WAIT_TIMEOUT_SEC, _extract_job_id,
                             _scan_poll_outcome, _stat_int, _write_status,
-                            apply_scan_result, scan_summary_text)
+                            apply_scan_result, book_relay_total,
+                            scan_summary_text)
 
 logger = P.logger
 
@@ -19,6 +20,10 @@ logger = P.logger
 TRASH_JOBS_KEY = 'trash_jobs'
 TRASH_CURRENT_KEY = 'trash_current'
 TRASH_CANCEL_KEY = 'trash_cancel'
+# 가장 최근 시작 실패 — 작업 관리 배너가 읽는다 (주기적 스캔과 같은 구조).
+TRASH_START_ERROR_KEY = 'trash_last_start_error'
+# 시작 실패 기록 보관 기한(초) — 이보다 오래된 오류는 배너에 띄우지 않는다.
+TRASH_START_ERROR_MAX_AGE_SEC = 3600
 
 # 폴링 실패 기준 (W7과 같은 기준): 일시적 오류는 재시도하고,
 # 연속 3회 실패 시에만 실패로 확정한다.
@@ -93,6 +98,61 @@ def _set_trash_current(cur):
         P.ModelSetting.set(TRASH_CURRENT_KEY, '')
     else:
         P.ModelSetting.set(TRASH_CURRENT_KEY, json.dumps(cur, ensure_ascii=False))
+
+
+def _record_trash_start_error(job_name, reason):
+    """시작 실패를 기록한다 — 작업 관리 배너가 읽는다.
+    기록 실패가 실행을 막지 않게 예외를 삼킨다."""
+    try:
+        P.ModelSetting.set(TRASH_START_ERROR_KEY, json.dumps(
+            {'at': time.time(), 'job_name': job_name or '',
+             'reason': str(reason or '')[:500]},
+            ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f'[휴지통 작업] 시작 오류 기록 실패: {e}')
+
+
+def _clear_trash_start_error():
+    try:
+        P.ModelSetting.set(TRASH_START_ERROR_KEY, '')
+    except Exception:
+        pass
+
+
+def clear_trash_start_error():
+    """시작 오류 기록을 지운다 (배너 닫기용)."""
+    _clear_trash_start_error()
+
+
+def get_last_trash_start_error(max_age_sec=TRASH_START_ERROR_MAX_AGE_SEC):
+    """가장 최근 시작 오류 — 없거나 깨졌거나 오래됐으면 None."""
+    raw = P.ModelSetting.get(TRASH_START_ERROR_KEY)
+    if not raw:
+        return None
+    try:
+        err = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(err, dict):
+        return None
+    at = err.get('at')
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return None
+    if time.time() - at > max_age_sec:
+        return None
+    return err
+
+
+def fail_trash_start(job_name, mode, reason):
+    """작업 단위 시작 실패 — 이력 행을 남기고 배너용 오류를 기록한다.
+    이력 행 저장이 실패해도 배너 기록은 시도한다."""
+    try:
+        from .model_trash import ModelTrashItem
+        item = ModelTrashItem(job_name, '', '전체', mode)
+        item.finish('failed', reason)
+    except Exception as e:
+        logger.error(f'[휴지통 작업] 시작 실패 이력 기록 실패: {e}')
+    _record_trash_start_error(job_name, reason)
 
 
 def _trash_cancel_requested():
@@ -241,6 +301,14 @@ class TaskTrash:
                 logger.error(f'휴지통 주기 작업 실행 실패: {e}')
                 logger.error(traceback.format_exc())
                 _set_trash_current(None)
+                try:
+                    jobs = get_trash_jobs()
+                    job = jobs[idx] if 0 <= idx < len(jobs) else None
+                except Exception:
+                    job = None
+                if job is not None:
+                    fail_trash_start(job.get('name') or f'작업 {idx + 1}',
+                                     mode, f'실행 중 오류가 발생했습니다: {e}')
 
     @staticmethod
     def _fail_running_status(key, job_name):
@@ -269,12 +337,14 @@ class TaskTrash:
         jobs = get_trash_jobs()
         if idx < 0 or idx >= len(jobs):
             logger.warning(f'[휴지통 작업] 없는 작업 번호: {idx}')
-            return
-        if get_trash_current() is not None:
-            logger.warning('[휴지통 작업] 이미 진행 중인 작업이 있어 시작하지 않습니다.')
+            _record_trash_start_error('', f'잘못된 작업 번호라 시작하지 못했습니다: {idx}')
             return
         job = jobs[idx]
         name = job.get('name') or f'작업 {idx + 1}'
+        if get_trash_current() is not None:
+            logger.warning('[휴지통 작업] 이미 진행 중인 작업이 있어 시작하지 않습니다.')
+            fail_trash_start(name, mode, '이미 진행 중인 휴지통 작업이 있어 시작하지 못했습니다.')
+            return
         action = job.get('action') or 'empty'
         steps = ACTION_STEPS.get(action, ['empty'])
         P.ModelSetting.set(TRASH_CANCEL_KEY, '')
@@ -287,28 +357,25 @@ class TaskTrash:
                    if a.strip()]
         for anchor in anchors:
             if not os.path.exists(anchor):
-                item = ModelTrashItem(name, '', '전체', mode)
-                item.finish('failed', f'기준 경로를 찾을 수 없습니다 — {anchor}')
+                fail_trash_start(name, mode, f'기준 경로를 찾을 수 없습니다 — {anchor}')
                 logger.error(f'[휴지통 작업] 중단: 기준 경로 없음 — {anchor}')
                 return
 
         sections, err = ModuleStatus._sections()
         if err:
-            item = ModelTrashItem(name, '', '전체', mode)
-            item.finish('failed', err)
+            fail_trash_start(name, mode, err)
             return
         selected = {str(s) for s in (job.get('sections') or [])}
         targets = [s for s in sections if not selected or str(s['key']) in selected]
         if not targets:
-            item = ModelTrashItem(name, '', '전체', mode)
-            item.finish('failed', '대상 라이브러리가 없습니다.')
+            fail_trash_start(name, mode, '대상 라이브러리가 없습니다.')
             return
 
         url, token = ShyniBackend.get_config()
         if not url or not token:
-            item = ModelTrashItem(name, '', '전체', mode)
-            item.finish('failed', '기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.')
+            fail_trash_start(name, mode, '기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.')
             return
+        _clear_trash_start_error()
 
         for sec in targets:
             key = str(sec['key'])
@@ -342,6 +409,7 @@ class TaskTrash:
             scan_duration = None
             scan_job_id = None
             scan_stats = None
+            relay_total = None
             pre_max_id = None
             emptied_count = None
             try:
@@ -422,7 +490,8 @@ class TaskTrash:
                                 w = _wait_scan(url, token, scan_job_id)
                                 scan_duration = w['duration']
                                 scan_stats = (w.get('job') or {}).get('stats') or {}
-                                summary = scan_summary_text(scan_stats)
+                                relay_total = book_relay_total(scan_stats, key)
+                                summary = scan_summary_text(scan_stats, relay_total)
                                 scan_entry = {
                                     'job': scan_job_id, 'path': sec.get('path', ''),
                                     'started_at': scan_started, 'finished_at': _now_text(),
@@ -549,13 +618,13 @@ class TaskTrash:
             if scan_job_id or scan_stats is not None:
                 apply_scan_result(item, scan_job_id, scan_stats, vfs_duration,
                                   scan_duration, pre_max_id, key,
-                                  label='휴지통 작업')
+                                  label='휴지통 작업', relay_total=relay_total)
             else:
                 item.vfs_duration = vfs_duration
                 item.scan_duration = scan_duration
             item.emptied_count = emptied_count
             if status == 'done':
-                summary = scan_summary_text(scan_stats)
+                summary = scan_summary_text(scan_stats, relay_total)
                 done_msg = message
                 if not done_msg:
                     bits = []

@@ -6,6 +6,9 @@
   <span style="font-size:12px; color:#888">저장하면 사용으로 켜진 작업이 스케줄러에 바로 반영됩니다. cron 예: <code>0 4 * * *</code> 매일 새벽 4시, <code>0 3 * * 1</code> 매주 월요일 새벽 3시</span>
 </div>
 
+<div id="startErrorDiv" style="display:none; border:1px solid #e53e3e; background:#fff5f5; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#9b2c2c"></div>
+<div id="startOkDiv" style="display:none; border:1px solid #38a169; background:#f0fff4; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#276749"></div>
+
 <div id="jobs_div"></div>
 
 <div id="libPickModal" style="display:none; position:fixed; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.45); z-index:2000">
@@ -97,12 +100,51 @@ function runningSignature(cur) {
   return [cur.job_idx, cur.section_key, cur.stage].join('|');
 }
 
+// 시작 실패 배너 — 워커가 시작 전에 중단된 사유를 보여 준다.
+// 실행은 비동기라 눌렀을 때 바로 아는 게 아니라 몇 초 뒤에 확인해야 한다.
+var lastErrorSig = '';
+
+function fmtTime(at) {
+  var d = new Date(at * 1000);
+  var hh = String(d.getHours());
+  if (hh.length < 2) hh = '0' + hh;
+  var mm = String(d.getMinutes());
+  if (mm.length < 2) mm = '0' + mm;
+  return hh + ':' + mm;
+}
+
+function renderStartError(err) {
+  if (!err) { $('#startErrorDiv').hide(); return; }
+  var name = err.job_name ? '\u2018' + esc(err.job_name) + '\u2019 ' : '';
+  var at = (typeof err.at == 'number') ? ' (' + fmtTime(err.at) + ')' : '';
+  $('#startErrorDiv').html('\u26a0\ufe0f ' + name + '시작하지 못했습니다. ' + esc(err.reason || '') + at + ' <button type="button" id="startErrorClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
+  $('#startErrorDiv').show();
+}
+
+// '작업이 시작되었습니다' — 지금 실행을 누른 뒤 실제 시작이 확인되면 한 번만 보여 준다.
+var pendingStartAt = 0;
+
 function loadCurrent() {
   $.ajax({
     type: 'POST', url: API_BASE + 'current', data: {}, global: false,
     success: function (ret) {
       if (!ret || ret.ret != 'success') return;
+      var err = ret.last_error || null;
+      var errSig = err ? [err.at, err.job_name, err.reason].join('|') : '';
+      if (errSig !== lastErrorSig) {
+        lastErrorSig = errSig;
+        renderStartError(err);
+      }
       var cur = ret.data || null;
+      var wasRunning = !!runningCur;
+      if (pendingStartAt && !wasRunning && cur) {
+        if (Date.now() - pendingStartAt < 180000) {
+          $('#startOkDiv').html('\u2705 작업이 시작되었습니다. <button type="button" id="startOkClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
+          $('#startOkDiv').show();
+        }
+        pendingStartAt = 0;
+      }
+      if (!cur) $('#startOkDiv').hide();
       var sig = runningSignature(cur);
       if (sig === runningSig) return;
       runningSig = sig;
@@ -273,7 +315,23 @@ $(document).ready(function () {
   });
 
   $(document).off('click', '.job-run').on('click', '.job-run', function () {
+    $('#startErrorDiv').hide();
+    $('#startOkDiv').hide();
+    pendingStartAt = Date.now();
     globalSendCommand('task_execute', $(this).data('idx'));
+    // 시작·실패는 비동기로 확인되니, 눌른 뒤 몇 초 뒤에 다시 확인한다.
+    setTimeout(loadCurrent, 3000);
+    setTimeout(loadCurrent, 8000);
+  });
+
+  $(document).off('click', '#startErrorClose').on('click', '#startErrorClose', function () {
+    $('#startErrorDiv').hide();
+    lastErrorSig = '';
+    $.ajax({type: 'POST', url: API_BASE + 'clear_start_error', data: {}, global: false});
+  });
+
+  $(document).off('click', '#startOkClose').on('click', '#startOkClose', function () {
+    $('#startOkDiv').hide();
   });
 
   $(document).off('click', '.job-cancel').on('click', '.job-cancel', function () {

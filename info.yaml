@@ -1,5 +1,5 @@
 title: "SHYNI MATE"
-version: "0.9.6"
+version: "0.9.7"
 package_name: "shyni_mate"
 developer: "jassmusic"
 description: "shyni 전용 스캔 매니저 — 수신 항목을 하나씩 VFS 새로고침 → 스캔 전송 → 결과 확인 순서로 직렬 처리"

@@ -3,7 +3,9 @@ import json
 from .model_periodic import ModelPeriodicItem
 from .mod_status import ModuleStatus
 from .setup import *
-from .task_periodic import (TaskPeriodic, get_current, get_jobs,
+from .task_periodic import (TaskPeriodic, annotate_total_labels,
+                            clear_start_error, fail_start, get_current,
+                            get_jobs, get_last_start_error,
                             periodic_action_to_kind_use_vfs, request_cancel)
 
 name = 'periodic'
@@ -113,7 +115,20 @@ class ModulePeriodic(PluginModuleBase):
             pass
 
     def job_function(self, idx, mode='scheduler'):
-        self.start_celery(TaskPeriodic.start, None, *(idx, mode))
+        # Celery에 넘기지 못하면 스레드·태스크 안에서 조용히 죽는다 —
+        # '실행을 시작했습니다'라고 답한 뒤 아무것도 안 뜨는 경우다.
+        # 그래서 여기서 실패를 잡아 이력 행과 배너 기록으로 남긴다.
+        try:
+            self.start_celery(TaskPeriodic.start, None, *(idx, mode))
+        except Exception as e:
+            logger.error(f'[Periodic] Celery 시작 실패: {e}')
+            try:
+                jobs = get_jobs()
+                job_name = (jobs[idx].get('name')
+                            if 0 <= idx < len(jobs) else '') or ''
+            except Exception:
+                job_name = ''
+            fail_start(job_name, mode, f'작업을 넘기지 못했습니다: {e}')
 
     def one_execute(self, idx):
         # '지금 실행'은 수동 실행이라 mode를 'manual'로 넘긴다 (R19).
@@ -129,7 +144,12 @@ class ModulePeriodic(PluginModuleBase):
             pass
         def func():
             time.sleep(1)
-            self.job_function(idx, 'manual')
+            try:
+                self.job_function(idx, 'manual')
+            except Exception as e:
+                logger.error(f'[Periodic] 지금 실행 실패: {e}')
+                fail_start(jobs[idx].get('name') or '', 'manual',
+                           f'실행을 시작하지 못했습니다: {e}')
         t = threading.Thread(target=func, args=())
         t.daemon = True
         t.start()
@@ -230,6 +250,12 @@ class ModulePeriodic(PluginModuleBase):
                 return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
             if get_current() is not None:
                 return jsonify({'ret': 'warning', 'msg': '이미 진행 중인 주기적 스캔이 있습니다.'})
+            jobs = get_jobs()
+            if idx < 0 or idx >= len(jobs):
+                return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
+            if not (jobs[idx].get('sections') or []):
+                return jsonify({'ret': 'warning',
+                                'msg': '선택한 라이브러리가 없습니다. 라이브러리 선택에서 골라 주세요.'})
             result = self.one_execute(idx)
             logger.info(f'[Periodic] 지금 실행 요청: idx={idx} 결과={result}')
             if result == 'is_running':
@@ -237,7 +263,7 @@ class ModulePeriodic(PluginModuleBase):
             elif result == 'fail':
                 return jsonify({'ret': 'warning', 'msg': '실행하지 못했습니다.'})
             else:
-                ret['msg'] = '실행을 시작했습니다. 스캔 결과에서 진행 상태를 볼 수 있습니다.'
+                ret['msg'] = '실행을 시작했습니다. 잠시 뒤 워커가 작업을 시작합니다.'
         elif command == 'cancel_current':
             if get_current() is None:
                 return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 주기적 스캔이 없습니다.'})
@@ -254,7 +280,11 @@ class ModulePeriodic(PluginModuleBase):
                 return jsonify({'ret': 'fail', 'msg': err})
             return jsonify({'ret': 'success', 'data': sections})
         if sub == 'current':
-            return jsonify({'ret': 'success', 'data': get_current()})
+            return jsonify({'ret': 'success', 'data': get_current(),
+                            'last_error': get_last_start_error()})
+        if sub == 'clear_start_error':
+            clear_start_error()
+            return jsonify({'ret': 'success'})
         if sub == 'pick_sort':
             sort = (req.form.get('sort') or '').strip()
             if sort not in PICK_SORTS:
@@ -269,8 +299,10 @@ class ModulePeriodic(PluginModuleBase):
             section = (req.form.get('section') or '').strip() or None
             only_append = (req.form.get('only_append') or '') == '1'
             search = (req.form.get('search') or '').strip() or None
-            return jsonify({'ret': 'success', 'data': ModelPeriodicItem.get_page(
-                page, section_key=section, only_append=only_append, search=search)})
+            data = ModelPeriodicItem.get_page(
+                page, section_key=section, only_append=only_append, search=search)
+            annotate_total_labels(data.get('list') or [])
+            return jsonify({'ret': 'success', 'data': data})
         if sub == 'history_detail':
             try:
                 item_id = int(req.form.get('id') or 0)
@@ -279,6 +311,7 @@ class ModulePeriodic(PluginModuleBase):
             data = ModelPeriodicItem.get_detail(item_id)
             if data is None:
                 return jsonify({'ret': 'fail', 'msg': '이력을 찾지 못했습니다.'})
+            annotate_total_labels([data])
             return jsonify({'ret': 'success', 'data': data})
         return jsonify({'ret': 'fail', 'msg': '알 수 없는 요청입니다.'})
 

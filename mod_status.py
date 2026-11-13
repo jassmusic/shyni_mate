@@ -438,6 +438,178 @@ class ModuleStatus(PluginModuleBase):
                 merged[str(lib)] = drec
         return merged, len(files)
 
+    @classmethod
+    def _fill_book_new(cls, rows):
+        """도서 카드의 신규(last_scan['new'])를 실측값으로 채운다.
+
+        shyni 도서 스캔 stats에는 신규에 대응하는 키가 없어 last_scan의
+        신규가 항상 비어 있다 ('-'). 대신 이 플러그인이 직접 잰 값을
+        쓴다 — 주기 스캔 이력의 stat_new과 카드 스캔 측정값 중 더 최신인
+        쪽을 쓴다 (2026-11-13 사용자 결정: 카드 스캔도 주기 스캔과 같은
+        방식으로 신규를 잰다).
+        - 값이 0이면 0으로 표시한다 (실측된 0건 — NULL과 다르다).
+        - 두 출처 모두 값이 없으면 비워 둔다 ('-' 유지 — 모른다는
+          뜻이라 0으로 속이면 안 된다).
+        - last_scan의 다른 값(파일수·missing·시각)은 건드리지 않는다.
+        - 신규 값이 last_scan보다 오래된 스캔에서 올 수 있다 —
+          시각과 값의 출처가 달라질 수 있음을 받아들인 동작이다.
+        - 도서 외 종류는 shyni stats에 new 키가 있어 건드리지 않는다.
+        채운 값에는 _new_from_periodic 또는 _new_from_card 표시를 남긴다 —
+        캐시 응답 때 다시 채울 때 우리 채움만 갈아 끼우거나 정리하고,
+        수동 이력 같은 다른 출처의 값은 건드리지 않기 위해서다. 목록을
+        새로 만들 때와 캐시로 답할 때 양쪽에서 부른다.
+        """
+        targets = {}
+        for sec in rows:
+            if (sec.get('type') or '') != 'book':
+                continue
+            ls = sec.get('last_scan')
+            if not ls:
+                continue
+            targets[str(sec['key'])] = ls
+        if not targets:
+            return
+        try:
+            from .model_periodic import ModelPeriodicItem
+            periodic = ModelPeriodicItem.latest_stat_new_time_map(list(targets))
+        except Exception as e:
+            logger.warning(f'[Status] 도서 신규 조회 실패: {e}')
+            return
+        try:
+            card = cls._card_scan_new_read()
+        except Exception:
+            card = {}
+        for key, ls in targets.items():
+            ours = bool(ls.get('_new_from_periodic') or ls.get('_new_from_card'))
+            # 두 출처 중 더 최신인 쪽을 쓴다 — 동점이면 카드 측정값을 쓴다.
+            p = periodic.get(key)
+            c = card.get(key)
+            winner = None
+            if c is not None and (p is None or c.get('at', 0) >= p.get('at', 0)):
+                winner = ('card', c['new'])
+            elif p is not None:
+                winner = ('periodic', p['new'])
+            if winner is not None:
+                # 비어 있거나 우리 채움이면 갈아 끼우고, 수동 이력 같은
+                # 다른 출처의 값은 건드리지 않는다.
+                if ls.get('new') is None or ours:
+                    src, val = winner
+                    ls['new'] = val
+                    if src == 'card':
+                        ls['_new_from_card'] = True
+                        ls.pop('_new_from_periodic', None)
+                    else:
+                        ls['_new_from_periodic'] = True
+                        ls.pop('_new_from_card', None)
+            elif ours:
+                # 이전에 채웠던 값이 있었는데 두 출처 모두 사라졌으면
+                # 다시 비운다 — 모른다는 뜻이다.
+                ls['new'] = None
+                ls.pop('_new_from_periodic', None)
+                ls.pop('_new_from_card', None)
+
+    # 카드 스캔 신규 측정값 저장소 (ModelSetting JSON, 주기 이력과 별개).
+    # {섹션 key(str): {'new': int, 'at': float(epoch), 'job': str|None}}
+    _CARD_NEW_KEY = 'status_card_scan_new'
+    _card_new_lock = threading.Lock()
+
+    @classmethod
+    def _card_scan_new_read(cls):
+        """카드 스캔 신규 측정값 저장소를 읽는다.
+        깨진 값은 무시한다 — 목록 응답을 망가뜨리지 않기 위해서다."""
+        try:
+            raw = P.ModelSetting.get(cls._CARD_NEW_KEY)
+            data = json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        out = {}
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                continue
+            try:
+                out[str(k)] = {'new': int(v['new']),
+                               'at': float(v.get('at') or 0),
+                               'job': v.get('job')}
+            except Exception:
+                continue
+        return out
+
+    @classmethod
+    def _card_scan_new_save(cls, key, value, at, job_id):
+        """카드 스캔 신규 측정값을 저장한다 — 다른 라이브러리 값은 그대로 둔다."""
+        with cls._card_new_lock:
+            try:
+                data = cls._card_scan_new_read()
+                data[str(key)] = {'new': int(value), 'at': float(at),
+                                  'job': (str(job_id) if job_id is not None else None)}
+                P.ModelSetting.set(cls._CARD_NEW_KEY,
+                                   json.dumps(data, ensure_ascii=False))
+            except Exception as e:
+                logger.warning(f'[현황] 카드 스캔 신규 저장 실패: {e}')
+
+    @classmethod
+    def _card_scan_pre_max_id(cls):
+        """카드 스캔 전송 시점의 media_parts 최대 id — 신규 측정 기준점.
+        주기 스캔이 스캔 전에 기록하는 것과 같은 값이다. Relay가 꺼져
+        있거나 조회가 실패하면 None을 돌려준다 (측정 안 함)."""
+        try:
+            from . import db_support
+            if not db_support.db_ready():
+                return None
+            v = db_support.parts_max_id()
+            return int(v) if v is not None else None
+        except Exception as e:
+            logger.warning(f'[현황] 카드 스캔 기준점 기록 실패: {e}')
+            return None
+
+    @classmethod
+    def _maybe_measure_card_scan_new(cls, key, scan, job):
+        """카드 스캔이 완료됐으면 신규 측정 스레드를 띄운다.
+        pre_max_id가 있는 카드 스캔 기록만 대상이다 (주기 스캔 기록에는
+        pre_max_id가 없고 source='periodic'이라 걸러진다). job stats에
+        new 키가 있으면 수확 경로(_db_scan_history)가 이미 표시하므로
+        측정하지 않는다 — 도서처럼 new 키가 없는 경우만 잰다. 측정은
+        백그라운드 스레드에서 해서 목록 응답을 막지 않는다."""
+        pre = scan.get('pre_max_id')
+        if pre is None:
+            return False
+        if scan.get('source') == 'periodic':
+            return False
+        stats = (job or {}).get('stats') or {}
+        if not isinstance(stats, dict):
+            stats = {}
+        if stats.get('new') is not None:
+            return False
+        try:
+            ids = (stats.get('analyze') or {}).get('metadata_item_ids') or []
+        except Exception:
+            ids = []
+        th = threading.Thread(target=cls._measure_card_scan_new,
+                              args=(key, scan.get('job'), pre, ids, time.time()),
+                              daemon=True)
+        th.start()
+        return True
+
+    @classmethod
+    def _measure_card_scan_new(cls, key, job_id, pre_max_id, analyze_ids, at):
+        """카드 스캔 신규 측정 (백그라운드 스레드) — 주기 스캔과 동일 방식.
+        collect_append_paths를 재사용한다. 결과는 별도 저장소에 남기고
+        주기 이력은 건드리지 않는다."""
+        try:
+            from . import db_support
+            if not db_support.db_ready():
+                return
+            _files, count = db_support.collect_append_paths(
+                int(key), analyze_ids or [], pre_max_id, None)
+            if count is None:
+                return
+            cls._card_scan_new_save(key, count, at, job_id)
+            logger.info(f'[현황] 카드 스캔 신규 측정: 섹션 {key} 신규 {count}건 (job {job_id})')
+        except Exception as e:
+            logger.warning(f'[현황] 카드 스캔 신규 측정 실패: 섹션 {key} — {e}')
+
     # ---------- rclone RC ----------
     @staticmethod
     def _rc_target(path):
@@ -598,6 +770,13 @@ class ModuleStatus(PluginModuleBase):
                                 mark_trash_counts_stale()
                             except Exception as e:
                                 logger.warning(f'[현황] 휴지통 개수 캐시 오래됨 표시 실패: {e}')
+                            # 카드 스캔 신규 측정 — 주기 스캔과 같은 방식으로 잰다
+                            # (pre_max_id가 있는 카드 스캔만, stats에 new가 없는
+                            # 경우만; 측정은 백그라운드 스레드에서 한다).
+                            try:
+                                self._maybe_measure_card_scan_new(key, scan, job)
+                            except Exception as e:
+                                logger.warning(f'[현황] 카드 스캔 신규 측정 시작 실패: {e}')
                         elif job.get('status') == 'failed':
                             scan['status'] = 'failed'
                             scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -702,6 +881,9 @@ class ModuleStatus(PluginModuleBase):
                     sec['state'] = state
                     sec['last_scan'] = history.get(str(sec['key']))
                     rows.append(sec)
+                # 도서 카드 신규는 주기 스캔 이력 실측값으로 채운다
+                # (shyni 도서 stats에는 신규 키가 없어 last_scan이 비어 있다).
+                self._fill_book_new(rows)
                 periodic_current = None
                 raw_cur = P.ModelSetting.get('periodic_current')
                 if raw_cur:
@@ -748,6 +930,12 @@ class ModuleStatus(PluginModuleBase):
                         sec['state'] = self._refresh_state(sec['key'], self._get_state(sec['key']))
                     except Exception:
                         pass
+                # 신규도 마찬가지 — 캐시를 만든 뒤에 끝난 주기 스캔의 신규가
+                # 다음 주기까지 '-'로 남지 않게 그 자리에서 다시 채운다.
+                try:
+                    self._fill_book_new(rows)
+                except Exception:
+                    pass
             periodic_current = base['periodic_current']
             trash_current = base.get('trash_current')
             db_stats_on = False
@@ -1015,6 +1203,8 @@ class ModuleStatus(PluginModuleBase):
 
             if sub == 'scan':
                 url, token = ShyniBackend.get_config()
+                # 신규 측정 기준점 — 스캔 전송 전에 기록한다 (주기 스캔과 동일 방식).
+                pre_max_id = self._card_scan_pre_max_id()
                 try:
                     res = requests.get(f"{url}/library/sections/{key}/refresh",
                                        headers={'X-Plex-Token': token, 'Accept': 'application/json'},
@@ -1033,6 +1223,8 @@ class ModuleStatus(PluginModuleBase):
                 state['scan'] = {'job': job_id, 'path': sec['path'],
                                  'started_at': now, 'finished_at': None,
                                  'status': 'running' if job_id else 'requested'}
+                if pre_max_id is not None:
+                    state['scan']['pre_max_id'] = pre_max_id
                 self._set_state(key, state)
                 logger.info(f"[현황] 스캔 전송: {sec['title']} job {job_id}")
                 return jsonify({'ret': 'success', 'msg': f"{sec['title']} 스캔을 전송했습니다."})
@@ -1255,6 +1447,8 @@ class ModuleStatus(PluginModuleBase):
                 return
             vfs_path = ((st or {}).get('vfs') or {}).get('path')
             url, token = ShyniBackend.get_config()
+            # 신규 측정 기준점 — 스캔 전송 전에 기록한다 (주기 스캔과 동일 방식).
+            pre_max_id = self._card_scan_pre_max_id()
             try:
                 res = requests.get(f"{url}/library/sections/{key}/refresh",
                                    headers={'X-Plex-Token': token, 'Accept': 'application/json'},
@@ -1276,6 +1470,8 @@ class ModuleStatus(PluginModuleBase):
                           'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                           'finished_at': None,
                           'status': 'running' if job_id else 'requested'}
+            if pre_max_id is not None:
+                st['scan']['pre_max_id'] = pre_max_id
             self._set_state(key, st)
             logger.info(f'[현황] 새로고침 후 스캔 전송: {title} job {job_id}')
         finally:

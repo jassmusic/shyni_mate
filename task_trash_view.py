@@ -9,7 +9,8 @@
 
 상태 공유 키:
 - trash_view_state : {'lib', 'busy', 'progress', 'requested_at', 'started_at',
-                      'finished_at', 'error'}
+                      'finished_at', 'error', 'cancel', 'cancelled'}
+  (cancel: 조회 중 취소 요청, cancelled: 취소로 끝난 계산)
 - trash_view_cache : {'libs': {라이브러리키: {'at', 'data'}}} — 라이브러리별
   캐시를 전부 보관한다 (캐시 1개는 수 KB 수준이라 전부 둬도 부담이 없고,
   그래야 어느 라이브러리를 골라도 캐시로 바로 보여 줄 수 있다).
@@ -167,7 +168,8 @@ def request_view(lib_id, force=False):
         return {'ret': 'fail',
                 'msg': '다른 라이브러리의 조회가 대기 중입니다. 끝난 뒤에 다시 시도해 주세요.',
                 'lib': state.get('lib'), 'requested_at': requested_at}
-    return write_state(lib=lib_id, requested_at=now, progress=0, error=None)
+    return write_state(lib=lib_id, requested_at=now, progress=0, error=None,
+                       cancel=False, cancelled=False)
 
 
 def read_bulk():
@@ -217,6 +219,22 @@ def cancel_bulk():
     return {'ret': 'success'}
 
 
+class _Cancelled(Exception):
+    """조회 취소 — 진행률 콜백이 계산을 멈출 때 쓴다."""
+
+
+def cancel_query():
+    """한 라이브러리 조회 취소 — 계산 중이면 진행률 콜백이 멈추게 하고,
+    접수만 된 상태면 워커가 시작할 때 계산하지 않고 중단 상태로 끝낸다.
+    취소해도 기존 캐시는 건드리지 않는다 (화면은 기존 데이터를 쓴다)."""
+    state = read_state()
+    busy = state.get('busy')
+    pending = (state.get('requested_at') or 0) > (state.get('finished_at') or 0)
+    if busy or pending:
+        write_state(cancel=True)
+    return {'ret': 'success'}
+
+
 def page_from_cache(data, page=1, per_page=30, search='', order='old'):
     """계산이 끝난 캐시에서 검색·정렬·페이지를 처리해 돌려준다 (웹에서 실행)."""
     rows = list(data.get('groups') or [])
@@ -251,10 +269,19 @@ def compute_view(lib_id):
     if not lib_id:
         write_state(finished_at=time.time())
         return
+    if read_state().get('cancel'):
+        # 접수만 된 채 취소된 경우 — 계산하지 않고 중단 상태로 끝낸다
+        write_state(busy=False, progress=0, finished_at=time.time(),
+                    cancel=False, cancelled=True, error=None)
+        logger.info(f'[Trash] 휴지통 조회 취소됨(시작 전): 라이브러리 {lib_id}')
+        return
     t0 = time.time()
-    write_state(busy=True, progress=2, started_at=t0, error=None)
+    write_state(busy=True, progress=2, started_at=t0, error=None,
+                cancelled=False)
     try:
         def cb(pct):
+            if read_state().get('cancel'):
+                raise _Cancelled()
             write_state(progress=max(2, min(98, int(pct))))
         data = db_support.trash_compute(lib_id, progress_cb=cb)
         if not write_cache(lib_id, data):
@@ -275,6 +302,12 @@ def compute_view(lib_id):
         logger.info(f"[Trash] 휴지통 조회 계산 완료 (워커): 라이브러리 {lib_id}, "
                     f"파일 {data['summary']['files']}개 · "
                     f"{round(time.time() - t0, 2)}초")
+    except _Cancelled:
+        # 취소됨 — 캐시는 건드리지 않고(기존 데이터 유지) 중단 상태로 끝낸다.
+        # 진행 중이던 단계의 DB 읽기는 콜백까지 마치고 멈춘다.
+        write_state(busy=False, progress=0, finished_at=time.time(),
+                    cancel=False, cancelled=True, error=None)
+        logger.info(f'[Trash] 휴지통 조회 취소됨: 라이브러리 {lib_id}')
     except Exception as e:
         logger.warning(f'[Trash] 휴지통 조회 계산 실패(워커): {e}')
         write_state(busy=False, progress=0, finished_at=time.time(),

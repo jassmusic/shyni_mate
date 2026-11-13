@@ -261,6 +261,9 @@ class ModuleScan(PluginModuleBase):
         elif command == 'trash_query_all_cancel':
             from .task_trash_view import cancel_bulk
             cancel_bulk()
+        elif command == 'trash_query_cancel':
+            from .task_trash_view import cancel_query
+            cancel_query()
         elif command == 'trash_state':
             from .task_trash_view import cache_libs, cache_times, read_state, read_bulk
             ret['data'] = {'state': read_state(),

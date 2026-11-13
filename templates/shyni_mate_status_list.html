@@ -573,7 +573,7 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
     // 3줄: 스캔 기록(파일수·신규·missing) — 기록이 없으면 안내 문구만
     str += '<div style="font-size:13px; margin-top:7px; display:flex; flex-wrap:wrap; gap:6px 22px">';
     if (ls && ls.result == 'done') {
-      str += '<span>파일수 <strong>' + fmtNum(ls.total) + '</strong></span>';
+      str += '<span>' + (s.type === 'book' ? '처리' : '파일수') + ' <strong>' + fmtNum(ls.total) + '</strong></span>';
       str += '<span>신규 <strong>' + fmtNum(ls.new) + '</strong></span>';
       str += '<span>missing <strong>' + fmtNum(ls.missing) + '</strong></span>';
     } else {

@@ -133,6 +133,69 @@ class ModelPeriodicItem(ModelBase):
             return out
 
     @classmethod
+    def latest_stat_new_map(cls, section_keys):
+        """라이브러리별 가장 최근 주기 스캔 이력의 신규 수.
+
+        stat_new가 NULL이 아닌 가장 최신 행(id 내림차순 첫 행)의 값을
+        {섹션 key(str): stat_new} 로 돌려준다. 그런 행이 없는 라이브러리는
+        맵에 들어가지 않는다. 0도 값이다(NULL과 다르다 — 실측된 0건).
+        도서 카드 신규 채우기용 — 도서 stats에는 신규 키가 없어
+        last_scan의 신규가 비어 있기 때문이다.
+        """
+        keys = [str(k) for k in (section_keys or [])]
+        if not keys:
+            return {}
+        with F.app.app_context():
+            try:
+                rows = (F.db.session.query(cls.section_key, cls.stat_new)
+                        .filter(cls.section_key.in_(keys),
+                                cls.stat_new.isnot(None))
+                        .order_by(desc(cls.id)).all())
+            except Exception as e:
+                logger.error(f'주기 스캔 신규 조회 실패: {e}')
+                return {}
+        out = {}
+        for sec_key, stat_new in rows:
+            if str(sec_key) not in out:
+                out[str(sec_key)] = stat_new
+        return out
+
+    @classmethod
+    def latest_stat_new_time_map(cls, section_keys):
+        """라이브러리별 가장 최근 주기 스캔 이력의 신규 수와 그 시각.
+
+        latest_stat_new_map과 같은 행(가장 최신 non-NULL stat_new 행)을
+        {섹션 key(str): {'new': stat_new, 'at': epoch(float)}} 로 돌려준다.
+        시각은 완료 시각(finish_time, 없으면 시작 시각)이다. 카드 스캔
+        측정값과 어느 쪽이 더 최신인지 비교하는 용도다.
+        """
+        keys = [str(k) for k in (section_keys or [])]
+        if not keys:
+            return {}
+        with F.app.app_context():
+            try:
+                rows = (F.db.session.query(cls.section_key, cls.stat_new,
+                                           cls.finish_time, cls.start_time)
+                        .filter(cls.section_key.in_(keys),
+                                cls.stat_new.isnot(None))
+                        .order_by(desc(cls.id)).all())
+            except Exception as e:
+                logger.error(f'주기 스캔 신규 조회 실패: {e}')
+                return {}
+        out = {}
+        for sec_key, stat_new, finish_time, start_time in rows:
+            k = str(sec_key)
+            if k in out:
+                continue
+            ts = finish_time or start_time
+            try:
+                at = ts.timestamp() if ts is not None else 0
+            except Exception:
+                at = 0
+            out[k] = {'new': stat_new, 'at': at}
+        return out
+
+    @classmethod
     def get_page(cls, page=1, per=30, section_key=None, only_append=False, search=None):
         with F.app.app_context():
             query = F.db.session.query(cls)

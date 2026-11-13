@@ -258,6 +258,36 @@ def library_stats(trash_map=None, progress_cb=None):
         conn.close()
 
 
+def book_file_count(section_key):
+    """도서 라이브러리 1개의 파일 수(media_parts)를 센다.
+
+    도서 스캔 결과의 '전체' 실측값용 — library_stats() 전수 집계
+    대신 해당 라이브러리만 세는 단건 쿼리다. library_stats()의
+    도서 '파일' 행과 같은 기준(타입 102 항목의 media_parts, 휴지통
+    포함)이라 대시보드 카드 4줄 숫자와 일치한다.
+    조회에 실패하면 None을 돌려준다 (그 경우 entries 델타를 쓴다)."""
+    try:
+        conn = connect(timeout=10)
+    except Exception as e:
+        logger.warning(f'도서 파일 수 조회 실패 (연결): {e}')
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT count(*)
+            FROM media_parts mp
+            JOIN metadata_items mi ON mi.id = mp.metadata_item_id
+            WHERE mi.library_id = %s AND mi.metadata_type = 102
+        """, (int(section_key),))
+        row = cur.fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception as e:
+        logger.warning(f'도서 파일 수 조회 실패: {e}')
+        return None
+    finally:
+        conn.close()
+
+
 def dashboard_stats(libs=None):
     """건강도용 종합 집계 — 라이브러리 종류별 작품 기준 합계.
 
@@ -860,21 +890,23 @@ def collect_append_paths(library_id, metadata_item_ids, max_id_before, stat_new,
             stat_new = 0
         if stat_new <= 0:
             return [], 0
-    # 1차: 이 job이 분석한 항목 id로 경로를 바로 구한다
+    # 1차: 스캔 시작 전 기준 id보다 나중에 생긴 파일 — 실제로 추가된 파일이다
+    if max_id_before is not None:
+        count = count_parts_newer_than(max_id_before, library_id)
+        if count <= 0:
+            return [], 0
+        return (limit_append_files(paths_newer_than(max_id_before, library_id, limit),
+                                   limit),
+                count)
+    # 2차: 기준 id가 없을 때만 이 job이 분석한 항목 id로 경로를 구한다.
+    # 분석은 기존 항목도 다시 할 수 있어(앞선 스캔이 끝나지 못하고 분석을
+    # 못 받은 경우 등) 추가와 다를 수 있으니, 기준이 있을 때는 쓰지 않는다.
     ids = [i for i in (metadata_item_ids or []) if i is not None]
     if ids:
         paths = paths_by_metadata_item_ids(ids, library_id=library_id)
         if paths:
             return limit_append_files(paths, limit), len(paths)
-    # 2차: 1차가 비어 있으면 스캔 시작 전 기준 id보다 큰 행을 읽는다
-    if max_id_before is None:
-        return None, None
-    count = count_parts_newer_than(max_id_before, library_id)
-    if count <= 0:
-        return [], 0
-    return (limit_append_files(paths_newer_than(max_id_before, library_id, limit),
-                               limit),
-            count)
+    return None, None
 
 
 def group_append_paths(paths):

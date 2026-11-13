@@ -15,6 +15,12 @@ logger = P.logger
 CURRENT_KEY = 'periodic_current'
 CANCEL_KEY = 'periodic_cancel'
 JOBS_KEY = 'periodic_jobs'
+# 가장 최근 시작 실패 — 작업 관리 배너가 읽는다. '지금 실행'을 눌렀는데
+# 아무것도 시작되지 않은 경우(진행 중·목록 조회 실패 등)는 이력 행이
+# 생기기 전에 끝나므로, 로그에만 남던 사유를 여기에 남긴다.
+START_ERROR_KEY = 'periodic_last_start_error'
+# 시작 실패 기록 보관 기한(초) — 이보다 오래된 오류는 배너에 띄우지 않는다.
+START_ERROR_MAX_AGE_SEC = 3600
 
 STAGE_LABEL = {'vfs': 'VFS 새로고침', 'scan': '스캔'}
 
@@ -71,6 +77,64 @@ def _stat_first(stats, *keys):
         if v is not None:
             return v
     return None
+
+
+def _is_book_stats(stats):
+    """도서 스캐너 stats인지 여부 — total이 없고 entries가 있다.
+    도서 스캐너는 total/new/missing 대신 entries/missing_files
+    키를 쓴다. 순수 함수(하니스 검증용)."""
+    if not isinstance(stats, dict):
+        return False
+    return (_stat_int(stats.get('total')) is None
+            and _stat_int(stats.get('entries')) is not None)
+
+
+def book_relay_total(stats, section_key):
+    """도서 스캔이면 Relay DB에서 실측 파일 수를 읽는다.
+
+    도서 stats의 entries는 라이브러리 총수가 아니라 이번 스캔
+    처리 수(델타)라, '전체'에는 Relay 실측 파일 수를 쓴다.
+    도서가 아니거나 Relay가 꺼져 있거나 조회에 실패하면 None을
+    돌려준다 (그 경우 entries를 '처리' 라벨로 표시한다)."""
+    if not _is_book_stats(stats):
+        return None
+    try:
+        from . import db_support
+        if not db_support.db_ready():
+            return None
+        return db_support.book_file_count(int(section_key))
+    except Exception as e:
+        logger.warning(f'[스캔 결과] 도서 실측 파일 수 조회 실패: {e}')
+        return None
+
+
+def annotate_total_labels(rows):
+    """이력 행 dict 목록에 'total_label'을 붙인다.
+
+    도서 라이브러리인데 Relay가 꺼져 있으면 stat_total이 entries
+    델타라 '처리', 그 외는 '전체'다. 종류는 섹션 목록 캐시에서
+    읽는다 — 이력 조회 때 shyni를 새로 물으면 느려질 수 있어
+    캐시(_sections_cache_read)만 보고, 캐시가 없으면 '전체'로 둔다.
+    Relay 상태는 지금 시점 값이다 — 스캔 당시와 다르면 라벨이
+    어긋날 수 있지만, 출처를 구분하는 컬럼은 두지 않기로 했다
+    (마이그레이션 없음 원칙)."""
+    if not rows:
+        return rows
+    try:
+        cached, _ts = ModuleStatus._sections_cache_read()
+        types = {str(s.get('key')): (s.get('type') or '')
+                 for s in (cached or [])}
+    except Exception:
+        types = {}
+    try:
+        from . import db_support
+        relay_on = db_support.db_ready()
+    except Exception:
+        relay_on = False
+    for r in rows:
+        is_book = types.get(str(r.get('section_key'))) == 'book'
+        r['total_label'] = '처리' if (is_book and not relay_on) else '전체'
+    return rows
 
 
 def _extract_job_id(res):
@@ -134,9 +198,12 @@ def _now_text():
 
 
 def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
-                      pre_max_id, section_key, label='주기적 스캔'):
+                      pre_max_id, section_key, label='주기적 스캔',
+                      relay_total=None):
     """완료된 스캔의 job stats와 추가 파일 목록을 이력 행에 채운다.
-    저장은 호출처의 finish()가 한다. 주기적 스캔·휴지통 작업이 함께 쓴다."""
+    저장은 호출처의 finish()가 한다. 주기적 스캔·휴지통 작업이 함께 쓴다.
+    도서 스캔이면 relay_total(Relay 실측 파일 수)이 있을 때 stat_total을
+    그 값으로 덮어쓴다. relay_total을 안 주면 여기서 직접 읽어본다."""
     item.shyni_job_id = job_id
     item.vfs_duration = vfs_duration
     item.scan_duration = scan_duration
@@ -146,6 +213,13 @@ def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
     # 키를 쓴다. 신규에 대응하는 키는 stats에 없어서 None으로 둔다
     # (아래에서 추가 파일 비교 수로 채운다).
     item.stat_total = _stat_first(stats, 'total', 'entries')
+    # 도서 '전체'는 entries(이번 스캔 처리 수)가 아니라 Relay 실측
+    # 파일 수다. 호출처가 미리 읽은 값이 없으면 여기서 읽어본다.
+    # 도서가 아니면 relay_total이 와도 무시한다 (호출처 실수 대비).
+    if relay_total is None:
+        relay_total = book_relay_total(stats, section_key)
+    if relay_total is not None and _is_book_stats(stats):
+        item.stat_total = relay_total
     item.stat_new = _stat_int(stats.get('new'))
     item.stat_missing = _stat_first(stats, 'missing', 'missing_files')
     item.stat_updated = _stat_int(stats.get('updated'))
@@ -178,8 +252,11 @@ def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
         logger.warning(f'[{label}] 추가 파일 목록 수집 실패: {e}')
 
 
-def scan_summary_text(stats):
-    """대시보드 최근 작업 줄에 붙일 요약 — '신규 N · 전체 N'."""
+def scan_summary_text(stats, relay_total=None):
+    """대시보드 최근 작업 줄에 붙일 요약 — '신규 N · 전체 N'.
+    도서 스캔은 stats에 total이 없고 entries(이번 스캔 처리 수)만
+    있다. Relay 실측값(relay_total)을 주면 '전체 N'으로, 없으면
+    '처리 N'으로 표시한다. 도서가 아니면 relay_total을 무시한다."""
     if not isinstance(stats, dict):
         return None
     new = _stat_int(stats.get('new'))
@@ -190,7 +267,13 @@ def scan_summary_text(stats):
     if new is not None:
         parts.append(f'신규 {new}')
     if total is not None:
-        parts.append(f'전체 {total}')
+        if _is_book_stats(stats):
+            if relay_total is not None:
+                parts.append(f'전체 {relay_total}')
+            else:
+                parts.append(f'처리 {total}')
+        else:
+            parts.append(f'전체 {total}')
     return ' · '.join(parts)
 
 
@@ -226,6 +309,60 @@ def _set_current(cur):
         P.ModelSetting.set(CURRENT_KEY, '')
     else:
         P.ModelSetting.set(CURRENT_KEY, json.dumps(cur, ensure_ascii=False))
+
+
+def _record_start_error(job_name, reason):
+    """시작 실패를 기록한다 — 작업 관리 배너가 읽는다.
+    기록 실패가 실행을 막지 않게 예외를 삼킨다."""
+    try:
+        P.ModelSetting.set(START_ERROR_KEY, json.dumps(
+            {'at': time.time(), 'job_name': job_name or '',
+             'reason': str(reason or '')[:500]},
+            ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f'[주기적 스캔] 시작 오류 기록 실패: {e}')
+
+
+def _clear_start_error():
+    try:
+        P.ModelSetting.set(START_ERROR_KEY, '')
+    except Exception:
+        pass
+
+
+def clear_start_error():
+    """시작 오류 기록을 지운다 (배너 닫기용)."""
+    _clear_start_error()
+
+
+def get_last_start_error(max_age_sec=START_ERROR_MAX_AGE_SEC):
+    """가장 최근 시작 오류 — 없거나 깨졌거나 오래됐으면 None."""
+    raw = P.ModelSetting.get(START_ERROR_KEY)
+    if not raw:
+        return None
+    try:
+        err = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(err, dict):
+        return None
+    at = err.get('at')
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return None
+    if time.time() - at > max_age_sec:
+        return None
+    return err
+
+
+def fail_start(job_name, mode, reason):
+    """작업 단위 시작 실패 — 이력 행을 남기고 배너용 오류를 기록한다.
+    이력 행 저장이 실패해도 배너 기록은 시도한다."""
+    try:
+        item = ModelPeriodicItem(job_name, '', '전체', mode)
+        item.finish('failed', reason)
+    except Exception as e:
+        logger.error(f'[주기적 스캔] 시작 실패 이력 기록 실패: {e}')
+    _record_start_error(job_name, reason)
 
 
 def _cancel_requested():
@@ -265,23 +402,44 @@ class TaskPeriodic:
                 logger.error(f'주기적 스캔 실행 실패: {e}')
                 logger.error(traceback.format_exc())
                 _set_current(None)
+                try:
+                    jobs = get_jobs()
+                    job = jobs[idx] if 0 <= idx < len(jobs) else None
+                except Exception:
+                    job = None
+                if job is not None:
+                    fail_start(job.get('name') or f'작업 {idx + 1}',
+                               mode, f'실행 중 오류가 발생했습니다: {e}')
 
     @staticmethod
     def _run(idx, mode):
         jobs = get_jobs()
         if idx < 0 or idx >= len(jobs):
             logger.error(f'주기적 스캔: 잘못된 작업 번호 {idx}')
+            _record_start_error('', f'잘못된 작업 번호라 시작하지 못했습니다: {idx}')
             return
         job = jobs[idx]
+        job_name = job.get('name') or ''
         if get_current() is not None:
             logger.warning('주기적 스캔: 이미 진행 중인 작업이 있어 시작하지 않습니다.')
+            fail_start(job_name, mode, '이미 진행 중인 주기적 스캔이 있어 시작하지 못했습니다.')
             return
         P.ModelSetting.set(CANCEL_KEY, '')
         sections, err = ModuleStatus._sections()
         if err:
             logger.error(f'주기적 스캔: 섹션 조회 실패 — {err}')
+            fail_start(job_name, mode, err)
             return
         sec_map = {str(s['key']): s for s in sections}
+        if not (job.get('sections') or []):
+            fail_start(job_name, mode, '선택한 라이브러리가 없어 시작하지 못했습니다.')
+            return
+        if not any(str(k) in sec_map for k in (job.get('sections') or [])):
+            fail_start(job_name, mode,
+                       '선택한 라이브러리를 shyni에서 찾지 못했습니다. '
+                       '라이브러리가 삭제됐거나 이름이 바뀌었는지 확인해 주세요.')
+            return
+        _clear_start_error()
         any_scan_done = False
         job_started = _now_text()
         logger.info(f"주기적 스캔 시작: {job.get('name')} ({mode})")
@@ -460,7 +618,8 @@ class TaskPeriodic:
             scan_duration = sres['duration']
             job_id = sres.get('job_id')
             stats = sres.get('stats')
-            summary = scan_summary_text(stats)
+            relay_total = book_relay_total(stats, key)
+            summary = scan_summary_text(stats, relay_total)
             scan_entry = {
                 'job': job_id, 'path': sec.get('path', ''),
                 'started_at': scan_started, 'finished_at': _now_text(),
@@ -472,12 +631,14 @@ class TaskPeriodic:
             _write_status(key, 'scan', scan_entry)
             if sres['status'] == 'cancelled':
                 apply_scan_result(item, job_id, stats, vfs_duration,
-                                  scan_duration, pre_max_id, key)
+                                  scan_duration, pre_max_id, key,
+                                  relay_total=relay_total)
                 item.finish('cancelled', sres['message'])
                 return False
             if sres['status'] == 'done':
                 apply_scan_result(item, job_id, stats, vfs_duration,
-                                  scan_duration, pre_max_id, key)
+                                  scan_duration, pre_max_id, key,
+                                  relay_total=relay_total)
                 msg = sres['message']
                 if summary:
                     msg = f'{msg} ({summary})'
@@ -496,7 +657,8 @@ class TaskPeriodic:
                     logger.warning(f'[주기적 스캔] 휴지통 개수 캐시 표시 실패: {e}')
                 return True
             apply_scan_result(item, job_id, stats, vfs_duration,
-                              scan_duration, pre_max_id, key)
+                              scan_duration, pre_max_id, key,
+                              relay_total=relay_total)
             item.finish('failed', sres['message'])
             return False
         except Exception as e:
@@ -725,7 +887,8 @@ class TaskPeriodic:
                 scan_duration = max(0, total - (item.vfs_duration or 0))
         except Exception:
             pass
-        summary = scan_summary_text(stats)
+        relay_total = book_relay_total(stats, key)
+        summary = scan_summary_text(stats, relay_total)
         # 대시보드 스캔 슬롯을 마무리한다 — 시작 시각은 원래 값을 유지한다.
         try:
             st = ModuleStatus._get_state(int(key))
@@ -747,14 +910,14 @@ class TaskPeriodic:
         if res['status'] == 'cancelled':
             apply_scan_result(item, job_id, stats, item.vfs_duration,
                               scan_duration, pre_max_id, key,
-                              label='주기적 스캔 복구')
+                              label='주기적 스캔 복구', relay_total=relay_total)
             item.finish('cancelled', res['message'])
             _clear_resume_current(item_id)
             return
         if res['status'] == 'done':
             apply_scan_result(item, job_id, stats, item.vfs_duration,
                               scan_duration, pre_max_id, key,
-                              label='주기적 스캔 복구')
+                              label='주기적 스캔 복구', relay_total=relay_total)
             msg = res['message']
             if summary:
                 msg = f'{msg} ({summary})'
@@ -779,7 +942,7 @@ class TaskPeriodic:
             return
         apply_scan_result(item, job_id, stats, item.vfs_duration,
                           scan_duration, pre_max_id, key,
-                          label='주기적 스캔 복구')
+                          label='주기적 스캔 복구', relay_total=relay_total)
         item.finish('failed', res['message'])
         _clear_resume_current(item_id)
 
