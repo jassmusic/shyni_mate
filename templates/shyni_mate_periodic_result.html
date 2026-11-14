@@ -213,10 +213,11 @@ function renderDetail(d) {
   }
   str += '<div><strong>소요</strong> — ' + steps.join(' · ') + '</div>';
   // 작업 단위 행(대기 행·시작 실패 행)은 라이브러리별 결과가 없다 —
-  // 집계·폴더·추가 파일 대신 아래 행을 보라는 안내만 보여준다.
+  // 집계·폴더·추가 파일 대신 위 행을 보라는 안내만 보여준다.
+  // (목록은 최신순이라 라이브러리별 행이 작업 단위 행보다 위에 있다.)
   var isJobRow = !d.section_key;
   if (isJobRow) {
-    str += '<div style="color:#888">라이브러리별 결과는 같은 작업명의 아래 행에서 확인해 주세요.</div>';
+    str += '<div style="color:#888">라이브러리별 결과는 같은 작업명의 위 행에서 확인해 주세요.</div>';
   } else {
   // 집계 한 줄 (0인 항목은 빼고 간결하게)
   var hasStats = d.stat_total != null || d.stat_new != null || d.stat_missing != null ||
@@ -237,8 +238,12 @@ function renderDetail(d) {
     str += '<div><strong>집계</strong> — ' + aggTxt + '</div>';
   } else if (d.status == 'running') {
     str += '<div style="color:#888">스캔이 끝나면 집계가 표시됩니다.</div>';
+  } else if (d.scan_duration == null) {
+    // 스캔이 실행되지 않은 행(새로고침만 하는 작업·건너뛴 섹션)은 집계가
+    // 있을 수 없다. 결과 저장 전에 기록된 옛 행도 scan_duration이 비어 있다.
+    str += '<div style="color:#888">집계가 없습니다. (스캔이 실행되지 않았거나, 이 실행은 결과 저장이 되기 전에 기록됐습니다.)</div>';
   } else {
-    str += '<div style="color:#888">집계가 없습니다. (이 실행은 결과 저장이 되기 전에 기록됐습니다.)</div>';
+    str += '<div style="color:#888">집계가 없습니다.</div>';
   }
   if (d.shyni_job_id) str += '<div style="color:#888">shyni 작업 번호 ' + esc(d.shyni_job_id) + '</div>';
   // 폴더별 결과
@@ -251,10 +256,17 @@ function renderDetail(d) {
   // 추가 파일 목록 — 앨범(폴더) 단위 묶음
   str += '<div style="margin-top:6px"><strong>추가된 파일</strong> ';
   // Relay가 꺼져 있으면 목록이 저장되지 않으니 실행 중에도 Relay 문구를 보여준다.
+  // 단, 스캔이 실행되지 않은 행은 Relay와 무관하게 목록이 없으니 Relay 문구
+  // 대신 그 사유를 보여준다 (끝난 행에만 적용 — 실행 중에는 스캔이 아직
+  // 안 끝났을 수 있다).
   if (d.status == 'running' && d.db_ready !== false) {
     str += '<span style="color:#888">스캔이 끝나면 목록이 표시됩니다.</span>';
   } else if (d.append_total == null) {
-    str += '<span style="color:#888">파일 목록을 볼 수 없습니다. Relay가 꺼져 있으면 목록은 저장되지 않습니다.</span>';
+    if (d.status != 'running' && d.scan_duration == null) {
+      str += '<span style="color:#888">없습니다. (스캔이 실행되지 않았거나, 이 실행은 결과 저장이 되기 전에 기록됐습니다.)</span>';
+    } else {
+      str += '<span style="color:#888">파일 목록을 볼 수 없습니다. Relay가 꺼져 있으면 목록은 저장되지 않습니다.</span>';
+    }
   } else if (!d.append_total) {
     str += '<span style="color:#888">없습니다.</span>';
   } else {

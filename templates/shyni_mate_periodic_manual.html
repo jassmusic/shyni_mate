@@ -29,7 +29,37 @@
   </div>
   <div class="row show-grid">
     <span class="col-md-12" style="font-size:13.5px">
-      주기적 스캔의 진행 중 표시 정리 시간과 실행 이력 보관 기간을 정합니다.
+      주기적 스캔의 최대 대기 시간, 진행 중 표시 정리 시간과 실행 이력 보관 기간을 정합니다.
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
+      작업이 겹치면 기다립니다
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13.5px">
+      주기적 스캔 작업은 한 번에 하나만 실행됩니다. 정해진 시각에 앞선 작업이 아직 돌고 있으면 실패하지 않고, 그 작업이 끝날 때까지 기다렸다가 이어서 실행합니다. 기다리는 동안 스캔 결과에는 '대기 중' 행이 생기고 앞선 작업 이름과 기다린 시간이 표시됩니다. 같은 작업이 이미 돌거나 기다리고 있으면 중복으로 실행하지 않습니다. 최대 대기 시간은 설정에서 정합니다. 기본값은 360분(6시간)이고, 0으로 두면 기다리지 않고 예전처럼 바로 실패로 끝납니다.
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
+      휴지통 작업과는 따로 돕니다
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13.5px">
+      주기적 스캔과 휴지통 작업은 줄이 따로입니다. 주기적 스캔이 도는 중에도 휴지통 작업은 기다리지 않고 바로 시작하고, 반대도 마찬가지입니다. 다만 같은 라이브러리는 두 작업이 동시에 건드리지 않습니다. 휴지통 작업 중인 라이브러리는 주기적 스캔에서 건너뛰고 다음 라이브러리로 넘어갑니다.
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
+      지금 실행은 기다리지 않습니다
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:13.5px">
+      '지금 실행'은 수동 실행이라 기다림 없이 바로 시작하거나 바로 거절됩니다. 주기적 스캔이 하나라도 도는 중에 누르면 "이미 진행 중인 주기적 스캔이 있습니다."라는 안내와 함께 거절되고, 대기 줄에 들어가지 않습니다. 돌고 있는 작업 행의 버튼은 [취소]로 바뀌어 있으니, 멈추려면 취소를 눌러 주세요.
     </span>
   </div>
   <div class="row show-grid">
