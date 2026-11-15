@@ -57,6 +57,8 @@ class ModuleTrash(PluginModuleBase):
                         ('append_files', 'TEXT'), ('append_count', 'INTEGER'),
                         ('stat_folders', 'TEXT'), ('emptied_count', 'INTEGER'),
                         ('emptied_files', 'TEXT'),
+                        ('target_files', 'TEXT'), ('restored_files', 'TEXT'),
+                        ('vfs_results', 'TEXT'),
                         ('wait_seconds', 'INTEGER'),
                     ]
                     added = [c for c, _ in new_cols if c not in cols]
@@ -294,6 +296,11 @@ class ModuleTrash(PluginModuleBase):
             data = ModelTrashItem.get_page(
                 page, section_key=section, only_append=only_append, search=search)
             annotate_total_labels(data.get('list') or [])
+            # 대상 목록이 있는 행(재설계 후 실행)은 stat_total이 대상
+            # 휴지통 파일 수 실측값이라 도서여도 '전체'로 본다.
+            for row in data.get('list') or []:
+                if row.get('has_target_files'):
+                    row['total_label'] = '전체'
             return jsonify({'ret': 'success', 'data': data})
         if sub == 'history_detail':
             try:
@@ -304,6 +311,8 @@ class ModuleTrash(PluginModuleBase):
             if data is None:
                 return jsonify({'ret': 'fail', 'msg': '이력을 찾지 못했습니다.'})
             annotate_total_labels([data])
+            if data.get('has_target_files'):
+                data['total_label'] = '전체'
             return jsonify({'ret': 'success', 'data': data})
         return jsonify({'ret': 'fail', 'msg': '알 수 없는 요청입니다.'})
 

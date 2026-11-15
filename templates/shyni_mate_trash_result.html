@@ -258,6 +258,54 @@ function renderDetail(d) {
     for (var i = 0; i < folders.length; i++) str += '<li>' + folderStatLine(folders[i]) + '</li>';
     str += '</ul></div>';
   }
+  // 대상 파일 목록 — 실행 전 휴지통 파일. 폴더 단위 묶음에 폴더별
+  // VFS 새로고침 결과를 함께 보여준다. 목록을 몰랐던 행(비우기만
+  // 실행·옛 행)에는 이 섹션이 없다.
+  if (d.target_total != null) {
+    str += '<div style="margin-top:6px"><strong>대상 파일</strong> ';
+    if (!d.target_total) {
+      str += '<span style="color:#888">없습니다.</span>';
+    } else {
+      str += '<span style="color:#888">전체 ' + d.stat_total + '개' + (d.target_truncated ? ' (외 ' + (d.stat_total - d.target_total) + '개 더 있음)' : '') + '</span>';
+      var tgroups = d.target_groups || [];
+      str += '<ul style="margin:2px 0; padding-left:18px">';
+      for (var g = 0; g < tgroups.length; g++) {
+        var grp = tgroups[g];
+        str += '<li><a href="#" class="target-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
+        if (grp.vfs_ok === true) str += ' <span style="color:#2f855a">· VFS OK</span>';
+        else if (grp.vfs_ok === false) str += ' <span style="color:#c0392b">· VFS 실패</span>';
+        str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
+        if (grp.vfs_ok === false && grp.vfs_error) str += '<div style="color:#888; font-size:12px; padding-left:14px">' + esc(grp.vfs_error) + '</div>';
+        str += '<div class="target-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
+        for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
+        str += '</div></li>';
+      }
+      str += '</ul>';
+    }
+    str += '</div>';
+  }
+  // 복원된 파일 목록 — 스캔 전/후 목록 비교로 가려낸 것. 스캔이
+  // 없었거나 스캔 후 목록을 읽지 못한 행에는 이 섹션이 없다.
+  if (d.restored_total != null) {
+    str += '<div style="margin-top:6px"><strong>복원된 파일</strong> ';
+    if (!d.restored_total) {
+      str += '<span style="color:#888">없습니다.</span>';
+    } else {
+      str += '<span style="color:#888">전체 ' + d.stat_restored + '개' + (d.restored_truncated ? ' (외 ' + (d.stat_restored - d.restored_total) + '개 더 있음)' : '') + '</span>';
+      var rgroups = d.restored_groups || [];
+      str += '<ul style="margin:2px 0; padding-left:18px">';
+      for (var g = 0; g < rgroups.length; g++) {
+        var grp = rgroups[g];
+        str += '<li><a href="#" class="restored-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
+        str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
+        str += '<div class="restored-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
+        for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
+        str += '</div></li>';
+      }
+      str += '</ul>';
+    }
+    str += '</div>';
+  }
   // 비운 파일 목록 — 폴더 단위 묶음. 추가 파일은 휴지통 작업에서
   // 의미가 없어(다시 스캔하면 shyni가 휴지통 항목을 살리지 새로
   // 추가하지 않는다) 빼고, 비운 파일만 보여준다.
@@ -411,6 +459,22 @@ $(document).ready(function () {
     var gidx = $(this).data('gidx');
     var id = $(this).data('id');
     $('.emptied-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
+  });
+
+  $(document).off('click', '.target-group-toggle').on('click', '.target-group-toggle', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var gidx = $(this).data('gidx');
+    var id = $(this).data('id');
+    $('.target-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
+  });
+
+  $(document).off('click', '.restored-group-toggle').on('click', '.restored-group-toggle', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var gidx = $(this).data('gidx');
+    var id = $(this).data('id');
+    $('.restored-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
   });
 
   // 누락이 있으면 휴지통으로 — 대시보드 '휴지통 상세'와 같은 이동 방식이다.

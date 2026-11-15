@@ -10,8 +10,7 @@ from .setup import *
 from .shyni_backend import ShyniBackend
 from .task_periodic import (WAIT_TIMEOUT_SEC, _extract_job_id,
                             _scan_poll_outcome, _stat_int, _write_status,
-                            apply_scan_result, book_relay_total,
-                            scan_summary_text)
+                            apply_scan_result, scan_summary_text)
 
 logger = P.logger
 
@@ -53,6 +52,78 @@ ACTION_STEPS = {
     'refresh_scan_empty': ['refresh', 'scan', 'empty'],
 }
 STAGE_LABEL = {'refresh': '새로고침 중', 'scan': '스캔 중', 'empty': '비우는 중'}
+
+# 휴지통 파일 목록 저장 상한 (비운 파일과 같은 기준).
+TRASH_FILES_MAX = 1000
+# 폴더별 스캔 job stats 합산 대상 수치 키 — 도서 스캐너의
+# entries/missing_files 키도 함께 합산한다.
+_SCAN_STAT_KEYS = ('total', 'new', 'missing', 'updated', 'restored',
+                   'registered', 'failed', 'entries', 'missing_files')
+
+
+def _sum_scan_stats(stats_list):
+    """폴더별 스캔 job stats 합산 — 순수 함수(하니스 검증용).
+    수치 키는 합산하고(값이 있는 job이 하나도 없으면 키 없음),
+    폴더별 results[]는 이어 붙인다."""
+    merged = {}
+    results = []
+    for stats in stats_list or []:
+        if not isinstance(stats, dict):
+            continue
+        for k in _SCAN_STAT_KEYS:
+            v = _stat_int(stats.get(k))
+            if v is not None:
+                merged[k] = merged.get(k, 0) + v
+        r = stats.get('results')
+        if isinstance(r, list):
+            results.extend(r)
+    if results:
+        merged['results'] = results
+    return merged
+
+
+def _trash_done_message(action, target_count, restored, emptied_count,
+                        vfs_failed, scan_failed, empty_skipped,
+                        folder_count, remaining):
+    """완료 메시지 조립 — 순수 함수(하니스 검증용).
+    숫자는 전부 파일 수. restored가 None이면 복원 여부를 확인하지
+    못한 것이고, emptied_count가 None이면 비운 개수를 job stats에서
+    읽지 못한 것이다 (그 경우 remaining으로 대체한다)."""
+    bits = []
+    if action == 'refresh':
+        bits.append(f'휴지통 파일 {target_count}개 새로고침')
+        if vfs_failed:
+            bits.append(f'VFS {vfs_failed}개 폴더 실패')
+        else:
+            bits.append(f'VFS {folder_count}개 폴더 OK')
+    elif action in ('scan', 'refresh_scan', 'refresh_scan_empty'):
+        bits.append(f'휴지통 파일 {target_count}개 확인')
+        if restored is None:
+            bits.append('복원 확인 불가')
+        elif restored:
+            bits.append(f'복원 {restored}개')
+        else:
+            bits.append('복원 없음')
+        if action == 'refresh_scan_empty':
+            if empty_skipped:
+                bits.append('비우기 생략 — 실패한 폴더 있음')
+            else:
+                emptied = (emptied_count if emptied_count is not None
+                           else remaining)
+                if emptied is not None:
+                    bits.append(f'{emptied}개 비움')
+        if vfs_failed:
+            bits.append(f'VFS {vfs_failed}개 폴더 실패')
+        if scan_failed:
+            bits.append(f'스캔 실패 폴더 {scan_failed}개')
+    elif action == 'empty':
+        emptied = (emptied_count if emptied_count is not None
+                   else target_count)
+        if emptied is not None:
+            bits.append(f'휴지통 파일 {emptied}개 비움')
+    if not bits:
+        return '완료됐습니다.'
+    return '완료됐습니다. (' + ' · '.join(bits) + ')'
 
 
 def _trash_skip_decision(periodic_parse_ok, periodic_section_key,
@@ -393,6 +464,97 @@ def _wait_scan(url, token, job_id, timeout=WAIT_TIMEOUT_SEC):
     return _wait_job(url, token, job_id, timeout=timeout, poll_sec=SCAN_POLL_SEC)
 
 
+def _send_folder_scan(url, token, key, folder, seq):
+    """폴더 경로를 지정한 compat 부분 스캔 전송. job id를 돌려준다.
+    선택 실행(task_trash_selected._do_scan)과 같은 호출 — 휴지통
+    작업은 여기서 전송만 하고 완료는 _wait_scan으로 기다린다."""
+    shyni_path = ShyniBackend.map_path(folder)
+    wait = max(P.ModelSetting.get_int('scan_max_wait_time') or 5, 1) * 60
+    body = {'path': shyni_path, 'mode': 'add', 'wait': wait}
+    res = requests.post(
+        f'{url}/library/sections/{key}/refresh', json=body,
+        headers={'X-Plex-Token': token, 'Accept': 'application/json',
+                 'Idempotency-Key': f'sm-trash-job-{key}-{seq}-'
+                                    f'{int(time.time() * 1000)}'},
+        timeout=ShyniBackend.timeout_sec('send'))
+    res.raise_for_status()
+    job_id = _extract_job_id(res)
+    return str(job_id) if job_id else None
+
+
+def _refresh_folder_vfs(key, folder, name):
+    """폴더 하나 VFS 새로고침.
+    {'result': done|failed|cancelled, 'duration': 초, 'error': 사유}를
+    돌려준다. 라이브러리 전체를 한 번에 새로고침하던 기존 방식과 같은
+    RC 호출을 폴더 단위로 한다. jobid가 안 오면 동기 응답의 result를
+    직접 판정한다 (선택 실행의 _refresh_ok와 같은 기준)."""
+    from .mod_status import ModuleStatus
+    addr, remote = ModuleStatus._rc_target(folder)
+    if not addr:
+        return {'result': 'failed', 'duration': 0,
+                'error': 'VFS 새로고침 규칙과 맞지 않는 경로입니다.'}
+    started = _now_text()
+    _write_status(key, 'vfs', {
+        'job': None, 'path': folder,
+        'started_at': started, 'finished_at': None,
+        'status': 'running', 'source': 'trash',
+        'job_name': name}, label='휴지통 작업')
+    t0 = time.time()
+    try:
+        ret = ModuleStatus._rc(addr, 'vfs/refresh',
+                               {'dir': remote, 'recursive': 'true',
+                                '_async': 'true'})
+    except Exception as e:
+        _write_status(key, 'vfs', {
+            'job': None, 'path': folder,
+            'started_at': started, 'finished_at': _now_text(),
+            'status': 'failed', 'source': 'trash',
+            'job_name': name}, label='휴지통 작업')
+        return {'result': 'failed', 'duration': int(time.time() - t0),
+                'error': str(e)[:200]}
+    jobid = ret.get('jobid') if isinstance(ret, dict) else None
+    if jobid:
+        _write_status(key, 'vfs', {
+            'job': jobid, 'path': folder,
+            'started_at': started, 'finished_at': None,
+            'status': 'running', 'source': 'trash',
+            'job_name': name}, label='휴지통 작업')
+        w = _wait_vfs(addr, jobid)
+        _write_status(key, 'vfs', {
+            'job': jobid, 'path': folder,
+            'started_at': started, 'finished_at': _now_text(),
+            'status': {'done': 'done', 'failed': 'failed',
+                       'cancelled': 'cancelled'}.get(w['result'], 'failed'),
+            'source': 'trash', 'job_name': name}, label='휴지통 작업')
+        if w['result'] == 'done':
+            return {'result': 'done', 'duration': w['duration'], 'error': ''}
+        if w['result'] == 'cancelled':
+            return {'result': 'cancelled', 'duration': w['duration'], 'error': ''}
+        return {'result': 'failed', 'duration': w['duration'],
+                'error': 'VFS 새로고침이 끝나지 않았습니다.'}
+    # jobid 없이 동기 결과가 온 경우 — result 값을 직접 판정한다.
+    result = ret.get('result') if isinstance(ret, dict) else None
+    ok = False
+    error = ''
+    if isinstance(result, dict):
+        if any(str(v).lower() == 'ok' for v in result.values()):
+            ok = True
+        else:
+            vals = [str(v) for v in result.values() if v]
+            error = vals[0][:200] if vals else '새로고침에 실패했습니다.'
+    elif isinstance(ret, dict) and ret.get('error'):
+        error = str(ret['error'])[:200]
+    else:
+        error = '새로고침 응답이 없습니다.'
+    _write_status(key, 'vfs', {
+        'job': None, 'path': folder,
+        'started_at': started, 'finished_at': _now_text(),
+        'status': 'done' if ok else 'failed', 'source': 'trash',
+        'job_name': name}, label='휴지통 작업')
+    return {'result': 'done' if ok else 'failed',
+            'duration': int(time.time() - t0), 'error': error}
+
+
 def _compute_skip_reason(key):
     """이 섹션을 건너뛸 사유 — None이면 진행한다.
     가드 조회에 실패하면 fail-closed로 건너뛴다 (W5).
@@ -425,11 +587,15 @@ def _compute_skip_reason(key):
 class TaskTrash:
     """휴지통 주기 작업 실행 — 선택한 라이브러리를 하나씩 순차로 처리한다.
 
-    동작(새로고침/스캔/비우기 조합)을 단계별로 실행하고, 단계 완료를 확인한
-    뒤 다음 단계로 넘어간다. 진행 상태는 ModelSetting trash_current에 기록해
-    화면이 공유하고, 취소는 trash_cancel 플래그로 요청받는다.
-    완료된 스캔의 집계와 비운 개수는 이력 행에 남기고, 진행 상황은 대시보드
-    섹션 상태(status_sec_N)에도 수동 작업과 같은 모양으로 기록한다.
+    실행 전에 Relay DB에서 휴지통 파일 목록을 읽어, 항목이 없으면
+    건너뛰고 항목이 있을 때만 그 항목의 폴더를 대상으로 새로고침·스캔을
+    수행한다. 비우기는 스캔이 끝난 뒤 섹션 비우기 1회로 수행한다
+    (폴더별 비우기 API는 없다). 새로 없어진 파일을 찾는 전체 스캔은
+    주기적 스캔이 담당한다. 진행 상태는 ModelSetting trash_current에
+    기록해 화면이 공유하고, 취소는 trash_cancel 플래그로 요청받는다.
+    완료된 스캔의 집계와 비운 개수는 이력 행에 남기고, 진행 상황은
+    대시보드 섹션 상태(status_sec_N)에도 수동 작업과 같은 모양으로
+    기록한다.
     """
 
     @F.celery.task
@@ -496,6 +662,8 @@ class TaskTrash:
             return
         action = job.get('action') or 'empty'
         steps = ACTION_STEPS.get(action, ['empty'])
+        if action not in ACTION_STEPS:
+            action = 'empty'
         P.ModelSetting.set(TRASH_CANCEL_KEY, '')
         job_started = _now_text()
         logger.info(f'[휴지통 작업] 시작: {name} ({ACTION_LABEL.get(action, action)}, {mode})')
@@ -568,16 +736,66 @@ class TaskTrash:
             status, message = 'done', ''
             vfs_duration = None
             scan_duration = None
-            scan_job_id = None
-            scan_stats = None
-            relay_total = None
+            scan_job_ids = []
+            scan_stats_list = []
             emptied_count = None
             emptied_files = None
+            # 휴지통 항목 대상 수행 — 실행 전에 목록을 읽어 둔다.
+            # target_files가 None이면 목록을 모른다는 뜻이다.
+            target_files = None
+            target_groups = []
+            restored_files = None
+            restored_count = None
+            remaining_count = None
+            vfs_results = None
+            vfs_failed_folders = 0
+            scan_failed_folders = 0
+            empty_skipped = False
             try:
+                # 실행 전 휴지통 목록 확인 — 0개면 스킵, 모르면 새로고침·
+                # 스캔 포함 동작은 실행하지 않는다. 비우기만은 목록 없이도
+                # 섹션 비우기로 실행한다.
+                from . import db_support
+                list_error = None
+                try:
+                    if db_support.db_ready():
+                        target_files = db_support.trash_file_paths(key)
+                    else:
+                        list_error = 'relay_off'
+                except Exception as e:
+                    logger.warning(f'[휴지통 작업] 휴지통 목록 읽기 실패: {e}')
+                    list_error = 'read_failed'
+                    target_files = None
+                if target_files is None:
+                    if len(steps) == 1 and steps[0] == 'empty':
+                        pass
+                    else:
+                        if list_error == 'relay_off':
+                            skip_msg = '건너뜀 (Relay가 꺼져 있어 휴지통 항목을 확인할 수 없습니다.)'
+                        else:
+                            skip_msg = '건너뜀 (휴지통 항목 확인 실패 — DB를 읽지 못했습니다.)'
+                        item.finish('cancelled', skip_msg)
+                        logger.info(f'[휴지통 작업] {title}: cancelled {skip_msg}')
+                        continue
+                elif not target_files:
+                    item.stat_total = 0
+                    item.target_files = '[]'
+                    item.finish('done', '휴지통 파일이 없어 건너뛰었습니다.')
+                    logger.info(f'[휴지통 작업] {title}: done 휴지통 파일이 없어 건너뜀')
+                    continue
+                else:
+                    target_groups = db_support.group_append_paths(target_files)
                 for step in steps:
                     if _trash_cancel_requested():
                         status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                         break
+                    if step == 'empty' and (vfs_failed_folders or scan_failed_folders):
+                        # 실패한 폴더가 있으면 비우지 않는다 — 재확인
+                        # 못한 항목을 비우면 안 된다.
+                        empty_skipped = True
+                        logger.info(f'[휴지통 작업] 비우기 생략: 실패한 폴더가 있음 '
+                                    f'(VFS {vfs_failed_folders}개 · 스캔 {scan_failed_folders}개)')
+                        continue
                     _set_trash_current({
                         'job_idx': idx, 'job_name': name, 'section_key': key,
                         'section_title': title,
@@ -586,68 +804,90 @@ class TaskTrash:
                         'mode': mode, 'job_row_id': job_row_id})
                     try:
                         if step == 'refresh':
-                            addr, remote = ModuleStatus._rc_target(sec['path'])
-                            if not addr:
-                                status, message = 'failed', 'VFS 새로고침 규칙과 맞지 않는 경로입니다.'
+                            # 폴더별 VFS 새로고침 — 하나가 실패해도
+                            # 나머지는 계속한다. 전부 실패하면 실패로 끝낸다.
+                            vfs_results = {}
+                            vfs_total = 0
+                            for grp in target_groups:
+                                if _trash_cancel_requested():
+                                    status, message = 'cancelled', '취소 요청으로 중단했습니다.'
+                                    break
+                                folder = grp['folder']
+                                w = _refresh_folder_vfs(key, folder, name)
+                                vfs_total += w['duration']
+                                if w['result'] == 'cancelled':
+                                    status, message = 'cancelled', '취소 요청으로 중단했습니다.'
+                                    break
+                                ok = w['result'] == 'done'
+                                vfs_results[folder] = {'ok': ok,
+                                                       'error': w.get('error') or ''}
+                                if not ok:
+                                    vfs_failed_folders += 1
+                                    logger.warning(f'[휴지통 작업] VFS 새로고침 실패: '
+                                                   f'{folder} — {w.get("error")}')
+                            vfs_duration = vfs_total
+                            if status == 'cancelled':
                                 break
-                            refresh_started = _now_text()
-                            _write_status(key, 'vfs', {
-                                'job': None, 'path': sec.get('path', ''),
-                                'started_at': refresh_started, 'finished_at': None,
-                                'status': 'running', 'source': 'trash',
-                                'job_name': name}, label='휴지통 작업')
-                            ret = ModuleStatus._rc(addr, 'vfs/refresh',
-                                                   {'dir': remote, 'recursive': 'true',
-                                                    '_async': 'true'})
-                            vfs_jobid = ret.get('jobid')
-                            if vfs_jobid:
-                                _write_status(key, 'vfs', {
-                                    'job': vfs_jobid, 'path': sec.get('path', ''),
-                                    'started_at': refresh_started, 'finished_at': None,
-                                    'status': 'running', 'source': 'trash',
-                                    'job_name': name}, label='휴지통 작업')
-                            w = _wait_vfs(addr, vfs_jobid)
-                            vfs_duration = w['duration']
-                            _write_status(key, 'vfs', {
-                                'job': vfs_jobid, 'path': sec.get('path', ''),
-                                'started_at': refresh_started, 'finished_at': _now_text(),
-                                'status': {'done': 'done', 'failed': 'failed',
-                                           'cancelled': 'cancelled'}.get(w['result'], 'failed'),
-                                'source': 'trash', 'job_name': name}, label='휴지통 작업')
-                            if w['result'] != 'done':
-                                status = 'cancelled' if w['result'] == 'cancelled' else 'failed'
-                                message = ('취소 요청으로 중단했습니다.' if w['result'] == 'cancelled'
-                                           else 'VFS 새로고침이 끝나지 않았습니다.')
+                            if vfs_failed_folders >= len(target_groups):
+                                status, message = 'failed', f'VFS 새로고침 실패 (폴더 {len(target_groups)}개)'
                                 break
                         elif step == 'scan':
-                            scan_started = _now_text()
-                            _write_status(key, 'scan', {
-                                'job': None, 'path': sec.get('path', ''),
-                                'started_at': scan_started, 'finished_at': None,
-                                'status': 'running', 'source': 'trash',
-                                'job_name': name}, label='휴지통 작업')
-                            res = requests.get(f'{url}/library/sections/{key}/refresh',
-                                               headers={'X-Plex-Token': token,
-                                                        'Accept': 'application/json'},
-                                               timeout=30)
-                            res.raise_for_status()
-                            scan_job_id = _extract_job_id(res)
-                            if scan_job_id:
+                            # 폴더별 부분 스캔 — VFS 새로고침이 실패한
+                            # 폴더는 뺀다. 하나가 실패해도 나머지는 계속
+                            # 하고, job이 끝날 때까지 기다린다 (전송 성공만
+                            # 보고 끝내는 선택 실행과 다르다).
+                            scan_folders = [
+                                g for g in target_groups
+                                if vfs_results is None
+                                or (vfs_results.get(g['folder']) or {}).get('ok')]
+                            scan_total = 0
+                            first_scan_error = ''
+                            for seq, grp in enumerate(scan_folders):
+                                if _trash_cancel_requested():
+                                    status, message = 'cancelled', '취소 요청으로 중단했습니다.'
+                                    break
+                                folder = grp['folder']
+                                scan_started = _now_text()
                                 _write_status(key, 'scan', {
-                                    'job': scan_job_id, 'path': sec.get('path', ''),
+                                    'job': None, 'path': folder,
+                                    'started_at': scan_started, 'finished_at': None,
+                                    'status': 'running', 'source': 'trash',
+                                    'job_name': name}, label='휴지통 작업')
+                                try:
+                                    job_id = _send_folder_scan(url, token, key, folder, seq)
+                                    send_error = ''
+                                except Exception as e:
+                                    job_id = None
+                                    send_error = str(e)[:200]
+                                if job_id is None:
+                                    scan_failed_folders += 1
+                                    if not first_scan_error:
+                                        first_scan_error = (send_error
+                                                            or '스캔 작업 번호를 받지 못했습니다.')
+                                    _write_status(key, 'scan', {
+                                        'job': None, 'path': folder,
+                                        'started_at': scan_started,
+                                        'finished_at': _now_text(),
+                                        'status': 'failed', 'source': 'trash',
+                                        'job_name': name}, label='휴지통 작업')
+                                    logger.warning(f'[휴지통 작업] 폴더 스캔 전송 실패: '
+                                                   f'{folder} — {first_scan_error}')
+                                    continue
+                                scan_job_ids.append(job_id)
+                                _write_status(key, 'scan', {
+                                    'job': job_id, 'path': folder,
                                     'started_at': scan_started, 'finished_at': None,
                                     'status': 'running', 'source': 'trash',
                                     'job_name': name}, label='휴지통 작업')
                                 cur = get_trash_current() or {}
-                                cur['scan_job'] = scan_job_id
+                                cur['scan_job'] = job_id
                                 _set_trash_current(cur)
-                                w = _wait_scan(url, token, scan_job_id)
-                                scan_duration = w['duration']
-                                scan_stats = (w.get('job') or {}).get('stats') or {}
-                                relay_total = book_relay_total(scan_stats, key)
-                                summary = scan_summary_text(scan_stats, relay_total)
+                                w = _wait_scan(url, token, job_id)
+                                scan_total += w['duration']
+                                job_stats = (w.get('job') or {}).get('stats') or {}
+                                summary = scan_summary_text(job_stats)
                                 scan_entry = {
-                                    'job': scan_job_id, 'path': sec.get('path', ''),
+                                    'job': job_id, 'path': folder,
                                     'started_at': scan_started, 'finished_at': _now_text(),
                                     'status': {'done': 'done', 'failed': 'failed',
                                                'cancelled': 'cancelled',
@@ -659,21 +899,36 @@ class TaskTrash:
                                 if w['result'] == 'cancelled':
                                     status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                                     break
-                                if w['result'] == 'not_found':
-                                    status, message = 'failed', '스캔 작업 기록을 찾을 수 없습니다.'
-                                    break
                                 if w['result'] != 'done':
+                                    scan_failed_folders += 1
                                     job_err = ((w.get('job') or {}).get('error') or '')
-                                    status = 'failed'
-                                    message = (f"스캔 실패: {job_err}" if job_err
-                                               else '스캔이 완료되지 않았습니다.')
-                                    break
-                            else:
-                                _write_status(key, 'scan', {
-                                    'job': None, 'path': sec.get('path', ''),
-                                    'started_at': scan_started, 'finished_at': _now_text(),
-                                    'status': 'done', 'source': 'trash',
-                                    'job_name': name}, label='휴지통 작업')
+                                    if not first_scan_error:
+                                        first_scan_error = (job_err[:200] if job_err
+                                                            else '스캔이 완료되지 않았습니다.')
+                                    logger.warning(f'[휴지통 작업] 폴더 스캔 실패: '
+                                                   f'{folder} — {first_scan_error}')
+                                    continue
+                                scan_stats_list.append(job_stats)
+                            scan_duration = scan_total
+                            if status == 'cancelled':
+                                break
+                            if scan_folders and scan_failed_folders >= len(scan_folders):
+                                status, message = 'failed', f'스캔 실패 (폴더 {len(scan_folders)}개)'
+                                break
+                            # 복원 판정 — 같은 실행 안의 스캔 전/후
+                            # 목록 비교. 이력은 판단에 쓰지 않는다.
+                            try:
+                                post_files = db_support.trash_file_paths(key)
+                                post_set = set(post_files or [])
+                                restored_files = [f for f in target_files
+                                                  if f not in post_set]
+                                restored_count = len(restored_files)
+                                remaining_count = len(target_files) - restored_count
+                            except Exception as e:
+                                logger.warning(f'[휴지통 작업] 스캔 후 휴지통 목록 읽기 실패: {e}')
+                                restored_files = None
+                                restored_count = None
+                                remaining_count = None
                         elif step == 'empty':
                             # 비우기 전에 휴지통 파일 목록을 먼저 읽어 둔다 —
                             # 비우고 나면 DB에서 지워져 다시 볼 수 없다.
@@ -781,31 +1036,57 @@ class TaskTrash:
                 logger.error(traceback.format_exc())
                 status, message = 'failed', str(e)
                 TaskTrash._fail_running_status(key, name)
-            # 스캔 단계가 있었다면 집계를 이력에 남긴다 (추가 파일 목록은
-            # 휴지통 작업에서 의미가 없어 수집하지 않는다).
-            if scan_job_id or scan_stats is not None:
-                apply_scan_result(item, scan_job_id, scan_stats, vfs_duration,
+            # 집계 — '전체'는 대상 휴지통 파일 수, 복원은 스캔 전/후
+            # 목록 비교(못 읽었으면 job stats로 대체), 누락은 전체-복원.
+            # 추가 파일 목록은 휴지통 작업에서 의미가 없어 수집하지 않는다.
+            summed_stats = _sum_scan_stats(scan_stats_list)
+            target_count = len(target_files) if target_files is not None else None
+            eff_restored = restored_count
+            if eff_restored is None and scan_job_ids:
+                eff_restored = _stat_int(summed_stats.get('restored'))
+            eff_remaining = remaining_count
+            if (eff_remaining is None and eff_restored is not None
+                    and target_count is not None):
+                eff_remaining = target_count - eff_restored
+            if scan_job_ids or scan_stats_list:
+                synth_stats = {}
+                if target_count is not None:
+                    synth_stats['total'] = target_count
+                if eff_restored is not None:
+                    synth_stats['restored'] = eff_restored
+                if eff_remaining is not None:
+                    synth_stats['missing'] = eff_remaining
+                if summed_stats.get('results'):
+                    synth_stats['results'] = summed_stats['results']
+                job_id_display = scan_job_ids[0]
+                if len(scan_job_ids) > 1:
+                    job_id_display += f' 외 {len(scan_job_ids) - 1}개'
+                apply_scan_result(item, job_id_display, synth_stats, vfs_duration,
                                   scan_duration, None, key,
-                                  label='휴지통 작업', relay_total=relay_total,
-                                  collect_append=False)
+                                  label='휴지통 작업', collect_append=False)
             else:
                 item.vfs_duration = vfs_duration
                 item.scan_duration = scan_duration
+                if target_count is not None:
+                    item.stat_total = target_count
             item.emptied_count = emptied_count
             if emptied_files is not None:
-                item.emptied_files = json.dumps(emptied_files[:1000],
+                item.emptied_files = json.dumps(emptied_files[:TRASH_FILES_MAX],
                                                 ensure_ascii=False)
+            if target_files is not None:
+                item.target_files = json.dumps(target_files[:TRASH_FILES_MAX],
+                                               ensure_ascii=False)
+            if restored_files is not None:
+                item.restored_files = json.dumps(restored_files[:TRASH_FILES_MAX],
+                                                 ensure_ascii=False)
+            if vfs_results is not None:
+                item.vfs_results = json.dumps(vfs_results, ensure_ascii=False)
             if status == 'done':
-                summary = scan_summary_text(scan_stats, relay_total)
-                done_msg = message
-                if not done_msg:
-                    bits = []
-                    if summary:
-                        bits.append(summary)
-                    if emptied_count is not None:
-                        bits.append(f'{emptied_count}개 비움')
-                    done_msg = ('완료됐습니다. (' + ' · '.join(bits) + ')'
-                                if bits else '완료됐습니다.')
+                done_msg = _trash_done_message(
+                    action, target_count, eff_restored, emptied_count,
+                    vfs_failed_folders, scan_failed_folders, empty_skipped,
+                    len(target_groups), eff_remaining)
+                message = done_msg
                 item.finish('done', done_msg)
             else:
                 item.finish(status, message)
