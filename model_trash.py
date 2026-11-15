@@ -43,6 +43,7 @@ class ModelTrashItem(ModelBase):
     append_count = db.Column(db.Integer)   # 추가 파일 전체 수(저장 상한을 넘으면 파일 수보다 크다)
     stat_folders = db.Column(db.Text)      # JSON 배열(job stats의 폴더별 results[])
     emptied_count = db.Column(db.Integer)  # 비우기 단계에서 비운 파일 수
+    emptied_files = db.Column(db.Text)     # JSON 배열(비우기 직전 휴지통 파일 경로, 최대 1,000개)
 
     def save(self):
         # SQLite 잠금이면 재시도한다 (스캔 항목과 같은 DB를 쓴다)
@@ -205,12 +206,31 @@ class ModelTrashItem(ModelBase):
                     groups = db_support.group_append_paths(files)
                 except Exception:
                     groups = []
+            # 비운 파일 목록 — 추가 파일과 같은 묶음 방식이다.
+            try:
+                e_files = json.loads(r.emptied_files) if r.emptied_files else None
+                if e_files is not None and not isinstance(e_files, list):
+                    e_files = None
+            except Exception:
+                e_files = None
+            e_groups = []
+            if e_files:
+                try:
+                    from . import db_support
+                    e_groups = db_support.group_append_paths(e_files)
+                except Exception:
+                    e_groups = []
             out['stat_folders'] = folders
             out['append_groups'] = groups
             out['append_total'] = len(files) if files is not None else None
             out['append_truncated'] = bool(
                 r.append_count is not None and files is not None
                 and len(files) < r.append_count)
+            out['emptied_groups'] = e_groups
+            out['emptied_total'] = len(e_files) if e_files is not None else None
+            out['emptied_truncated'] = bool(
+                r.emptied_count is not None and e_files is not None
+                and len(e_files) < r.emptied_count)
             # 실행 중 목록 문구용 — 목록 저장 게이트(db_ready)와 같은
             # 판정을 함께 내려준다. 읽기 실패 시에는 '끝나면 표시됩니다'
             # 쪽을 기본으로 한다(실행 중 상세는 펼칠 때마다 다시 읽는다).

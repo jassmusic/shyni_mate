@@ -205,11 +205,14 @@ def _now_text():
 
 def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
                       pre_max_id, section_key, label='주기적 스캔',
-                      relay_total=None):
+                      relay_total=None, collect_append=True):
     """완료된 스캔의 job stats와 추가 파일 목록을 이력 행에 채운다.
     저장은 호출처의 finish()가 한다. 주기적 스캔·휴지통 작업이 함께 쓴다.
     도서 스캔이면 relay_total(Relay 실측 파일 수)이 있을 때 stat_total을
-    그 값으로 덮어쓴다. relay_total을 안 주면 여기서 직접 읽어본다."""
+    그 값으로 덮어쓴다. relay_total을 안 주면 여기서 직접 읽어본다.
+    collect_append=False면 추가 파일 목록을 수집하지 않는다 — 휴지통
+    작업은 스캔이 휴지통 항목을 다시 확인하는 용도라 추가 파일이
+    의미가 없다."""
     item.shyni_job_id = job_id
     item.vfs_duration = vfs_duration
     item.scan_duration = scan_duration
@@ -241,7 +244,7 @@ def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
             logger.warning(f'[{label}] 폴더별 결과 저장 실패: {e}')
     try:
         from . import db_support
-        if db_support.db_ready():
+        if collect_append and db_support.db_ready():
             analyze = stats.get('analyze') or {}
             ids = analyze.get('metadata_item_ids') or [] if isinstance(analyze, dict) else []
             files, count = db_support.collect_append_paths(

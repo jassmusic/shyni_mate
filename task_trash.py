@@ -571,8 +571,8 @@ class TaskTrash:
             scan_job_id = None
             scan_stats = None
             relay_total = None
-            pre_max_id = None
             emptied_count = None
+            emptied_files = None
             try:
                 for step in steps:
                     if _trash_cancel_requested():
@@ -620,14 +620,6 @@ class TaskTrash:
                                            else 'VFS 새로고침이 끝나지 않았습니다.')
                                 break
                         elif step == 'scan':
-                            # 스캔 시작 전 MAX(media_parts.id) 기록 —
-                            # 추가 파일 목록 2차 방법용 기준점이다.
-                            try:
-                                from . import db_support
-                                if db_support.db_ready():
-                                    pre_max_id = db_support.parts_max_id()
-                            except Exception as e:
-                                logger.warning(f'[휴지통 작업] 추가 파일 기준점 기록 실패: {e}')
                             scan_started = _now_text()
                             _write_status(key, 'scan', {
                                 'job': None, 'path': sec.get('path', ''),
@@ -683,6 +675,19 @@ class TaskTrash:
                                     'status': 'done', 'source': 'trash',
                                     'job_name': name}, label='휴지통 작업')
                         elif step == 'empty':
+                            # 비우기 전에 휴지통 파일 목록을 먼저 읽어 둔다 —
+                            # 비우고 나면 DB에서 지워져 다시 볼 수 없다.
+                            # 스캔 단계가 있었다면 스캔이 끝난 뒤라, 스캔에서
+                            # 복원된 파일은 빠지고 여전히 없는 것만 남는다.
+                            try:
+                                from . import db_support
+                                if db_support.db_ready():
+                                    emptied_files = db_support.trash_file_paths(key)
+                                else:
+                                    logger.info('[휴지통 작업] Relay가 꺼져 있어 비운 파일 목록을 저장하지 않습니다.')
+                            except Exception as e:
+                                logger.warning(f'[휴지통 작업] 비우기 전 휴지통 목록 읽기 실패: {e}')
+                                emptied_files = None
                             empty_started = _now_text()
                             _write_status(key, 'trash', {
                                 'job': None, 'mode': action,
@@ -776,15 +781,20 @@ class TaskTrash:
                 logger.error(traceback.format_exc())
                 status, message = 'failed', str(e)
                 TaskTrash._fail_running_status(key, name)
-            # 스캔 단계가 있었다면 집계·추가 파일 목록을 이력에 남긴다
+            # 스캔 단계가 있었다면 집계를 이력에 남긴다 (추가 파일 목록은
+            # 휴지통 작업에서 의미가 없어 수집하지 않는다).
             if scan_job_id or scan_stats is not None:
                 apply_scan_result(item, scan_job_id, scan_stats, vfs_duration,
-                                  scan_duration, pre_max_id, key,
-                                  label='휴지통 작업', relay_total=relay_total)
+                                  scan_duration, None, key,
+                                  label='휴지통 작업', relay_total=relay_total,
+                                  collect_append=False)
             else:
                 item.vfs_duration = vfs_duration
                 item.scan_duration = scan_duration
             item.emptied_count = emptied_count
+            if emptied_files is not None:
+                item.emptied_files = json.dumps(emptied_files[:1000],
+                                                ensure_ascii=False)
             if status == 'done':
                 summary = scan_summary_text(scan_stats, relay_total)
                 done_msg = message

@@ -56,6 +56,7 @@ class ModuleTrash(PluginModuleBase):
                         ('vfs_duration', 'INTEGER'), ('scan_duration', 'INTEGER'),
                         ('append_files', 'TEXT'), ('append_count', 'INTEGER'),
                         ('stat_folders', 'TEXT'), ('emptied_count', 'INTEGER'),
+                        ('emptied_files', 'TEXT'),
                         ('wait_seconds', 'INTEGER'),
                     ]
                     added = [c for c, _ in new_cols if c not in cols]

@@ -542,6 +542,28 @@ def _trash_load(library_id, progress_cb=None):
         conn.close()
 
 
+def trash_file_paths(library_id):
+    """휴지통에 있는 파일 경로만 가볍게 읽는다.
+
+    비우기 전에 호출해 비울 파일 목록을 이력에 남기는 용도 — 항목
+    계층(_trash_load의 items 걷기)까지는 필요 없어 경로만 조회한다.
+    비우고 나면 media_parts 행이 지워져 다시 읽을 수 없으므로,
+    반드시 emptyTrash 호출 전에 읽어야 한다. 오래 들어간 것부터
+    (deleted_at 순) 돌려준다. DB를 못 읽으면 예외를 던진다.
+    """
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT file_path FROM media_parts
+            WHERE library_id=%s AND deleted_at IS NOT NULL
+            ORDER BY deleted_at NULLS LAST, file_path
+        """, (int(library_id),))
+        return [r[0] or '' for r in cur.fetchall() if r[0]]
+    finally:
+        conn.close()
+
+
 def _trash_root(item_id, items, main_type):
     """항목에서 작품(main) 단위까지 올라간다. 못 찾으면 자기 자신을 돌려준다."""
     cur = items.get(item_id)

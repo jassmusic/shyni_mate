@@ -38,6 +38,13 @@ class ModuleBase(PluginModuleBase):
 
 
     def plugin_load(self):
+        # mate DB를 WAL 모드로 — 쓰기 몰림 때 웹 읽기가 'database is locked'로
+        # 실패하고 페이지가 버벅거리는 것을 막는다 (저널 모드는 DB 파일에 영구 저장).
+        try:
+            from .extensions import ensure_wal
+            ensure_wal()
+        except Exception:
+            pass
         # DB 드라이버 준비는 플러그인 로드를 막지 않도록 별도 스레드로 한다
         def _prep():
             try:

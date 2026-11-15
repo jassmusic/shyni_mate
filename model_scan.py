@@ -154,10 +154,14 @@ class ModelScanItem(ModelBase):
 
     @classmethod
     def set_status_incompleted_to_ready(cls):
+        # 대량 UPDATE는 fetch 없이 한 번의 SQL로 한다 — fetch는 미완료
+        # 항목 전부를 세션에 올린 뒤 갱신해 쓰기 잠금을 오래 잡고, 그 사이
+        # 웹의 설정 읽기가 'database is locked'로 실패한다 (2026-11-15
+        # 다른 서버 실측). 기동 직후라 세션에 낡은 객체가 없어 False가 안전하다.
         with F.app.app_context():
             ret = db.session.query(cls).filter(
                 (not_(cls.status.like('FINISH_%'))) & (cls.mode == 'ADD')
-            ).update({'status':'READY'}, synchronize_session="fetch")
+            ).update({'status':'READY'}, synchronize_session=False)
             db.session.commit()
             return ret
 

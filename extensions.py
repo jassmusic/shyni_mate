@@ -622,3 +622,52 @@ def save_with_retry(item, attempts=6):
     if last_tb:
         P.logger.error(last_tb)
     return None
+
+
+_WAL_LISTENER_DONE = False
+
+
+def ensure_wal():
+    """mate DB를 WAL 모드로 바꾼다 — 플러그인 로드 때 한 번.
+
+    기본 저널 모드(rollback)에서는 쓰기 트랜잭션이 DB 전체를 독점
+    잠금이라, 스캔·휴지통 작업이 몰리는 동안 웹의 설정 읽기(SELECT)까지
+    'database is locked'로 실패하고 페이지가 버벅거린다 (2026-11-15
+    다른 서버에서 webhook_use 읽기 실패·웹 지연 실측). WAL에서는 읽기가
+    쓰기를 기다리지 않아 이 문제가 사라진다.
+    journal_mode는 DB 파일에 영구 저장되므로 한 번 바꾸면 유지된다.
+    busy_timeout·synchronous는 연결마다 설정해야 해서 connect 리스너로
+    건다. journal_mode 전환은 트랜잭션 안에서는 안 되므로 원시 연결로
+    실행한다. 실패해도 플러그인 로드를 막지 않는다.
+    """
+    global _WAL_LISTENER_DONE
+    try:
+        from sqlalchemy import event
+        with F.app.app_context():
+            engine = (F.db.engines[P.package_name]
+                      if hasattr(F.db, 'engines')
+                      else F.db.get_engine(F.app, bind=P.package_name))
+            if not _WAL_LISTENER_DONE:
+                def _set_pragmas(dbapi_conn, _rec):
+                    cur = dbapi_conn.cursor()
+                    try:
+                        cur.execute('PRAGMA busy_timeout=30000')
+                        cur.execute('PRAGMA synchronous=NORMAL')
+                    finally:
+                        cur.close()
+                event.listen(engine, 'connect', _set_pragmas)
+                _WAL_LISTENER_DONE = True
+            raw = engine.raw_connection()
+            try:
+                cur = raw.cursor()
+                try:
+                    cur.execute('PRAGMA journal_mode=WAL')
+                    mode = cur.fetchone()[0]
+                finally:
+                    cur.close()
+                raw.commit()
+            finally:
+                raw.close()
+            P.logger.info(f'[Base] mate DB 저널 모드: {mode}')
+    except Exception as e:
+        P.logger.warning(f'[Base] WAL 모드 설정 실패 (무시): {e}')

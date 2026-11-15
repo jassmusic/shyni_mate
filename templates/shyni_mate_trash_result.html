@@ -22,7 +22,6 @@
   <select id="histLibSel" class="form-control input-sm" style="flex:1 1 130px">
     <option value="">전체 라이브러리</option>
   </select>
-  <label style="font-weight:normal; margin:0"><input type="checkbox" id="histOnlyAppend" name="tmp_hist_only_append"> 추가된 항목만</label>
   <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·파일 경로 검색" style="flex:1 1 160px">
   <button type="button" class="btn btn-sm btn-default" id="histSearchBtn">검색</button>
   <button type="button" class="btn btn-sm btn-default" id="histResetBtn">초기화</button>
@@ -34,6 +33,9 @@
 </div>
 
 <div id="trash_history_div" style="font-size:13px; color:#888">불러오는 중입니다.</div>
+
+<!-- 페이지 하단 여백 -->
+<div id="sm_bottom_spacer" style="height:30px"></div>
 
 <script type="text/javascript">
 var LIBS = [];
@@ -256,37 +258,32 @@ function renderDetail(d) {
     for (var i = 0; i < folders.length; i++) str += '<li>' + folderStatLine(folders[i]) + '</li>';
     str += '</ul></div>';
   }
-  // 추가 파일 목록 — 앨범(폴더) 단위 묶음
-  str += '<div style="margin-top:6px"><strong>추가된 파일</strong> ';
-  // Relay가 꺼져 있으면 목록이 저장되지 않으니 실행 중에도 Relay 문구를 보여준다.
-  // 단, 스캔이 실행되지 않은 행은 Relay와 무관하게 목록이 없으니 Relay 문구
-  // 대신 그 사유를 보여준다 (끝난 행에만 적용 — 실행 중에는 스캔이 아직
-  // 안 끝났을 수 있다).
-  if (d.status == 'running' && d.db_ready !== false) {
-    str += '<span style="color:#888">작업이 끝나면 목록이 표시됩니다.</span>';
-  } else if (d.append_total == null) {
-    if (d.status != 'running' && d.scan_duration == null) {
-      str += '<span style="color:#888">없습니다. (스캔이 실행되지 않았거나, 이 실행은 결과 저장이 되기 전에 기록됐습니다.)</span>';
-    } else {
+  // 비운 파일 목록 — 폴더 단위 묶음. 추가 파일은 휴지통 작업에서
+  // 의미가 없어(다시 스캔하면 shyni가 휴지통 항목을 살리지 새로
+  // 추가하지 않는다) 빼고, 비운 파일만 보여준다.
+  // 비우기 단계가 없었던 행은 비운 개수가 없어 이 섹션을 표시하지 않는다.
+  if (d.emptied_count != null) {
+    str += '<div style="margin-top:6px"><strong>비운 파일</strong> ';
+    if (d.emptied_total == null) {
       str += '<span style="color:#888">파일 목록을 볼 수 없습니다. Relay가 꺼져 있으면 목록은 저장되지 않습니다.</span>';
+    } else if (!d.emptied_total) {
+      str += '<span style="color:#888">없습니다.</span>';
+    } else {
+      str += '<span style="color:#888">전체 ' + d.emptied_count + '개' + (d.emptied_truncated ? ' (외 ' + (d.emptied_count - d.emptied_total) + '개 더 있음)' : '') + '</span>';
+      var egroups = d.emptied_groups || [];
+      str += '<ul style="margin:2px 0; padding-left:18px">';
+      for (var g = 0; g < egroups.length; g++) {
+        var grp = egroups[g];
+        str += '<li><a href="#" class="emptied-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
+        str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
+        str += '<div class="emptied-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
+        for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
+        str += '</div></li>';
+      }
+      str += '</ul>';
     }
-  } else if (!d.append_total) {
-    str += '<span style="color:#888">없습니다.</span>';
-  } else {
-    str += '<span style="color:#888">전체 ' + d.append_count + '개' + (d.append_truncated ? ' (외 ' + (d.append_count - d.append_total) + '개 더 있음)' : '') + '</span>';
-    var groups = d.append_groups || [];
-    str += '<ul style="margin:2px 0; padding-left:18px">';
-    for (var g = 0; g < groups.length; g++) {
-      var grp = groups[g];
-      str += '<li><a href="#" class="append-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
-      str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
-      str += '<div class="append-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
-      for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
-      str += '</div></li>';
-    }
-    str += '</ul>';
+    str += '</div>';
   }
-  str += '</div>';
   }
   if (d.message) str += '<div style="color:#888; margin-top:4px">' + esc(d.message) + '</div>';
   str += '</div>';
@@ -331,7 +328,6 @@ function loadHistory(page, cb) {
     data: {
       page: page,
       section: $('#histLibSel').val() || '',
-      only_append: $('#histOnlyAppend').is(':checked') ? '1' : '',
       search: $('#histSearch').val() || ''
     },
     success: function (ret) {
@@ -392,14 +388,12 @@ $(document).ready(function () {
   });
 
   $('#histLibSel').off('change').on('change', function () { loadHistory(1); });
-  $('#histOnlyAppend').off('change').on('change', function () { loadHistory(1); });
   $('#histSearchBtn').off('click').on('click', function () { loadHistory(1); });
   $('#histSearch').off('keypress').on('keypress', function (e) {
     if (e.which == 13) { e.preventDefault(); loadHistory(1); }
   });
   $('#histResetBtn').off('click').on('click', function () {
     $('#histLibSel').val('');
-    $('#histOnlyAppend').prop('checked', false);
     $('#histSearch').val('');
     loadHistory(1);
   });
@@ -411,12 +405,12 @@ $(document).ready(function () {
     loadHistory(histPage, function () { if (expandedIds[id]) loadDetail(id); });
   });
 
-  $(document).off('click', '.append-group-toggle').on('click', '.append-group-toggle', function (e) {
+  $(document).off('click', '.emptied-group-toggle').on('click', '.emptied-group-toggle', function (e) {
     e.preventDefault();
     e.stopPropagation();
     var gidx = $(this).data('gidx');
     var id = $(this).data('id');
-    $('.append-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
+    $('.emptied-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
   });
 
   // 누락이 있으면 휴지통으로 — 대시보드 '휴지통 상세'와 같은 이동 방식이다.
