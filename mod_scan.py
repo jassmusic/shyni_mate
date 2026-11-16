@@ -114,6 +114,10 @@ class ModuleScan(PluginModuleBase):
 
 
     def process_menu(self, sub, req):
+        if sub == 'manual':
+            # 스캔 매뉴얼 — FF 안에서 목차형 템플릿으로 표시한다
+            arg = P.ModelSetting.to_dict()
+            return render_template(f'{P.package_name}_{self.name}_manual.html', arg=arg)
         if sub == 'trash':
             arg = P.ModelSetting.to_dict()
             try:

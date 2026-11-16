@@ -3,6 +3,7 @@ import threading
 
 import requests
 import xmltodict
+from flask_login import login_required
 
 from .setup import *
 from .version_info import (RUNNING_VERSION, get_github_version,
@@ -35,6 +36,18 @@ class ModuleBase(PluginModuleBase):
             # 현황·건강도 — 휴지통 개수 자동 갱신 주기 (시간). 0이면 통계 때마다 읽는다
             f'{self.name}_trash_counts_refresh_hours' : '12',
         }
+        # 매뉴얼 페이지: /shyni_mate/manual_toc — 소개 매뉴얼을 FF 안에서
+        # 템플릿으로 보여준다. 정적 라우트라 기본 라우트 /<sub>보다 우선 매칭된다.
+        try:
+            P.blueprint.add_url_rule('/manual_toc', 'manual_toc', login_required(self._manual_toc))
+        except Exception as e:
+            logger.warning(f'[Base] 매뉴얼 라우트 등록 실패: {e}')
+
+
+    def _manual_toc(self):
+        # 소개 매뉴얼(설치·기능·라이선스) — FF 크롬 안에서 목차형으로 표시한다.
+        arg = P.ModelSetting.to_dict()
+        return render_template(f'{P.package_name}_base_manual.html', arg=arg)
 
 
     def plugin_load(self):

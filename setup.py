@@ -32,7 +32,7 @@ setting = {
                     {'uri': 'list', 'name': '스캔 목록'},
                     {'uri': 'trash', 'name': '휴지통'},
                     {'uri': 'browser', 'name': '탐색'},
-                    {'uri': 'manual/files/스캔.md', 'name': '매뉴얼'},
+                    {'uri': 'manual', 'name': '매뉴얼'},
                 ]
             },
             {
@@ -63,11 +63,8 @@ setting = {
                 ]
             },
             {
-                'uri': 'manual',
+                'uri': 'manual_toc',
                 'name': '매뉴얼',
-                'list': [
-                    {'uri': 'README.md', 'name': '매뉴얼'},
-                ]
             },
             {
                 'uri': 'log',

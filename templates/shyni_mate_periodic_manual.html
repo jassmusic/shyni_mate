@@ -1,75 +1,158 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="container-fluid">
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
-      작업 관리
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13.5px">
-      라이브러리를 골라 cron으로 등록해 두면, 정해진 시각에 하나씩 순차로 실행합니다. 동작은 새로고침·스캔·새로고침 후 스캔 중에서 고를 수 있습니다.
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
-      스캔 결과
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13.5px">
-      주기적 스캔의 실행 결과를 봅니다. 행을 누르면 단계별 소요와 집계, 추가된 파일을 볼 수 있습니다.
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
-      설정
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13.5px">
-      주기적 스캔의 최대 대기 시간, 진행 중 표시 정리 시간과 실행 이력 보관 기간을 정합니다.
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
-      작업이 겹치면 기다립니다
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13.5px">
-      주기적 스캔 작업은 한 번에 하나만 실행됩니다. 정해진 시각에 앞선 작업이 아직 돌고 있으면 실패하지 않고, 그 작업이 끝날 때까지 기다렸다가 이어서 실행합니다. 기다리는 동안 스캔 결과에는 '대기 중' 행이 생기고 앞선 작업 이름과 기다린 시간이 표시됩니다. 같은 작업이 이미 돌거나 기다리고 있으면 중복으로 실행하지 않습니다. 최대 대기 시간은 설정에서 정합니다. 기본값은 360분(6시간)이고, 0으로 두면 기다리지 않고 예전처럼 바로 실패로 끝납니다.
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
-      휴지통 작업과는 따로 돕니다
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13.5px">
-      주기적 스캔과 휴지통 작업은 줄이 따로입니다. 주기적 스캔이 도는 중에도 휴지통 작업은 기다리지 않고 바로 시작하고, 반대도 마찬가지입니다. 다만 같은 라이브러리는 두 작업이 동시에 건드리지 않습니다. 휴지통 작업 중인 라이브러리는 주기적 스캔에서 건너뛰고 다음 라이브러리로 넘어갑니다.
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:14px; font-weight:bold; margin-top:8px">
-      지금 실행은 기다리지 않습니다
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13.5px">
-      '지금 실행'은 수동 실행이라 기다림 없이 바로 시작하거나 바로 거절됩니다. 주기적 스캔이 하나라도 도는 중에 누르면 "이미 진행 중인 주기적 스캔이 있습니다."라는 안내와 함께 거절되고, 대기 줄에 들어가지 않습니다. 돌고 있는 작업 행의 버튼은 [취소]로 바뀌어 있으니, 멈추려면 취소를 눌러 주세요.
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:13px; color:#888">
-      나머지 매뉴얼은 함께 작성할 예정입니다.
-    </span>
-  </div>
+<style>
+.sm-manual { display: flex; align-items: flex-start; font-family: "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; color: #222; line-height: 1.7; }
+.sm-manual a { color: #1a56db; text-decoration: none; }
+.sm-manual a:hover { text-decoration: underline; }
+.sm-sidebar { width: 250px; flex-shrink: 0; background: #f8f9fa; border: 1px solid #ddd; border-radius: 4px; padding: 16px 0 12px; position: sticky; top: 20px; max-height: calc(100vh - 40px); overflow-y: auto; margin-right: 24px; }
+.sm-sidebar h1 { font-size: 17px; margin: 0 18px 10px; color: #111; }
+.sm-toc-item { display: block; padding: 6px 18px 6px 26px; font-size: 14px; color: #333; border-left: 3px solid transparent; }
+.sm-toc-item:hover { background: #eef2f7; text-decoration: none; }
+.sm-toc-item.active { background: #e8f0fe; border-left-color: #1a73e8; color: #1a56db; font-weight: 700; }
+.sm-sidebar-foot { padding: 12px 18px 0; border-top: 1px solid #e0e0e0; margin-top: 8px; }
+#sm-show-all-btn { width: 100%; padding: 8px; font-size: 13px; background: #fff; border: 1px solid #bbb; border-radius: 4px; cursor: pointer; color: #333; }
+#sm-show-all-btn:hover { background: #f0f0f0; }
+.sm-content { flex: 1; min-width: 0; padding: 4px 8px 40px 0; }
+.sm-doc-section { display: none; }
+.sm-doc-section.active { display: block; }
+.sm-manual.sm-show-all .sm-doc-section { display: block; border-bottom: 1px solid #eee; padding-bottom: 24px; margin-bottom: 24px; }
+.sm-content h2 { font-size: 22px; border-bottom: 2px solid #1a73e8; padding-bottom: 8px; margin: 0 0 20px; }
+.sm-content h3 { font-size: 18px; margin: 28px 0 10px; }
+.sm-content p { margin: 10px 0; }
+.sm-content ul, .sm-content ol { margin: 10px 0; padding-left: 24px; }
+.sm-content li { margin: 4px 0; }
+.sm-content code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-family: Consolas, "D2Coding", monospace; font-size: 0.92em; }
+.sm-content pre { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+.sm-content pre code { background: none; padding: 0; font-size: 13px; }
+@media (max-width: 900px) {
+  .sm-manual { display: block; }
+  .sm-sidebar { width: auto; position: static; max-height: none; margin-right: 0; margin-bottom: 12px; padding: 10px 12px; }
+  .sm-sidebar h1 { margin: 0 0 8px; font-size: 16px; }
+  .sm-toc { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sm-toc-item { border: 1px solid #ccc; border-left: 1px solid #ccc; border-radius: 16px; padding: 4px 12px; font-size: 13px; }
+  .sm-toc-item.active { border-color: #1a73e8; }
+  .sm-sidebar-foot { display: none; }
+  .sm-content { padding: 0 0 32px; }
+  .sm-content h2 { font-size: 20px; }
+}
+</style>
+<div class="sm-manual" id="sm-manual">
+<nav class="sm-sidebar">
+<h1>주기적 스캔 매뉴얼</h1>
+<div class="sm-toc">
+<a class="sm-toc-item" href="#s1" data-section="s1">작업 관리</a>
+<a class="sm-toc-item" href="#s2" data-section="s2">스캔 결과</a>
+<a class="sm-toc-item" href="#s3" data-section="s3">설정</a>
+<a class="sm-toc-item" href="#s4" data-section="s4">작업이 겹치면 기다립니다</a>
+<a class="sm-toc-item" href="#s5" data-section="s5">휴지통 작업과는 따로 돕니다</a>
+<a class="sm-toc-item" href="#s6" data-section="s6">지금 실행은 기다리지 않습니다</a>
 </div>
+<div class="sm-sidebar-foot">
+<button id="sm-show-all-btn" type="button">전체 보기</button>
+</div>
+</nav>
+<main class="sm-content">
 
-<!-- 페이지 하단 여백 -->
-<div id="sm_bottom_spacer" style="height:30px"></div>
+<section class="sm-doc-section" id="s1">
+<h2>작업 관리</h2>
+<p>라이브러리를 골라 cron으로 등록해 두면, 정해진 시각에 하나씩 순차로 실행합니다. 동작은 새로고침·스캔·새로고침 후 스캔 중에서 고를 수 있습니다.</p>
+</section>
+<section class="sm-doc-section" id="s2">
+<h2>스캔 결과</h2>
+<p>주기적 스캔의 실행 결과를 봅니다. 행을 누르면 단계별 소요와 집계, 추가된 파일을 볼 수 있습니다.</p>
+</section>
+<section class="sm-doc-section" id="s3">
+<h2>설정</h2>
+<p>주기적 스캔의 최대 대기 시간, 진행 중 표시 정리 시간과 실행 이력 보관 기간을 정합니다.</p>
+</section>
+<section class="sm-doc-section" id="s4">
+<h2>작업이 겹치면 기다립니다</h2>
+<p>주기적 스캔 작업은 한 번에 하나만 실행됩니다. 정해진 시각에 앞선 작업이 아직 돌고 있으면 실패하지 않고, 그 작업이 끝날 때까지 기다렸다가 이어서 실행합니다. 기다리는 동안 스캔 결과에는 '대기 중' 행이 생기고 앞선 작업 이름과 기다린 시간이 표시됩니다. 같은 작업이 이미 돌거나 기다리고 있으면 중복으로 실행하지 않습니다. 최대 대기 시간은 설정에서 정합니다. 기본값은 360분(6시간)이고, 0으로 두면 기다리지 않고 예전처럼 바로 실패로 끝납니다.</p>
+</section>
+<section class="sm-doc-section" id="s5">
+<h2>휴지통 작업과는 따로 돕니다</h2>
+<p>주기적 스캔과 휴지통 작업은 줄이 따로입니다. 주기적 스캔이 도는 중에도 휴지통 작업은 기다리지 않고 바로 시작하고, 반대도 마찬가지입니다. 다만 같은 라이브러리는 두 작업이 동시에 건드리지 않습니다. 휴지통 작업 중인 라이브러리는 주기적 스캔에서 건너뛰고 다음 라이브러리로 넘어갑니다.</p>
+</section>
+<section class="sm-doc-section" id="s6">
+<h2>지금 실행은 기다리지 않습니다</h2>
+<p>'지금 실행'은 수동 실행이라 기다림 없이 바로 시작하거나 바로 거절됩니다. 주기적 스캔이 하나라도 도는 중에 누르면 "이미 진행 중인 주기적 스캔이 있습니다."라는 안내와 함께 거절되고, 대기 줄에 들어가지 않습니다. 돌고 있는 작업 행의 버튼은 [취소]로 바뀌어 있으니, 멈추려면 취소를 눌러 주세요.</p>
+<p style="font-size:13px;color:#888">나머지 매뉴얼은 함께 작성할 예정입니다.</p>
+</section>
 
+</main>
+</div>
+<script>
+(function () {
+  var container = document.getElementById('sm-manual');
+  var showAll = false;
+  var sections = Array.prototype.slice.call(container.querySelectorAll('.sm-doc-section'));
+  var tocLinks = Array.prototype.slice.call(container.querySelectorAll('.sm-toc-item'));
+  var showAllBtn = document.getElementById('sm-show-all-btn');
+  var currentSection = 's1';
+
+  function setActive(sectionId) {
+    tocLinks.forEach(function (a) { a.classList.remove('active'); });
+    var link = container.querySelector('.sm-toc-item[data-section="' + sectionId + '"]');
+    if (link) link.classList.add('active');
+  }
+
+  function showSection(sectionId) {
+    currentSection = sectionId;
+    if (!showAll) {
+      sections.forEach(function (s) { s.classList.toggle('active', s.id === sectionId); });
+    }
+    setActive(sectionId);
+    if (showAll) {
+      var sec = document.getElementById(sectionId);
+      if (sec) sec.scrollIntoView();
+    } else {
+      window.scrollTo(0, 0);
+    }
+  }
+
+  function navigate(sectionId) {
+    showSection(sectionId);
+    if (history.replaceState) history.replaceState(null, '', '#' + sectionId);
+  }
+
+  tocLinks.forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      navigate(this.getAttribute('data-section'));
+    });
+  });
+
+  showAllBtn.addEventListener('click', function () {
+    showAll = !showAll;
+    container.classList.toggle('sm-show-all', showAll);
+    showAllBtn.textContent = showAll ? '절별 보기' : '전체 보기';
+    if (!showAll) showSection(currentSection);
+  });
+
+  var spyTick = false;
+  window.addEventListener('scroll', function () {
+    if (!showAll || spyTick) return;
+    spyTick = true;
+    requestAnimationFrame(function () {
+      spyTick = false;
+      var current = null;
+      sections.forEach(function (s) {
+        if (s.getBoundingClientRect().top <= 120) current = s.id;
+      });
+      if (current) setActive(current);
+    });
+  }, { passive: true });
+
+  var hash = (location.hash || '').replace('#', '');
+  if (hash) {
+    var el = document.getElementById(hash);
+    if (el && el.classList.contains('sm-doc-section')) {
+      showSection(hash);
+      return;
+    }
+  }
+  showSection('s1');
+})();
+</script>
 {% endblock %}
