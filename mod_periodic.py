@@ -6,7 +6,8 @@ from .setup import *
 from .task_periodic import (TaskPeriodic, annotate_total_labels,
                             clear_start_error, fail_start, get_current,
                             get_jobs, get_last_start_error,
-                            periodic_action_to_kind_use_vfs, request_cancel)
+                            periodic_action_to_kind_use_vfs,
+                            periodic_kind_use_vfs_to_action, request_cancel)
 
 name = 'periodic'
 logger = P.logger
@@ -47,6 +48,7 @@ class ModulePeriodic(PluginModuleBase):
                 if 'periodic_item' in insp.get_table_names():
                     cols = [c['name'] for c in insp.get_columns('periodic_item')]
                     new_cols = [
+                        ('action', 'VARCHAR'),
                         ('shyni_job_id', 'VARCHAR'), ('stat_total', 'INTEGER'),
                         ('stat_new', 'INTEGER'), ('stat_missing', 'INTEGER'),
                         ('stat_updated', 'INTEGER'), ('stat_restored', 'INTEGER'),
@@ -127,11 +129,15 @@ class ModulePeriodic(PluginModuleBase):
             logger.error(f'[Periodic] Celery 시작 실패: {e}')
             try:
                 jobs = get_jobs()
-                job_name = (jobs[idx].get('name')
-                            if 0 <= idx < len(jobs) else '') or ''
+                job = jobs[idx] if 0 <= idx < len(jobs) else None
+                job_name = (job.get('name') if job else '') or ''
+                action = (periodic_kind_use_vfs_to_action(
+                    job.get('kind'), job.get('use_vfs')) if job else None)
             except Exception:
                 job_name = ''
-            fail_start(job_name, mode, f'작업을 넘기지 못했습니다: {e}')
+                action = None
+            fail_start(job_name, mode, f'작업을 넘기지 못했습니다: {e}',
+                       action=action)
 
     def one_execute(self, idx):
         # '지금 실행'은 수동 실행이라 mode를 'manual'로 넘긴다 (R19).
@@ -152,7 +158,10 @@ class ModulePeriodic(PluginModuleBase):
             except Exception as e:
                 logger.error(f'[Periodic] 지금 실행 실패: {e}')
                 fail_start(jobs[idx].get('name') or '', 'manual',
-                           f'실행을 시작하지 못했습니다: {e}')
+                           f'실행을 시작하지 못했습니다: {e}',
+                           action=periodic_kind_use_vfs_to_action(
+                               jobs[idx].get('kind'),
+                               jobs[idx].get('use_vfs')))
         t = threading.Thread(target=func, args=())
         t.daemon = True
         t.start()
@@ -283,7 +292,11 @@ class ModulePeriodic(PluginModuleBase):
                 return jsonify({'ret': 'fail', 'msg': err})
             return jsonify({'ret': 'success', 'data': sections})
         if sub == 'current':
-            return jsonify({'ret': 'success', 'data': get_current(),
+            cur = get_current()
+            if cur and cur.get('action'):
+                from .model_periodic import action_label
+                cur['action_label'] = action_label(cur.get('action'))
+            return jsonify({'ret': 'success', 'data': cur,
                             'last_error': get_last_start_error()})
         if sub == 'clear_start_error':
             clear_start_error()

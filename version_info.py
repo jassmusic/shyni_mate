@@ -45,20 +45,26 @@ RUNNING_VERSION = read_disk_version()
 
 
 def _version_tuple(version):
-    """'0.9.6' -> (0, 9, 6). 숫자가 아닌 부분은 0으로 본다."""
+    """'0.9.8d' -> ((0, ''), (9, ''), (8, 'd')).
+    마디마다 숫자 뒤에 붙은 문자 접미사도 함께 비교한다.
+    접미사를 버리면 0.9.8c와 0.9.8d가 같은 버전으로 보여
+    새 버전 알림이 뜨지 않는다."""
     parts = []
     for piece in str(version or '').split('.'):
         digits = ''
-        for ch in piece:
+        suffix = ''
+        for i, ch in enumerate(piece):
             if ch.isdigit():
                 digits += ch
             else:
+                suffix = piece[i:]
                 break
         try:
-            parts.append(int(digits) if digits else 0)
+            num = int(digits) if digits else 0
         except Exception:
-            parts.append(0)
-    return tuple(parts) or (0,)
+            num = 0
+        parts.append((num, suffix))
+    return tuple(parts) or ((0, ''),)
 
 
 def is_newer(candidate, base):
@@ -68,8 +74,8 @@ def is_newer(candidate, base):
     a = _version_tuple(candidate)
     b = _version_tuple(base)
     width = max(len(a), len(b))
-    a = a + (0,) * (width - len(a))
-    b = b + (0,) * (width - len(b))
+    a = a + ((0, ''),) * (width - len(a))
+    b = b + ((0, ''),) * (width - len(b))
     return a > b
 
 
