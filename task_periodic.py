@@ -320,6 +320,16 @@ def _set_current(cur):
         P.ModelSetting.set(CURRENT_KEY, json.dumps(cur, ensure_ascii=False))
 
 
+def update_current_job_idx(new_idx):
+    """진행 상태의 작업 번호를 바꾼다 — 작업 관리에서 순서를 바꿔
+    저장했을 때 진행 중인 작업의 위치를 새 목록에 맞게 고친다."""
+    cur = get_current()
+    if cur is None or cur.get('job_idx') == new_idx:
+        return
+    cur['job_idx'] = new_idx
+    _set_current(cur)
+
+
 def _max_wait_min():
     """최대 대기 시간(분) — 설정값, 없거나 숫자가 아니면 기본 360분.
     음수는 기본값으로 취급한다. 0이면 기다리지 않는다."""

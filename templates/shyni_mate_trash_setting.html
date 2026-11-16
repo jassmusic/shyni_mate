@@ -11,6 +11,8 @@
   {{ macros.m_hr() }}
   {{ macros.setting_input_text_and_buttons('trash_db_delete_day', 'DB 삭제 기간', [['globalDbDeleteDayBtn', '기간 적용 삭제', [['tag_id','trash_db_delete_day']]], ['globalDbDeleteBtn', '전체 삭제']], value=arg['trash_db_delete_day'], col='6') }}
   {{ macros.setting_checkbox('trash_db_auto_delete', 'DB 자동 삭제', value=arg['trash_db_auto_delete'], desc=['켜 두시면, 설정한 기간이 지난 DB 기록을 자동으로 삭제합니다.']) }}
+  {{ macros.m_hr() }}
+  {{ macros.setting_input_textarea('scan_trash_schedule_anchors', '기준 경로 (안전장치)', col='9', row='3', value=arg['scan_trash_schedule_anchors'], desc=['이 경로들이 모두 실제로 보여야 작업을 실행합니다. 마운트가 깨진 상태에서 비우는 사고를 막기 위한 안전장치로, 모든 휴지통 주기 작업에 함께 적용됩니다.', '한 줄에 하나씩 적어 주세요. 비워 두면 경로 확인 없이 실행됩니다.']) }}
 </form>
 
 <!-- 페이지 하단 여백 -->

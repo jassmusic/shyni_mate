@@ -7,7 +7,8 @@ from .task_periodic import (TaskPeriodic, annotate_total_labels,
                             clear_start_error, fail_start, get_current,
                             get_jobs, get_last_start_error,
                             periodic_action_to_kind_use_vfs,
-                            periodic_kind_use_vfs_to_action, request_cancel)
+                            periodic_kind_use_vfs_to_action, request_cancel,
+                            update_current_job_idx)
 
 name = 'periodic'
 logger = P.logger
@@ -249,6 +250,12 @@ class ModulePeriodic(PluginModuleBase):
                 if not any(_same_job(running, c) for c in cleaned):
                     return jsonify({'ret': 'warning',
                                     'msg': f"진행 중인 작업 '{running.get('name') or ''}'은(는) 취소한 뒤에 수정할 수 있습니다."})
+                # 순서 변경: 진행 중 작업이 새 목록에서 다른 위치로
+                # 옮겨졌으면 진행 상태의 작업 번호를 새 위치로 고쳐 쓴다.
+                new_idx = next((k for k, c in enumerate(cleaned)
+                                if _same_job(running, c)), None)
+                if new_idx is not None and new_idx != ridx:
+                    update_current_job_idx(new_idx)
             self.sched_remove_all()
             P.ModelSetting.set('periodic_jobs', json.dumps(cleaned, ensure_ascii=False))
             self.start()

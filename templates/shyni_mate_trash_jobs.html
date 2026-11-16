@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 
-{{ macros.m_button_group([['jobsSaveBtn', '저장'], ['jobAddBtn', '작업 추가'], ['jobsUseAllBtn', '전체 사용'], ['jobsUnuseAllBtn', '전체 사용 해제'], ['globalSettingSaveBtn', '설정 저장']]) }}
+{{ macros.m_button_group([['jobsSaveBtn', '저장'], ['jobAddBtn', '작업 추가'], ['jobsUseAllBtn', '전체 사용'], ['jobsUnuseAllBtn', '전체 사용 해제']]) }}
 <div style="margin:6px 0 10px">
   <span style="font-size:12px; color:#888">저장하면 사용으로 켜진 작업이 스케줄러에 바로 반영됩니다. cron 예: <code>0 5 * * *</code> 매일 새벽 5시, <code>0 3 * * 1</code> 매주 월요일 새벽 3시. 하나의 작업에 여러 개의 라이브러리를 담아주세요.</span>
 </div>
@@ -9,17 +9,9 @@
 <div id="startErrorDiv" style="display:none; border:1px solid #e53e3e; background:#fff5f5; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#9b2c2c"></div>
 <div id="startOkDiv" style="display:none; border:1px solid #38a169; background:#f0fff4; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#276749"></div>
 
-<div id="jobs_div"></div>
+<div id="currentBoxDiv"></div>
 
-<form id='setting'>
-<div style="margin-top:16px; border:1px solid #ddd; border-radius:6px; padding:10px 14px">
-  <a href="#" id="anchorsToggle" style="font-size:14px; color:#333; text-decoration:none"><strong>기준 경로 (안전장치)</strong> <span id="anchorsArrow">▸</span></a>
-  <div id="anchorsBody" style="display:none; margin-top:8px">
-    {{ macros.setting_input_textarea('scan_trash_schedule_anchors', '', col='9', row='3', value=arg['scan_trash_schedule_anchors'], desc=['이 경로들이 모두 실제로 보여야 작업을 실행합니다. 마운트가 깨진 상태에서 비우는 사고를 막기 위한 안전장치로, 모든 휴지통 주기 작업에 함께 적용됩니다.', '한 줄에 하나씩 적어 주세요. 비워 두면 경로 확인 없이 실행됩니다.']) }}
-    <div style="font-size:12px; color:#888">바꾼 뒤에는 위쪽 설정 저장 버튼으로 저장해 주세요.</div>
-  </div>
-</div>
-</form>
+<div id="jobs_div"></div>
 
 <div id="libPickModal" style="display:none; position:fixed; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.45); z-index:2000">
   <div style="background:#fff; max-width:520px; margin:48px auto; border-radius:8px; padding:16px 18px; max-height:82vh; display:flex; flex-direction:column">
@@ -90,7 +82,7 @@ var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/trash/';
 // 실행 중인 작업 표시 — 결과 탭과 같은 current를 15초마다 확인한다.
 // 바뀔 때만 다시 그려, 입력 중인 내용이 사라지거나 포커스가 날아가지 않게 한다.
 var runningCur = null;
-var runningSig = '';
+var runningSig = null; // 첫 확인 때는 반드시 그린다 (대기 중 배너 포함)
 
 function stageLabel(stage) {
   if (stage == 'refresh') return '새로고침 중';
@@ -100,7 +92,33 @@ function stageLabel(stage) {
 }
 
 function runningIdx() {
-  return (runningCur && typeof runningCur.job_idx == 'number') ? runningCur.job_idx : -1;
+  if (!runningCur) return -1;
+  // 순서 변경 뒤에도 실행 중 카드를 찾게 이름으로 찾는다 —
+  // 실행 중 카드는 잠겨 이름이 바뀌지 않는다. 못 찾으면 번호로.
+  if (runningCur.job_name) {
+    for (var k = 0; k < jobs.length; k++) {
+      if ((jobs[k].name || '') === runningCur.job_name) return k;
+    }
+  }
+  return (typeof runningCur.job_idx == 'number') ? runningCur.job_idx : -1;
+}
+
+// 진행 중 박스 / 대기 중 배너 — 결과 탭과 같은 current를 쓴다.
+// loadCurrent의 시그니처 게이트 안에서만 다시 그려, 박스 div만 갱신하고
+// 페이지가 버벅이지 않게 한다. X를 누르면 숨기고, 상태가 바뀌면 다시 나온다.
+function renderCurrentBox() {
+  var cur = runningCur;
+  if (!cur) {
+    $('#currentBoxDiv').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 휴지통 작업이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
+    return;
+  }
+  var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin-bottom:8px; background:#f9f9f9">';
+  str += '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
+  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
+  str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
+  str += '<button type="button" class="btn btn-sm btn-danger" id="currentBoxCancelBtn">취소</button>';
+  str += '</div></div>';
+  $('#currentBoxDiv').html(str);
 }
 
 function runningSignature(cur) {
@@ -157,6 +175,7 @@ function loadCurrent() {
       if (sig === runningSig) return;
       runningSig = sig;
       runningCur = cur;
+      renderCurrentBox();
       jobs = collectJobs();
       renderJobs();
     }
@@ -244,7 +263,6 @@ function renderJobs() {
     var isRunning = (i === runningIdx());
     var dis = isRunning ? ' disabled' : '';
     str += '<div class="job-row" data-idx="' + i + '" style="border:' + (isRunning ? '2px solid #3182ce' : '1px solid #ddd') + '; border-radius:6px; padding:6px 10px; margin-bottom:6px; background:' + (isRunning ? '#ebf4ff' : '#fff') + '">';
-    if (isRunning) str += '<div style="font-size:14px; color:#2b6cb0; margin-bottom:4px">🔄 <strong>진행 중</strong> — ' + esc(runningCur.section_title) + ' ' + stageLabel(runningCur.stage) + ' · 수정하려면 먼저 취소해 주세요</div>';
     str += '<div style="display:flex; flex-wrap:wrap; gap:5px; align-items:center">';
     str += '<input type="text" class="form-control input-sm j-name" placeholder="작업 이름" value="' + esc(j.name) + '" style="width:150px; height:26px; padding:3px 8px; font-size:14px"' + dis + '>';
     str += '<input type="text" class="form-control input-sm j-cron" placeholder="cron 예: 0 5 * * *" value="' + esc(j.cron) + '" style="width:120px; height:26px; padding:3px 8px; font-size:14px"' + dis + '>';
@@ -260,7 +278,9 @@ function renderJobs() {
     } else {
       str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '" style="padding:3px 8px; font-size:14px">지금 실행</button> ';
     }
-    str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '" style="padding:3px 8px; font-size:14px"' + dis + '>삭제</button>';
+    str += '<button type="button" class="btn btn-sm btn-danger job-del" data-idx="' + i + '" style="padding:3px 8px; font-size:14px"' + dis + '>삭제</button> ';
+    str += '<button type="button" class="btn btn-sm btn-default job-move-up" data-idx="' + i + '" title="위로" style="padding:3px 8px; font-size:14px"' + ((dis || i == 0) ? ' disabled' : '') + '>↑</button> ';
+    str += '<button type="button" class="btn btn-sm btn-default job-move-down" data-idx="' + i + '" title="아래로" style="padding:3px 8px; font-size:14px"' + ((dis || i == jobs.length - 1) ? ' disabled' : '') + '>↓</button>';
     str += '</span></div>';
     str += '<div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:5px; align-items:center">';
     if (LIBS_STATE == 'loading') {
@@ -294,19 +314,24 @@ function collectJobs() {
   return out;
 }
 
+// 작업 순서 변경 — 화면에서만 자리를 바꾸고, 저장은 위쪽 저장 버튼으로 한다.
+// 실행 중 카드는 버튼이 막혀 직접 못 움직이지만, 이웃이 움직이며 자리를
+// 바꿀 수 있다. 실행 중 작업의 위치는 이름으로 찾고, 저장 때 서버가
+// 진행 상태의 작업 번호를 새 위치로 고쳐 쓴다.
+function moveJob(idx, dir) {
+  jobs = collectJobs();
+  var j = idx + dir;
+  if (idx < 0 || j < 0 || idx >= jobs.length || j >= jobs.length) return;
+  var tmp = jobs[idx]; jobs[idx] = jobs[j]; jobs[j] = tmp;
+  renderJobs();
+}
+
 $(document).ready(function () {
   if (!Array.isArray(jobs)) jobs = [];
   renderJobs();
   loadCurrent();
   loadSections();
   setInterval(function () { loadCurrent(); }, 15000);
-
-  $('#anchorsToggle').off('click').on('click', function (e) {
-    e.preventDefault();
-    var body = $('#anchorsBody');
-    body.toggle();
-    $('#anchorsArrow').text(body.is(':visible') ? '▾' : '▸');
-  });
 
   $('#jobAddBtn').off('click').on('click', function () {
     jobs = collectJobs();
@@ -353,8 +378,28 @@ $(document).ready(function () {
     setTimeout(loadCurrent, 2000);
   });
 
+  $(document).off('click', '#currentBoxCancelBtn').on('click', '#currentBoxCancelBtn', function () {
+    globalSendCommand('cancel_current', null);
+    setTimeout(loadCurrent, 2000);
+  });
+
+  $(document).off('click', '#currentIdleClose').on('click', '#currentIdleClose', function () {
+    $('#currentBoxDiv').empty();
+  });
+
+  $(document).off('click', '.job-move-up').on('click', '.job-move-up', function () {
+    moveJob(parseInt($(this).data('idx'), 10), -1);
+  });
+
+  $(document).off('click', '.job-move-down').on('click', '.job-move-down', function () {
+    moveJob(parseInt($(this).data('idx'), 10), 1);
+  });
+
   $('#jobsSaveBtn').off('click').on('click', function () {
     globalSendCommand('save_jobs', JSON.stringify(collectJobs()));
+    // 순서 변경 뒤 저장하면 서버가 진행 상태의 작업 번호를 고쳐 쓰니,
+    // 잠시 뒤에 다시 확인해 박스·카드 표시를 새 위치에 맞게 한다.
+    setTimeout(loadCurrent, 1500);
   });
 
   $(document).off('click', '.job-libs').on('click', '.job-libs', function () {

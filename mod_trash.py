@@ -7,7 +7,7 @@ from .task_periodic import annotate_total_labels
 from .task_trash import (ACTION_LABEL, TaskTrash, clear_trash_start_error,
                          fail_trash_start, get_last_trash_start_error,
                          get_trash_current, get_trash_jobs,
-                         request_trash_cancel)
+                         request_trash_cancel, update_trash_current_job_idx)
 
 name = 'trash'
 logger = P.logger
@@ -235,6 +235,12 @@ class ModuleTrash(PluginModuleBase):
                 if not any(_same_job(running, c) for c in cleaned):
                     return jsonify({'ret': 'warning',
                                     'msg': f"진행 중인 작업 '{running.get('name') or ''}'은(는) 취소한 뒤에 수정할 수 있습니다."})
+                # 순서 변경: 진행 중 작업이 새 목록에서 다른 위치로
+                # 옮겨졌으면 진행 상태의 작업 번호를 새 위치로 고쳐 쓴다.
+                new_idx = next((k for k, c in enumerate(cleaned)
+                                if _same_job(running, c)), None)
+                if new_idx is not None and new_idx != ridx:
+                    update_trash_current_job_idx(new_idx)
             self.sched_remove_all()
             P.ModelSetting.set('trash_jobs', json.dumps(cleaned, ensure_ascii=False))
             self.start()

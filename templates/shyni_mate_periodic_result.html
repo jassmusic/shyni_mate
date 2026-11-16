@@ -24,12 +24,12 @@
   </select>
   <label style="font-weight:normal; margin:0"><input type="checkbox" id="histOnlyAppend" name="tmp_hist_only_append"> 추가된 항목만</label>
   <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·동작·파일 경로 검색" style="flex:1 1 160px">
-  <button type="button" class="btn btn-sm btn-default" id="histSearchBtn">검색</button>
-  <button type="button" class="btn btn-sm btn-default" id="histResetBtn">초기화</button>
+  <button type="button" class="btn btn-sm btn-outline-primary" id="histSearchBtn">검색</button>
+  <button type="button" class="btn btn-sm btn-outline-primary" id="histResetBtn">초기화</button>
   <span style="margin-left:auto">
-    <button type="button" class="btn btn-sm btn-default" id="histRefreshBtn">새로고침</button>
-    <button type="button" class="btn btn-sm btn-default" id="histExpandAllBtn">모두 펼치기</button>
-    <button type="button" class="btn btn-sm btn-default" id="histCollapseAllBtn">모두 접기</button>
+    <button type="button" class="btn btn-sm btn-outline-primary" id="histRefreshBtn">새로고침</button>
+    <button type="button" class="btn btn-sm btn-outline-primary" id="histExpandAllBtn">모두 펼치기</button>
+    <button type="button" class="btn btn-sm btn-outline-primary" id="histCollapseAllBtn">모두 접기</button>
   </span>
 </div>
 
@@ -162,9 +162,9 @@ function renderHistory(data) {
   str += '</tbody></table>';
   str += '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px">';
   str += '<span style="color:#888">전체 ' + data.count + '개</span>';
-  str += '<span><button type="button" class="btn btn-xs btn-default" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
+  str += '<span><button type="button" class="btn btn-xs btn-outline-primary" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
   str += data.page + ' / ' + data.pages + ' 페이지 ';
-  str += '<button type="button" class="btn btn-xs btn-default" id="histNextBtn"' + (data.page >= data.pages ? ' disabled' : '') + '>다음</button></span></div>';
+  str += '<button type="button" class="btn btn-xs btn-outline-primary" id="histNextBtn"' + (data.page >= data.pages ? ' disabled' : '') + '>다음</button></span></div>';
   $('#periodic_history_div').html(str);
   $('#histPrevBtn').click(function () { loadHistory(histPage - 1); });
   $('#histNextBtn').click(function () { loadHistory(histPage + 1); });
