@@ -272,7 +272,7 @@ function renderServer(server, storage) {
     var measuring = !!storage.measuring;
     var refreshSvg = '<svg' + (measuring ? ' class="sm-spin"' : '') + ' width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>';
     str += '<div style="' + cardStyle + '; flex:1 1 0; min-width:300px">';
-    str += '<div style="font-size:14px; margin-bottom:8px"><strong>' + smIcon('hdd') + '데이터 용량</strong>' + (storage.disk_total ? ' <strong style="font-size:13px">' + (storage.data_size ? fmtBytes(storage.data_size) : '계산 중') + '</strong>' + ' <button type="button" id="data_size_refresh_btn" title="' + (measuring ? '용량 측정 중' : '용량 다시 측정') + '" style="background:none; border:none; padding:2px 4px; cursor:pointer; vertical-align:middle"' + (measuring ? ' disabled' : '') + '>' + refreshSvg + '</button><span id="data_size_ago" style="font-size:12px; color:#888; font-weight:normal"></span>' : '') + '</div>';
+    str += '<div style="font-size:14px; margin-bottom:8px"><strong>' + smIcon('hdd') + '데이터 용량</strong>' + (storage.disk_total ? ' <strong style="font-size:13px">' + (storage.data_size ? fmtBytes(storage.data_size) : (measuring ? '계산 중' : '측정 안 됨')) + '</strong>' + ' <button type="button" id="data_size_refresh_btn" title="' + (measuring ? '용량 측정 중' : (storage.data_size ? '용량 다시 측정' : '용량 측정')) + '" style="background:none; border:none; padding:2px 4px; cursor:pointer; vertical-align:middle"' + (measuring ? ' disabled' : '') + '>' + refreshSvg + '</button><span id="data_size_ago" style="font-size:12px; color:#888; font-weight:normal"></span>' : '') + '</div>';
     if (measuring) startDataSizePoll();
   }
   if (storage && storage.disk_total) {
@@ -650,6 +650,9 @@ var progressDoneOnce = false;
 // 단계 표시는 서버가 보고한 진행률(progressStepValue) 기준이다 —
 // 막대 %는 표시용으로 천천히 따라 올라가도 단계는 실제 계산 위치를 따른다
 var progressStepValue = 0;
+// 목록 재구축 중에는 단계 문구를 '목록 불러오는 중'으로 바꾼다 —
+// DB 통계 단계 문구(휴지통 개수·전체 통계)는 목록 대기 중에는 틀린 말이다.
+var listLoadingActive = false;
 function statusStepText(p) {
   if (p < 15) return '휴지통 개수 읽는 중';
   if (p < 80) return '라이브러리 정보 읽는 중';
@@ -659,7 +662,8 @@ function statusStepText(p) {
 function paintProgress() {
   $('#load_progress_wrap').show();
   $('#load_progress_bar').css('width', progressValue + '%');
-  $('#load_progress_text').text(statusStepText(progressStepValue) + '… ' + progressValue + '%');
+  var step = listLoadingActive ? '목록 불러오는 중' : statusStepText(progressStepValue);
+  $('#load_progress_text').text(step + '… ' + progressValue + '%');
 }
 function startProgressCreep(cap) {
   if (progressTimer) clearInterval(progressTimer);
@@ -691,10 +695,16 @@ function finishProgress(ret) {
   progressDoneOnce = true;
 }
 var dbPollFail = 0;
+// 두 폴링(DB 통계·목록 재구축)이 모두 끝났을 때만 진척 바를 끝낸다 —
+// 한쪽이 끝나고 다른 쪽이 아직 도는 중에 '완료'가 뜨면 안 된다.
+function finishProgressIfIdle(ret) {
+  if (dbPollTimer || listPollTimer) return;
+  finishProgress(ret);
+  progressActive = false;
+}
 function stopDbPoll() {
   if (dbPollTimer) { clearInterval(dbPollTimer); dbPollTimer = null; }
-  finishProgress();
-  progressActive = false;
+  finishProgressIfIdle();
 }
 function startDbPoll() {
   if (dbPollTimer) return;
@@ -721,13 +731,11 @@ function startDbPoll() {
           }
           markInfoUpdated();
           $('#status_foot_comment').text('파일수·신규·missing은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
-          finishProgress();
-          progressActive = false;
+          finishProgressIfIdle();
         } else if (r.db_off) {
           clearInterval(dbPollTimer); dbPollTimer = null;
           $('.dbstats-ph').text('');
-          finishProgress();
-          progressActive = false;
+          finishProgressIfIdle();
         }
       },
       error: function () {
@@ -737,6 +745,32 @@ function startDbPoll() {
       }
     });
   }, 3000);
+}
+
+// 목록 재구축 폴링 — 대시보드는 저장된 복사본을 먼저 보여 주고,
+// 워커가 새로 만든 목록이 준비되면 조용히 다시 불러 갈아 끼운다.
+// (DB 통계 폴링과 같은 방식, 5초 간격·최대 2분)
+var listPollTimer = null;
+var listPollCount = 0;
+var listHasRows = false;
+function stopListPoll() {
+  if (listPollTimer) { clearInterval(listPollTimer); listPollTimer = null; }
+}
+function startListPoll() {
+  if (listPollTimer) return;
+  listPollCount = 0;
+  listPollTimer = setInterval(function () {
+    listPollCount++;
+    if (listPollCount > 24) {
+      stopListPoll();
+      finishProgressIfIdle();
+      // 2분이 지나도 목록이 안 오면(워커가 멈춰 있거나 만드는 데
+      // 실패한 경우) 빈 화면만 두지 않고 다시 시도하라고 안내한다.
+      if (!listHasRows) $('#status_list_div').html('<div style="padding:24px 4px; color:#c0392b">목록을 불러오지 못했습니다. 새로고침 버튼을 눌러 다시 시도해 주세요.</div>');
+      return;
+    }
+    load_list(false, true);
+  }, 5000);
 }
 
 var metaChoiceKey = null;
@@ -875,7 +909,7 @@ function scheduleStatePoll(data) {
 }
 
 function load_list(force, quiet) {
-  if (!dbPollTimer) loadStartAt = Date.now();
+  if (!dbPollTimer && !listPollTimer) loadStartAt = Date.now();
   if (!quiet) {
     $('#load_progress_wrap').show();
     if ((force || !progressDoneOnce) && !progressTimer) { progressValue = 0; progressStepValue = 0; paintProgress(); startProgressCreep(40); }
@@ -902,7 +936,25 @@ function load_list(force, quiet) {
           }
           return;
         }
+        listLoadingActive = !!ret.list_loading;
+        if (ret.list_loading && !(ret.data && ret.data.length)) {
+          // 저장된 목록이 아직 없어 워커가 만드는 중 — 초기 로딩 문구
+          // ('대시보드를 불러오는 중입니다')를 그대로 두고 진척 바만
+          // 보여 준다. 빈 데이터로 그리면 서버 카드에 '응답 없음' 같은
+          // 틀린 표시가 나가고, 로그 경고까지 뜨게 된다.
+          progressActive = true;
+          setProgress(ret.progress);
+          startProgressCreep(95);
+          startListPoll();
+          if (ret.db_loading) startDbPoll();
+          if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
+            applyRefreshUI(ret.refresh_min);
+            setupTimer(ret.refresh_min);
+          }
+          return;
+        }
         hasData = true;
+        listHasRows = !!(ret.data && ret.data.length);
         $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
         if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
@@ -910,13 +962,19 @@ function load_list(force, quiet) {
         markInfoUpdated();
         scheduleStatePoll(ret.data);
         if (quiet) {
-          // 상태 확인용 조용한 폴링: 진척 바는 건드리지 않는다
-        } else if (ret.db_loading) {
+          // 상태 확인용 조용한 폴링: 진척 바는 건드리지 않는다.
+          // 단, 목록 재구축 폴링 중이면 끝났는지 보고 끝났으면 멈춘다.
+          // (progressActive일 때만 끝낸다 — 이미 끝난 바를 상태 폴링이
+          //  다시 건드려 소요 시간이 바뀌면 안 되므로.)
+          if (ret.list_loading) startListPoll();
+          else { stopListPoll(); if (progressActive) finishProgressIfIdle(ret); }
+        } else if (ret.db_loading || ret.list_loading) {
           progressActive = true;
           setProgress(ret.progress);
           startProgressCreep(95);
-          startDbPoll();
-        } else if (!dbPollTimer) {
+          if (ret.db_loading) startDbPoll();
+          if (ret.list_loading) startListPoll();
+        } else if (!dbPollTimer && !listPollTimer) {
           finishProgress(ret);
           progressActive = false;
         }

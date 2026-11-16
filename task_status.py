@@ -10,6 +10,13 @@
 - status_db_stats_cache : 계산 결과 {'at': 시각, 'data': {...}} (기존과 동일)
 - status_db_stats_state : {'busy', 'progress', 'requested_at', 'started_at',
                            'finished_at', 'error'}
+- status_list_cache : 대시보드 목록 payload {'at': 시각, 'data': {...}}
+- status_list_state : 목록 재구축 상태 (위와 같은 형태)
+
+대시보드 목록 재구축도 이 워커가 전담한다 (2026-11-15 — 웹이 첫 접속 때
+목록을 동기 재구축하느라 FF 웹(gevent 단일 루프)이 멈추던 문제의 수정).
+웹은 저장된 복사본을 즉시 보여 주고 재구축 요청만 남기며, 이 워커의 감시
+루프가 요청을 받아 목록을 새로 만들어 같은 자리에 저장한다.
 """
 import json
 import threading
@@ -23,12 +30,18 @@ logger = P.logger
 
 STATE_KEY = 'status_db_stats_state'
 CACHE_KEY = 'status_db_stats_cache'
+LIST_STATE_KEY = 'status_list_state'
+LIST_CACHE_KEY = 'status_list_cache'
 WATCH_INTERVAL = 5
 REQUEST_EXPIRE = 15 * 60
 # 계산 중(busy)인 채로 이 시간(초)이 지나면 중단된 것으로 본다 — 정상 계산은
 # 2분을 넘기지 않는다. 계산 도중 ff가 재시작되면 busy가 영원히 남아 이후
 # 계산이 전부 막히던 문제(2026-11-11 실측)의 복구 기준이다.
 BUSY_EXPIRE = 10 * 60
+# 통계 캐시가 이보다 오래되면 워커가 주기적으로 다시 계산한다 — 대시보드를
+# 열 때마다 재계산을 트리거하던 기존 방식은 서버를 무겁게 만들었다.
+# (스캔·비우기 완료 시에는 사건 트리거로 이미 재계산이 요청된다.)
+STATS_MAX_AGE = 6 * 3600
 
 
 def read_state():
@@ -88,6 +101,107 @@ def _requeue_if_requested_during(req_at):
     if (state.get('requested_at') or 0) > req_at:
         finished_at = state.get('finished_at') or 0
         write_state(requested_at=max(time.time(), finished_at + 0.001))
+
+
+# ---------- 대시보드 목록 재구축 (웹은 요청만 남기고 워커가 수행) ----------
+
+def read_list_state():
+    try:
+        raw = P.ModelSetting.get(LIST_STATE_KEY)
+        if raw:
+            state = json.loads(raw)
+            if isinstance(state, dict):
+                return state
+    except Exception:
+        pass
+    return {}
+
+
+def write_list_state(**kwargs):
+    state = read_list_state()
+    state.update(kwargs)
+    try:
+        P.ModelSetting.set(LIST_STATE_KEY, json.dumps(state))
+    except Exception as e:
+        logger.warning(f'[Status] 목록 상태 저장 실패: {e}')
+    return state
+
+
+def request_list_rebuild(force=False):
+    """웹 프로세스가 목록 재구축을 요청한다 — 실제 재구축은 워커가 수행한다.
+
+    request_stats와 같은 중복 방지 규칙이다. 단 force(수동 새로고침)는
+    대기 중인 요청이 있어도 새로 남긴다 — 사용자가 눌렀는데 낡은
+    복사본만 보이는 일이 없게 하기 위해서다."""
+    state = read_list_state()
+    now = time.time()
+    requested_at = state.get('requested_at') or 0
+    finished_at = state.get('finished_at') or 0
+    if state.get('busy'):
+        started_at = state.get('started_at') or 0
+        if not force and requested_at > started_at and now - requested_at < REQUEST_EXPIRE:
+            return state
+        return write_list_state(requested_at=now)
+    if not force and requested_at > finished_at and now - requested_at < REQUEST_EXPIRE:
+        return state
+    return write_list_state(requested_at=now, progress=0, error=None)
+
+
+def _requeue_list_if_requested_during(req_at):
+    """재구축 중에 들어온 새 요청이 있으면 finished_at 뒤에 다시 남긴다."""
+    state = read_list_state()
+    if (state.get('requested_at') or 0) > req_at:
+        finished_at = state.get('finished_at') or 0
+        write_list_state(requested_at=max(time.time(), finished_at + 0.001))
+
+
+def compute_list():
+    """대시보드 목록 재구축 본체 — 워커에서만 실행한다.
+
+    목록 재구축(섹션 API·스캔 이력·건강·용량)은 수 초가 걸리고, 그중
+    로그 파싱은 CPU 작업이라 웹 프로세스에서 하면 FF 웹 전체가 멈춘다.
+    그래서 웹은 캐시만 읽고, 재구축은 이 워커가 수행해 결과를 저장한다.
+    실패해도 finished_at을 찍어 요청을 소진한다 — 찍지 않으면 감시
+    루프가 5초마다 실패하는 재구축을 반복하게 된다. 다음 대시보드
+    접속 때 다시 요청되므로, 실패가 영원히 남지는 않는다."""
+    t0 = time.time()
+    req_at = read_list_state().get('requested_at') or 0
+    write_list_state(busy=True, progress=0, started_at=t0, error=None)
+    try:
+        from .mod_status import ModuleStatus
+        data = ModuleStatus.build_list_data()
+        if data is None:
+            write_list_state(busy=False, progress=0, finished_at=time.time(),
+                             error='목록을 만들지 못했습니다 (shyni 연결·설정 확인 필요)')
+            return
+        try:
+            P.ModelSetting.set(LIST_CACHE_KEY,
+                               json.dumps({'at': time.time(), 'data': data}))
+        except Exception as e:
+            logger.warning(f'[Status] 대시보드 목록 캐시 저장 실패: {e}')
+            write_list_state(busy=False, progress=0, finished_at=time.time(),
+                             error=f'목록 저장에 실패했습니다: {e}')
+            return
+        write_list_state(busy=False, progress=100, finished_at=time.time())
+        _requeue_list_if_requested_during(req_at)
+        logger.info(f"[Status] 대시보드 목록 재구축 완료 (워커): {time.time() - t0:.2f}초")
+    except Exception as e:
+        logger.warning(f'[Status] 대시보드 목록 재구축 실패(워커): {e}')
+        write_list_state(busy=False, progress=0, finished_at=time.time(), error=str(e))
+        _requeue_list_if_requested_during(req_at)
+
+
+def _stats_cache_age():
+    """DB 통계 캐시의 나이(초) — 없으면 None."""
+    try:
+        raw = P.ModelSetting.get(CACHE_KEY)
+        if raw:
+            saved = json.loads(raw)
+            if isinstance(saved, dict) and saved.get('data'):
+                return time.time() - (saved.get('at') or 0)
+    except Exception:
+        pass
+    return None
 
 
 TRASH_CACHE_KEY = 'status_trash_counts_cache'
@@ -239,6 +353,31 @@ class TaskStatus:
                 finished_at = state.get('finished_at') or 0
                 if requested_at > finished_at and not state.get('busy'):
                     compute_stats()
+                else:
+                    # 주기 재계산 — 대시보드를 열 때마다 트리거하던 기존
+                    # 방식 대신, 워커가 캐시 나이를 보고 스스로 계산한다.
+                    # Relay가 꺼져 있으면 계산해도 실패하므로 요청하지 않는다.
+                    age = _stats_cache_age()
+                    if age is not None and age >= STATS_MAX_AGE \
+                            and not state.get('busy') \
+                            and not (requested_at > finished_at):
+                        try:
+                            if db_support.db_ready():
+                                request_stats()
+                        except Exception:
+                            pass
+                # 대시보드 목록 재구축 — 웹이 남긴 요청을 받아 처리한다
+                # (통계 계산과 같은 busy 만료·요청 소진 규칙).
+                list_state = read_list_state()
+                if list_state.get('busy'):
+                    started_at = list_state.get('started_at') or 0
+                    if started_at and time.time() - started_at > BUSY_EXPIRE:
+                        logger.warning('[Status] 중단된 목록 재구축 감지 — busy를 풀고 다시 만듭니다')
+                        list_state = write_list_state(busy=False, progress=0)
+                list_requested = list_state.get('requested_at') or 0
+                list_finished = list_state.get('finished_at') or 0
+                if list_requested > list_finished and not list_state.get('busy'):
+                    compute_list()
             except Exception as e:
                 logger.error(f'[Status] 통계 워커 오류: {e}')
             time.sleep(WATCH_INTERVAL)

@@ -224,7 +224,7 @@ def _same_job_busy(name):
         return False
 
 
-def _try_claim(idx, name, mode, job_started, job_row_id, section_label='전체'):
+def _try_claim(idx, name, mode, job_started, job_row_id, section_label='전체', action=None):
     """차례를 차지한다 — 진행 상태를 이 작업 것으로 쓰고 다시 읽어
     확인한다. 차지했으면 True.
     두 작업이 거의 동시에 차지하려는 틈을 줄이기 위해 쓰고 잠깐 쉰
@@ -236,6 +236,7 @@ def _try_claim(idx, name, mode, job_started, job_row_id, section_label='전체')
     _set_trash_current({
         'job_idx': idx, 'job_name': name, 'section_key': '',
         'section_title': section_label, 'stage': 'scan', 'mode': mode,
+        'action': action,
         'job_started_at': job_started, 'section_started_at': _now_text(),
         'claim_id': claim_id, 'job_row_id': job_row_id})
     time.sleep(random.uniform(0.3, 1.0))
@@ -256,7 +257,7 @@ def _finish_job_row(row_id, status, message):
         logger.warning(f'[휴지통 작업] 대기 행 정리 실패: {e}')
 
 
-def _wait_for_turn(idx, name, mode, job_started, section_label='전체'):
+def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=None):
     """차례를 기다렸다가 차지한다.
     (대기 행 id 또는 None, 기다린 초 또는 None)을 돌려준다.
     바로 시작하면 (None, 0), 기다렸다 시작하면 (행 id, 기다린 초),
@@ -265,32 +266,32 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체'):
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
     그 이름, 여러 개면 '전체'."""
     from .model_trash import ModelTrashItem
-    if get_trash_current() is None and _try_claim(idx, name, mode, job_started, None, section_label):
+    if get_trash_current() is None and _try_claim(idx, name, mode, job_started, None, section_label, action):
         return (None, 0)
     max_min = _max_wait_min()
     if max_min <= 0:
-        fail_trash_start(name, mode, '이미 진행 중인 휴지통 작업이 있어 시작하지 못했습니다.', section_label)
+        fail_trash_start(name, mode, '이미 진행 중인 휴지통 작업이 있어 시작하지 못했습니다.', section_label, action)
         return (None, None)
     running_name = (get_trash_current() or {}).get('job_name') or ''
     if running_name:
         wait_msg = f'앞선 작업({running_name}) 진행 중으로 끝나면 이어서 진행합니다.'
     else:
         wait_msg = '앞선 작업 진행 중으로 끝나면 이어서 진행합니다.'
-    item = ModelTrashItem(name, '', section_label, mode)
+    item = ModelTrashItem(name, '', section_label, mode, action)
     item.status = 'waiting'
     item.message = wait_msg
     try:
         item.save()
     except Exception as e:
         logger.error(f'[휴지통 작업] 대기 행 저장 실패: {e}')
-        fail_trash_start(name, mode, '대기 기록을 남기지 못했습니다.', section_label)
+        fail_trash_start(name, mode, '대기 기록을 남기지 못했습니다.', section_label, action)
         return (None, None)
     row_id = item.id
     t0 = time.time()
     deadline = t0 + max_min * 60
     while time.time() < deadline:
         time.sleep(WAIT_POLL_SEC)
-        if get_trash_current() is None and _try_claim(idx, name, mode, job_started, row_id, section_label):
+        if get_trash_current() is None and _try_claim(idx, name, mode, job_started, row_id, section_label, action):
             waited = int(time.time() - t0)
             try:
                 row = (F.db.session.query(ModelTrashItem)
@@ -352,14 +353,14 @@ def get_last_trash_start_error(max_age_sec=TRASH_START_ERROR_MAX_AGE_SEC):
     return err
 
 
-def fail_trash_start(job_name, mode, reason, section_label='전체'):
+def fail_trash_start(job_name, mode, reason, section_label='전체', action=None):
     """작업 단위 시작 실패 — 이력 행을 남기고 배너용 오류를 기록한다.
     이력 행 저장이 실패해도 배너 기록은 시도한다.
     section_label — 이력 행에 표시할 라이브러리명. 대상을 알면 그 이름,
-    모르면 '전체'."""
+    모르면 '전체'. action — 알면 이력 행에 함께 남긴다."""
     try:
         from .model_trash import ModelTrashItem
-        item = ModelTrashItem(job_name, '', section_label, mode)
+        item = ModelTrashItem(job_name, '', section_label, mode, action)
         item.finish('failed', reason)
     except Exception as e:
         logger.error(f'[휴지통 작업] 시작 실패 이력 기록 실패: {e}')
@@ -623,7 +624,8 @@ class TaskTrash:
                     job = None
                 if job is not None:
                     fail_trash_start(job.get('name') or f'작업 {idx + 1}',
-                                     mode, f'실행 중 오류가 발생했습니다: {e}')
+                                     mode, f'실행 중 오류가 발생했습니다: {e}',
+                                     '전체', job.get('action'))
 
     @staticmethod
     def _fail_running_status(key, job_name):
@@ -674,18 +676,18 @@ class TaskTrash:
                    if a.strip()]
         for anchor in anchors:
             if not os.path.exists(anchor):
-                fail_trash_start(name, mode, f'기준 경로를 찾을 수 없습니다 — {anchor}')
+                fail_trash_start(name, mode, f'기준 경로를 찾을 수 없습니다 — {anchor}', '전체', action)
                 logger.error(f'[휴지통 작업] 중단: 기준 경로 없음 — {anchor}')
                 return
 
         sections, err = ModuleStatus._sections()
         if err:
-            fail_trash_start(name, mode, err)
+            fail_trash_start(name, mode, err, '전체', action)
             return
         selected = {str(s) for s in (job.get('sections') or [])}
         targets = [s for s in sections if not selected or str(s['key']) in selected]
         if not targets:
-            fail_trash_start(name, mode, '대상 라이브러리가 없습니다.')
+            fail_trash_start(name, mode, '대상 라이브러리가 없습니다.', '전체', action)
             return
         # 작업 단위 행(대기 행) 표시 — 대상이 라이브러리 1개면 그 이름을 쓰고,
         # 여러 개면 '전체'로 둔다. 1개짜리 작업에 '전체'가 붙으면 모든
@@ -696,13 +698,13 @@ class TaskTrash:
         url, token = ShyniBackend.get_config()
         if not url or not token:
             fail_trash_start(name, mode, '기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.',
-                             job_label)
+                             job_label, action)
             return
         _clear_trash_start_error()
 
         # 앞선 작업이 돌고 있으면 기다렸다가 차례가 되면 실행한다.
         # 기다리다 시간 초과하면 _wait_for_turn이 실패 행을 남긴다.
-        job_row_id, _waited = _wait_for_turn(idx, name, mode, job_started, job_label)
+        job_row_id, _waited = _wait_for_turn(idx, name, mode, job_started, job_label, action)
         if _waited is None:
             return
 
@@ -710,13 +712,13 @@ class TaskTrash:
             key = str(sec['key'])
             title = sec.get('title') or key
             if _trash_cancel_requested():
-                item = ModelTrashItem(name, key, title, mode)
+                item = ModelTrashItem(name, key, title, mode, action)
                 item.finish('cancelled', '취소 요청으로 실행하지 않았습니다.')
                 continue
             # 건너뜀 가드는 섹션 시작 시마다 다시 읽는다 (W5)
             skip_reason = _compute_skip_reason(key)
             if skip_reason is not None:
-                item = ModelTrashItem(name, key, title, mode)
+                item = ModelTrashItem(name, key, title, mode, action)
                 item.finish('cancelled', f'건너뜀 ({skip_reason})')
                 logger.info(f'[휴지통 작업] {title}: 건너뜀 ({skip_reason})')
                 continue
@@ -727,11 +729,11 @@ class TaskTrash:
             except Exception:
                 busy = False
             if busy:
-                item = ModelTrashItem(name, key, title, mode)
+                item = ModelTrashItem(name, key, title, mode, action)
                 item.finish('cancelled', '건너뜀 (현황에서 작업 중)')
                 continue
 
-            item = ModelTrashItem(name, key, title, mode)
+            item = ModelTrashItem(name, key, title, mode, action)
             item.save()
             status, message = 'done', ''
             vfs_duration = None
@@ -801,7 +803,7 @@ class TaskTrash:
                         'section_title': title,
                         'stage': step, 'job_started_at': job_started,
                         'section_started_at': _now_text(),
-                        'mode': mode, 'job_row_id': job_row_id})
+                        'mode': mode, 'action': action, 'job_row_id': job_row_id})
                     try:
                         if step == 'refresh':
                             # 폴더별 VFS 새로고침 — 하나가 실패해도

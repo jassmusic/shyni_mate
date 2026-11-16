@@ -108,9 +108,10 @@ class ModuleStatus(PluginModuleBase):
     def _storage(cls):
         """데이터 폴더가 있는 디스크의 사용량 + 데이터 폴더 용량(캐시).
 
-        폴더 용량 측정은 du 전체 순회라 디스크를 오래 붙잡으므로, 자동
-        측정은 캐시된 용량이 아예 없을 때(최초 1회)만 하고, 그 이후에는
-        사용자가 새로고침 아이콘을 눌렀을 때만 잰다.
+        폴더 용량 측정은 du 전체 순회라 디스크를 오래 붙잡으므로,
+        자동 측정은 하지 않는다 — 사용자가 새로고침 아이콘을 눌렀을
+        때만 잰다. (이전에는 캐시가 없을 때 첫 대시보드 접속에서
+        자동으로 측정했는데, 첫 접속을 무겁게 만드는 원인 중 하나였다.)
         """
         path = (P.ModelSetting.get('base_shyni_data_path') or '').strip()
         info = {'path': path, 'measuring': cls._size_measuring}
@@ -136,8 +137,6 @@ class ModuleStatus(PluginModuleBase):
                     info['breakdown'] = bd
             except Exception:
                 pass
-        if info.get('data_size') is None:
-            cls._start_measure_data_size(path)
         return info
 
     # 데이터 폴더 하위 폴더를 유형별로 묶는 규칙 (라벨, 폴더 이름들)
@@ -405,8 +404,23 @@ class ModuleStatus(PluginModuleBase):
 
     @classmethod
     def _scan_history(cls):
-        """로그 파일들을 병합해 라이브러리별 최신 스캔 기록을 만든다. (기록, 파일수)"""
+        """로그 파일들을 병합해 라이브러리별 최신 스캔 기록을 만든다. (기록, 파일수)
+
+        Relay가 켜져 있으면 DB compat_jobs가 정본이라 로그 파싱을 생략한다
+        — 로그는 수십 MB(2026-11-15 실측 44MB·13만 줄)라 파싱이 CPU를
+        오래 붙잡고, 웹에서 하면 FF 웹 전체가 멈춘다. DB 기록은 스캔이
+        만들었던 compat job과 같은 출처라 로그와 같은 내용을 담는다.
+        DB에 기록이 없으면(스캔 전·DB 오류) 로그로 폴백한다.
+        """
         files = cls._log_files()
+        try:
+            from . import db_support
+            if db_support.db_ready():
+                db_recs = cls._db_scan_history()
+                if db_recs:
+                    return db_recs, len(files)
+        except Exception:
+            pass
         merged = {}
         for f in files:
             try:
@@ -431,11 +445,6 @@ class ModuleStatus(PluginModuleBase):
                     merged[lib] = rec
         for rec in merged.values():
             rec['time_text'] = cls._to_kst(rec['time'])
-        # DB 스캔 job 기록: 로그 기록보다 최신이면 그쪽을 쓴다.
-        for lib, drec in cls._db_scan_history().items():
-            prev = merged.get(str(lib))
-            if prev is None or str(drec['time']) >= str(prev.get('time') or ''):
-                merged[str(lib)] = drec
         return merged, len(files)
 
     @classmethod
@@ -665,14 +674,17 @@ class ModuleStatus(PluginModuleBase):
             return False
         return bool(started_ts) and time.time() - started_ts > minutes * 60
 
-    def _refresh_state(self, key, state):
+    @classmethod
+    def _refresh_state(cls, key, state):
+        # classmethod — 워커의 목록 재구축(build_list_data)에서도 쓴다.
+        # 인스턴스 상태를 쓰지 않아 클래스 메서드로 바꿔도 동작이 같다.
         changed = False
         vfs = state.get('vfs')
         if vfs and vfs.get('status') == 'running' and vfs.get('job') is not None:
-            addr, _ = self._rc_target(vfs.get('path', ''))
+            addr, _ = cls._rc_target(vfs.get('path', ''))
             if addr:
                 try:
-                    job = self._rc(addr, 'job/status', {'jobid': vfs['job']})
+                    job = cls._rc(addr, 'job/status', {'jobid': vfs['job']})
                     if job.get('finished'):
                         vfs['status'] = 'failed' if job.get('error') else 'done'
                         vfs['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -731,12 +743,12 @@ class ModuleStatus(PluginModuleBase):
                              and str(cur.get('section_key')) == str(key))
                 except Exception:
                     alive = False
-                stale = (not alive) and self._started_over_min(
-                    trash, self._stuck_timeout_min(trash))
+                stale = (not alive) and cls._started_over_min(
+                    trash, cls._stuck_timeout_min(trash))
             elif trash.get('mode') == 'refresh_scan_empty':
-                stale = self._started_over_min(trash, 1)
+                stale = cls._started_over_min(trash, 1)
             else:
-                stale = self._started_over_min(trash, self._stuck_timeout_min(trash))
+                stale = cls._started_over_min(trash, cls._stuck_timeout_min(trash))
             if stale:
                 trash['status'] = 'interrupted'
                 trash['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -774,7 +786,7 @@ class ModuleStatus(PluginModuleBase):
                             # (pre_max_id가 있는 카드 스캔만, stats에 new가 없는
                             # 경우만; 측정은 백그라운드 스레드에서 한다).
                             try:
-                                self._maybe_measure_card_scan_new(key, scan, job)
+                                cls._maybe_measure_card_scan_new(key, scan, job)
                             except Exception as e:
                                 logger.warning(f'[현황] 카드 스캔 신규 측정 시작 실패: {e}')
                         elif job.get('status') == 'failed':
@@ -798,16 +810,70 @@ class ModuleStatus(PluginModuleBase):
             # (기본값 30분)이 지나면 중단으로 정리한다. job id가 있는 기록은
             # 폴링으로만 판정하고 시간 제한을 적용하지 않는다 (수 시간짜리
             # 정상 스캔이 중단으로 찍히면 안 되므로).
-            timeout = self._stuck_timeout_min(scan)
-            if self._started_over_min(scan, timeout):
+            timeout = cls._stuck_timeout_min(scan)
+            if cls._started_over_min(scan, timeout):
                 scan['status'] = 'interrupted'
                 scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 scan['error'] = '스캔 상태를 확인할 수 없어 중단으로 정리했습니다'
                 logger.warning(f'[현황] 스캔 전송됨 표시가 오래돼 중단으로 정리: 섹션 {key}')
                 changed = True
         if changed:
-            self._set_state(key, state)
+            cls._set_state(key, state)
         return state
+
+    # ---------- 대시보드 목록 재구축 (Celery 워커 전용) ----------
+    @classmethod
+    def build_list_data(cls):
+        """대시보드 목록 payload를 처음부터 만든다 — Celery 워커가 부른다.
+
+        웹은 이 함수를 직접 부르지 않는다. 재구축(섹션 API·스캔 이력·
+        건강·용량)은 수 초가 걸리고, 그중 로그 파싱은 CPU 작업이라 웹
+        프로세스에서 하면 FF 웹(gevent 단일 루프) 전체가 멈춘다.
+        웹은 저장된 복사본만 읽고, 재구축 요청은 워커에 남긴다.
+        실패하면 None을 돌려준다 (워커가 error 상태로 기록한다).
+        """
+        sections, err = cls._sections()
+        if err:
+            logger.warning(f'[Status] 대시보드 목록 재구축 실패: {err}')
+            return None
+        history, log_file_count = cls._scan_history()
+        rows = []
+        for sec in sections:
+            state = cls._refresh_state(sec['key'], cls._get_state(sec['key']))
+            sec['state'] = state
+            sec['last_scan'] = history.get(str(sec['key']))
+            rows.append(sec)
+        # 도서 카드 신규는 주기 스캔 이력 실측값으로 채운다
+        # (shyni 도서 stats에는 신규 키가 없어 last_scan이 비어 있다).
+        cls._fill_book_new(rows)
+        periodic_current = None
+        raw_cur = P.ModelSetting.get('periodic_current')
+        if raw_cur:
+            try:
+                cur = json.loads(raw_cur)
+                if isinstance(cur, dict):
+                    periodic_current = cur
+            except Exception:
+                pass
+        trash_current = None
+        raw_trash = P.ModelSetting.get('trash_current')
+        if raw_trash:
+            try:
+                cur = json.loads(raw_trash)
+                if isinstance(cur, dict):
+                    trash_current = cur
+            except Exception:
+                pass
+        type_counts = {}
+        for sec in sections:
+            t = sec.get('type') or 'unknown'
+            type_counts[t] = type_counts.get(t, 0) + 1
+        return {'data': rows, 'log_files': log_file_count,
+                'periodic_current': periodic_current,
+                'trash_current': trash_current,
+                'type_counts': type_counts,
+                'server': cls._health(), 'storage': cls._storage(),
+                'cached_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
     # ---------- 화면 AJAX (로그인 세션용 /ajax/<module>/<cmd>) ----------
     def process_ajax(self, sub, req):
@@ -844,98 +910,80 @@ class ModuleStatus(PluginModuleBase):
                                 'refresh_min': self._refresh_min(),
                                 'periodic_current': None, 'trash_current': None,
                                 'type_counts': {},
-                                'db_loading': False, 'progress': 100,
+                                'db_loading': False, 'list_loading': False,
+                                'progress': 100,
                                 'server': None, 'storage': None})
-            # 한 번 불러온 정보는 새로고침 주기 동안 그대로 보여 주고, 주기가 지나거나
-            # 강제 새로고침(force=1)일 때만 다시 가져온다.
+            # 웹은 저장된 복사본을 즉시 보여 주고, 재구축은 워커에 맡긴다.
+            # 재구축(섹션 API·스캔 이력·건강·용량)은 수 초가 걸리고 그중
+            # 로그 파싱은 CPU 작업이라 웹에서 하면 FF 웹(gevent 단일 루프)
+            # 전체가 멈춘다 — 첫 접속 때 웹이 뻗던 원인이다 (2026-11-15 실측).
+            # 복사본이 낡았어도 먼저 보여 주고(기준 시각 표시), 워커가
+            # 뒤에서 새로 만들면 화면이 폴링으로 받아 간다.
             force = (req.form.get('force') or '') == '1'
             interval = self._refresh_min()
             ttl = interval * 60 if interval and interval >= 1 else 0
             now_ts = time.time()
-            base = None
-            from_cache = False
             cache = type(self)._list_cache
-            if cache['data'] is None:
-                # 재시작 직후에는 디스크에 저장해 둔 지난 복사본으로라도 먼저 보여 준다
+            try:
+                saved_raw = P.ModelSetting.get('status_list_cache')
+                if saved_raw:
+                    saved = json.loads(saved_raw)
+                    saved_at = (saved.get('at') or 0) if isinstance(saved, dict) else 0
+                    if isinstance(saved, dict) and saved.get('data') \
+                            and saved_at >= (cache['at'] or 0):
+                        cache = {'at': saved_at, 'data': saved['data']}
+                        type(self)._list_cache = cache
+            except Exception:
+                pass
+            base = cache['data']
+            from_cache = base is not None
+            stale = base is None or force \
+                or (now_ts - (cache['at'] or 0) >= ttl)
+            list_loading = False
+            if stale:
                 try:
-                    saved_raw = P.ModelSetting.get('status_list_cache')
-                    if saved_raw:
-                        saved = json.loads(saved_raw)
-                        if isinstance(saved, dict) and saved.get('data'):
-                            cache = {'at': saved.get('at') or 0, 'data': saved['data']}
-                            type(self)._list_cache = cache
+                    from .task_status import request_list_rebuild, read_list_state
+                    request_list_rebuild(force=force)
+                    st = read_list_state()
+                    list_loading = bool(st.get('busy')) \
+                        or ((st.get('requested_at') or 0) > (st.get('finished_at') or 0))
                 except Exception:
-                    pass
-            if not force and ttl > 0 and cache['data'] is not None \
-                    and now_ts - cache['at'] < ttl:
-                base = cache['data']
-                from_cache = True
+                    list_loading = base is None
             if base is None:
-                sections, err = self._sections()
-                if err:
-                    return jsonify({'ret': 'fail', 'msg': err})
-                history, log_file_count = self._scan_history()
-                rows = []
-                for sec in sections:
-                    state = self._refresh_state(sec['key'], self._get_state(sec['key']))
-                    sec['state'] = state
-                    sec['last_scan'] = history.get(str(sec['key']))
-                    rows.append(sec)
-                # 도서 카드 신규는 주기 스캔 이력 실측값으로 채운다
-                # (shyni 도서 stats에는 신규 키가 없어 last_scan이 비어 있다).
-                self._fill_book_new(rows)
-                periodic_current = None
-                raw_cur = P.ModelSetting.get('periodic_current')
-                if raw_cur:
-                    try:
-                        cur = json.loads(raw_cur)
-                        if isinstance(cur, dict):
-                            periodic_current = cur
-                    except Exception:
-                        pass
-                trash_current = None
-                raw_trash = P.ModelSetting.get('trash_current')
-                if raw_trash:
-                    try:
-                        cur = json.loads(raw_trash)
-                        if isinstance(cur, dict):
-                            trash_current = cur
-                    except Exception:
-                        pass
-                type_counts = {}
-                for sec in sections:
-                    t = sec.get('type') or 'unknown'
-                    type_counts[t] = type_counts.get(t, 0) + 1
-                base = {'data': rows, 'log_files': log_file_count,
-                        'periodic_current': periodic_current,
-                        'trash_current': trash_current,
-                        'type_counts': type_counts,
-                        'server': self._health(), 'storage': self._storage(),
-                        'cached_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                type(self)._list_cache = {'at': now_ts, 'data': base}
-                try:
-                    P.ModelSetting.set('status_list_cache',
-                                       json.dumps({'at': now_ts, 'data': base}))
-                except Exception as e:
-                    logger.warning(f'[Status] 대시보드 목록 캐시 저장 실패: {e}')
+                # 저장된 복사본이 아예 없으면(최초 설치) 빈 목록 + 로딩
+                # 표시로 답하고, 화면이 폴링으로 워커의 복사본을 받아 간다.
+                # log_files는 None으로 — 0을 보내면 화면이 '로그를 찾지
+                # 못했습니다' 경고를 띄우는데, 아직 확인 전이라 틀린 말이다.
+                return jsonify({'ret': 'success', 'data': [],
+                                'log_files': None,
+                                'refresh_min': interval,
+                                'periodic_current': None, 'trash_current': None,
+                                'type_counts': {},
+                                'db_stats_on': False,
+                                'db_loading': False,
+                                'list_loading': True,
+                                'progress': 0,
+                                'health': None,
+                                'from_cache': False,
+                                'cached_at': None,
+                                'server': None, 'storage': None})
             rows = base['data']
-            if from_cache:
-                # 캐시로 답하는 경우에도 상태만큼은 그 자리에서 다시 확인한다 —
-                # 캐시를 만든 뒤에 시작한 작업도 바로 보이고, 끝난 작업이
-                # '진행 중'으로 남지도 않는다. (이전에는 캐시에 이미 진행 중으로
-                # 표시된 경우에만 다시 확인해, 새로 시작한 작업이 다음 주기까지
-                # 화면에 안 나왔다 — 2026-11-12 국내 모음 새로고침 후 스캔에서 확인됨)
-                for sec in rows:
-                    try:
-                        sec['state'] = self._refresh_state(sec['key'], self._get_state(sec['key']))
-                    except Exception:
-                        pass
-                # 신규도 마찬가지 — 캐시를 만든 뒤에 끝난 주기 스캔의 신규가
-                # 다음 주기까지 '-'로 남지 않게 그 자리에서 다시 채운다.
+            # 캐시로 답하는 경우에도 상태만큼은 그 자리에서 다시 확인한다 —
+            # 캐시를 만든 뒤에 시작한 작업도 바로 보이고, 끝난 작업이
+            # '진행 중'으로 남지도 않는다. (이전에는 캐시에 이미 진행 중으로
+            # 표시된 경우에만 다시 확인해, 새로 시작한 작업이 다음 주기까지
+            # 화면에 안 나왔다 — 2026-11-12 국내 모음 새로고침 후 스캔에서 확인됨)
+            for sec in rows:
                 try:
-                    self._fill_book_new(rows)
+                    sec['state'] = self._refresh_state(sec['key'], self._get_state(sec['key']))
                 except Exception:
                     pass
+            # 신규도 마찬가지 — 캐시를 만든 뒤에 끝난 주기 스캔의 신규가
+            # 다음 주기까지 '-'로 남지 않게 그 자리에서 다시 채운다.
+            try:
+                self._fill_book_new(rows)
+            except Exception:
+                pass
             periodic_current = base['periodic_current']
             trash_current = base.get('trash_current')
             db_stats_on = False
@@ -961,7 +1009,12 @@ class ModuleStatus(PluginModuleBase):
                             'type_counts': base['type_counts'],
                             'db_stats_on': db_stats_on,
                             'db_loading': db_loading,
-                            'progress': self._overall_progress(db_loading),
+                            'list_loading': list_loading,
+                            # 목록 재구축 중에는 진행률을 40%로 묶어 둔다 —
+                            # DB 통계가 준비돼 100%가 찍히면 목록이 아직
+                            # 오는 중인데 '완료'로 보이는 문제가 생긴다.
+                            'progress': min(self._overall_progress(db_loading), 40)
+                            if list_loading else self._overall_progress(db_loading),
                             'health': health,
                             'from_cache': from_cache,
                             'cached_at': base.get('cached_at'),
@@ -1294,12 +1347,11 @@ class ModuleStatus(PluginModuleBase):
                 cls._db_stats_busy = bool(state.get('busy')) or pending
                 cls._db_stats_progress = state.get('progress') or 0
                 return cached, cls._db_stats_busy
-            try:
-                stale_after = max(60, int(self._refresh_min()) * 60)
-            except Exception:
-                stale_after = 60
-            if time.time() - cls._db_stats_cache['at'] >= stale_after:
-                request_stats()
+            # 낡은 캐시라도 대시보드를 열 때마다 재계산을 트리거하지 않는다.
+            # 재계산은 17초짜리 무거운 DB 집계(2026-11-15 실측)라, 열 때마다
+            # 돌리면 서버가 무거워진다. 재계산은 스캔·비우기 완료 같은
+            # 사건과 워커의 주기 검사(6시간)가 맡는다 — 대시보드는 저장된
+            # 결과를 보여 주는 데 집중한다.
             return cached, False
         request_stats()
         return None, True

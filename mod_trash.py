@@ -49,6 +49,7 @@ class ModuleTrash(PluginModuleBase):
                 if 'trash_item' in insp.get_table_names():
                     cols = [c['name'] for c in insp.get_columns('trash_item')]
                     new_cols = [
+                        ('action', 'VARCHAR'),
                         ('shyni_job_id', 'VARCHAR'), ('stat_total', 'INTEGER'),
                         ('stat_new', 'INTEGER'), ('stat_missing', 'INTEGER'),
                         ('stat_updated', 'INTEGER'), ('stat_restored', 'INTEGER'),
@@ -125,11 +126,13 @@ class ModuleTrash(PluginModuleBase):
             logger.error(f'[Trash] Celery 시작 실패: {e}')
             try:
                 jobs = get_trash_jobs()
-                job_name = (jobs[idx].get('name')
-                            if 0 <= idx < len(jobs) else '') or ''
+                job = jobs[idx] if 0 <= idx < len(jobs) else None
+                job_name = (job.get('name') if job else '') or ''
+                job_action = job.get('action') if job else None
             except Exception:
                 job_name = ''
-            fail_trash_start(job_name, mode, f'작업을 넘기지 못했습니다: {e}')
+                job_action = None
+            fail_trash_start(job_name, mode, f'작업을 넘기지 못했습니다: {e}', '전체', job_action)
 
     def one_execute(self, idx):
         # '지금 실행'은 수동 실행이라 mode를 'manual'로 넘긴다 (R19).
@@ -151,7 +154,8 @@ class ModuleTrash(PluginModuleBase):
             except Exception as e:
                 logger.error(f'[Trash] 지금 실행 실패: {e}')
                 fail_trash_start(jobs[idx].get('name') or '', 'manual',
-                                 f'실행을 시작하지 못했습니다: {e}')
+                                 f'실행을 시작하지 못했습니다: {e}', '전체',
+                                 jobs[idx].get('action'))
         t = threading.Thread(target=func, args=())
         t.daemon = True
         t.start()
@@ -274,7 +278,11 @@ class ModuleTrash(PluginModuleBase):
                 return jsonify({'ret': 'fail', 'msg': err})
             return jsonify({'ret': 'success', 'data': sections})
         if sub == 'current':
-            return jsonify({'ret': 'success', 'data': get_trash_current(),
+            cur = get_trash_current()
+            if cur and cur.get('action'):
+                from .model_trash import action_label
+                cur['action_label'] = action_label(cur.get('action'))
+            return jsonify({'ret': 'success', 'data': cur,
                             'last_error': get_last_trash_start_error()})
         if sub == 'clear_start_error':
             clear_trash_start_error()

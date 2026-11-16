@@ -22,7 +22,7 @@
   <select id="histLibSel" class="form-control input-sm" style="flex:1 1 130px">
     <option value="">전체 라이브러리</option>
   </select>
-  <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·파일 경로 검색" style="flex:1 1 160px">
+  <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·동작·파일 경로 검색" style="flex:1 1 160px">
   <button type="button" class="btn btn-sm btn-default" id="histSearchBtn">검색</button>
   <button type="button" class="btn btn-sm btn-default" id="histResetBtn">초기화</button>
   <span style="margin-left:auto">
@@ -103,7 +103,7 @@ function renderCurrent(cur) {
     return;
   }
   var str = '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
-  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>';
+  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
   str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
   str += '<button type="button" class="btn btn-sm btn-danger" id="trashCancelBtn">취소</button>';
   str += '</div>';
@@ -145,7 +145,7 @@ function renderHistory(data) {
     str += '<tr class="hist-row" data-id="' + h.id + '" style="cursor:pointer' + (expanded ? '; background:#f7fafc' : '') + '">';
     str += '<td class="c-time">' + fmtTimeShort(h.start_time) + '</td>';
     str += '<td class="c-time">' + fmtTimeShort(h.finish_time) + '</td>';
-    str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + '</td>';
+    str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + (h.action_label ? '<div style="font-size:13px; color:#888">' + esc(h.action_label) + '</div>' : '') + '</td>';
     str += '<td class="c-name">' + esc(h.section_title) + '</td>';
     str += '<td class="c-status">' + statusText(h.status) + '</td>';
     str += '<td class="c-num">' + durCell(h) + '</td>';
@@ -203,6 +203,8 @@ function renderDetail(d) {
   if (d.section_title) head += (head ? ' — ' : '') + esc(d.section_title);
   if (headTime) head += (head ? ' · ' : '') + '<span style="color:#888">' + headTime + '</span>';
   if (head) str += '<div style="font-size:13px; margin-bottom:2px">' + head + '</div>';
+  // 동작 — 목록 둘째 줄과 같은 라벨. 0.9.8d 이전 행에는 없어 생략한다.
+  if (d.action_label) str += '<div><strong>동작</strong> — ' + esc(d.action_label) + '</div>';
   // 단계별 소요 — 대기 중이면 대기 경과를 초 단위로 올리는 타이머,
   // 기다렸다 시작한 행은 대기 시간을 맨 앞에 붙인다.
   var steps = [];

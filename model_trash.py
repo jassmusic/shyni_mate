@@ -7,6 +7,19 @@ from .setup import *
 logger = P.logger
 
 
+def action_label(action):
+    """동작 코드 → 화면 표시 라벨. task_trash.ACTION_LABEL이 원본이다.
+    (모듈 수준 import는 순환 참조가 되니 안에서 늦게 가져온다.)
+    모르는 코드·없음은 None — 화면에서 줄을 생략한다."""
+    if not action:
+        return None
+    try:
+        from .task_trash import ACTION_LABEL
+        return ACTION_LABEL.get(action)
+    except Exception:
+        return None
+
+
 class ModelTrashItem(ModelBase):
     """휴지통 주기 작업 실행 이력."""
     P = P
@@ -17,6 +30,7 @@ class ModelTrashItem(ModelBase):
     id = db.Column(db.Integer, primary_key=True)
     created_time = db.Column(db.DateTime)
     mode = db.Column(db.String)            # scheduler | manual
+    action = db.Column(db.String)          # refresh | scan | empty | refresh_scan | refresh_scan_empty
     status = db.Column(db.String)          # waiting | running | done | failed | cancelled | terminated
     job_name = db.Column(db.String)
     section_key = db.Column(db.String)
@@ -53,10 +67,11 @@ class ModelTrashItem(ModelBase):
         from .extensions import save_with_retry
         return save_with_retry(self)
 
-    def __init__(self, job_name, section_key, section_title, mode):
+    def __init__(self, job_name, section_key, section_title, mode, action=None):
         self.created_time = datetime.now()
         self.start_time = datetime.now()
         self.mode = mode
+        self.action = action
         self.status = 'running'
         self.job_name = job_name
         self.section_key = str(section_key)
@@ -107,6 +122,8 @@ class ModelTrashItem(ModelBase):
         return {
             'id': r.id,
             'mode': r.mode,
+            'action': r.action,
+            'action_label': action_label(r.action),
             'status': r.status,
             'job_name': r.job_name,
             'section_key': r.section_key,
@@ -142,6 +159,8 @@ class ModelTrashItem(ModelBase):
                 out.append({
                     'id': r.id,
                     'mode': r.mode,
+                    'action': r.action,
+                    'action_label': action_label(r.action),
                     'status': r.status,
                     'job_name': r.job_name,
                     'section_title': r.section_title,
@@ -163,11 +182,23 @@ class ModelTrashItem(ModelBase):
             if search:
                 needle = str(search).strip()
                 if needle:
-                    query = query.filter(or_(
+                    # 동작 라벨로도 찾는다 — '비우기'를 치면 비우기·
+                    # 새로고침 후 스캔 후 비우기 행이 함께 나온다.
+                    codes = []
+                    try:
+                        from .task_trash import ACTION_LABEL
+                        codes = [c for c, label in ACTION_LABEL.items()
+                                 if needle in label]
+                    except Exception:
+                        codes = []
+                    conds = [
                         cls.job_name.contains(needle),
                         cls.section_title.contains(needle),
                         cls.message.contains(needle),
-                        cls.append_files.contains(needle)))
+                        cls.append_files.contains(needle)]
+                    if codes:
+                        conds.append(cls.action.in_(codes))
+                    query = query.filter(or_(*conds))
             total = query.count()
             pages = max(1, (total + per - 1) // per)
             try:
