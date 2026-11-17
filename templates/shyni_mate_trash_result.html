@@ -14,7 +14,7 @@
 .hist-table .c-num .missing { display:block; font-size:13px; color:#dc3545; }
 </style>
 
-<div id="trash_current_div" style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">
+<div id="trash_current_div">
   진행 상태를 불러오는 중입니다.
 </div>
 
@@ -43,6 +43,13 @@ var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/trash/';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+
+// 수동 표시 여부 — 작업명에 '(전체)'·'(선택)' 같은 구분이 이미 들어
+// 있으면 '(수동)'을 붙이지 않는다 (휴지통 페이지 비우기 이력, 0.9.9).
+function showManual(jobName, mode) {
+  if (mode != 'manual') return false;
+  return !/\)\s*$/.test(jobName || '');
 }
 
 // 통계 칸 표시 — 예전 행의 NULL은 '-'로 표시한다
@@ -97,15 +104,58 @@ function stageLabel(stage) {
   return stage || '';
 }
 
+// 스캔 단계 영문 → 한글 표시 — 대시보드와 같은 표기
+var STAGE_LABELS = {refresh: '새로고침중', collect: '수집중', register: '등록중', analyze: '분석중', metadata: '메타 새로고침중', views: '목록 갱신중', done: '완료', cancelled: '취소됨', idle: '대기중'};
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return '-';
+  return Number(n).toLocaleString();
+}
+
+// 단계별 진행률 — '분석중 18/19 (95%)' 형태, 단계 수치가 없으면 단계명만
+function stageText(sp) {
+  var label = STAGE_LABELS[sp.stage] || sp.stage;
+  if (sp.stage_total) {
+    var pct = Math.round((sp.stage_processed || 0) * 100 / sp.stage_total);
+    return label + ' ' + fmtNum(sp.stage_processed || 0) + '/' + fmtNum(sp.stage_total) + ' (' + pct + '%)';
+  }
+  return label;
+}
+
+// 진행률 전체 — ' · 16,558/16,626 (100%) · 분석중 132/200 (66%)' 형태
+function progressText(sp) {
+  var prog = '';
+  if (sp.total) {
+    var pct = Math.round((sp.processed || 0) * 100 / sp.total);
+    prog = ' · ' + fmtNum(sp.processed || 0) + '/' + fmtNum(sp.total) + ' (' + pct + '%)';
+  }
+  if (sp.stage) prog += ' · ' + stageText(sp);
+  return prog;
+}
+
+// 진행 상태 서명 — 바뀔 때만 다시 그려, ✕로 닫은 배너가
+// 15초 폴링마다 다시 뜨지 않게 한다. 진행률은 서명에 넣어
+// 스캔이 진행될 때마다 숫자가 갱신되게 한다. (작업 관리와 같은 방식)
+var currentSig = null;
+
+function currentSignature(cur) {
+  if (!cur) return '';
+  var sp = cur.scan_progress || {};
+  return [cur.job_idx, cur.section_key, cur.stage, sp.processed, sp.total, sp.stage_processed, sp.stage_total].join('|');
+}
+
 function renderCurrent(cur) {
   if (!cur) {
-    $('#trash_current_div').html('<span style="color:#888">현재 진행 중인 휴지통 작업이 없습니다.</span>');
+    $('#trash_current_div').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 휴지통 스캔이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
     return;
   }
-  var str = '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
-  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
+  var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">';
+  str += '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
+  var prog = (cur.stage == 'scan' && cur.scan_progress) ? progressText(cur.scan_progress) : '';
+  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + prog + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
   str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
   str += '<button type="button" class="btn btn-sm btn-danger" id="trashCancelBtn">취소</button>';
+  str += '</div>';
   str += '</div>';
   $('#trash_current_div').html(str);
 }
@@ -113,7 +163,13 @@ function renderCurrent(cur) {
 function loadCurrent() {
   $.ajax({
     type: 'POST', url: API_BASE + 'current', data: {}, global: false,
-    success: function (ret) { if (ret.ret == 'success') renderCurrent(ret.data); }
+    success: function (ret) {
+      if (ret.ret != 'success') return;
+      var sig = currentSignature(ret.data || null);
+      if (sig === currentSig) return;
+      currentSig = sig;
+      renderCurrent(ret.data);
+    }
   });
 }
 
@@ -121,6 +177,7 @@ function statusText(s) {
   if (s == 'done') return '<span style="color:#2f855a">완료</span>';
   if (s == 'failed') return '<span style="color:#c0392b">실패</span>';
   if (s == 'cancelled') return '<span style="color:#b7791f">취소</span>';
+  if (s == 'skipped') return '<span style="color:#b7791f">건너뜀</span>';
   if (s == 'running') return '<span style="color:#2b6cb0">실행 중</span>';
   if (s == 'waiting') return '<span style="color:#6b46c1">대기 중</span>';
   if (s == 'terminated') return '<span style="color:#888">중단됨(재시작)</span>';
@@ -145,7 +202,7 @@ function renderHistory(data) {
     str += '<tr class="hist-row" data-id="' + h.id + '" style="cursor:pointer' + (expanded ? '; background:#f7fafc' : '') + '">';
     str += '<td class="c-time">' + fmtTimeShort(h.start_time) + '</td>';
     str += '<td class="c-time">' + fmtTimeShort(h.finish_time) + '</td>';
-    str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + (h.action_label ? '<div style="font-size:13px; color:#888">' + esc(h.action_label) + '</div>' : '') + '</td>';
+    str += '<td class="c-name">' + esc(h.job_name) + (showManual(h.job_name, h.mode) ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + (h.action_label ? '<div style="font-size:13px; color:#888">' + esc(h.action_label) + '</div>' : '') + '</td>';
     str += '<td class="c-name">' + esc(h.section_title) + '</td>';
     str += '<td class="c-status">' + statusText(h.status) + '</td>';
     str += '<td class="c-num">' + durCell(h) + '</td>';
@@ -188,7 +245,7 @@ function renderDetail(d) {
   var str = '<div style="font-size:13px; line-height:1.8">';
   // 상세 첫 줄 — 목록에서 줄인 초 단위 시각·전체 작업명을 보완한다.
   // 끝난 시각은 같은 날이면 시:분:초만, 자정을 넘겼으면 날짜까지 보여준다.
-  var headName = d.job_name ? esc(d.job_name) + (d.mode == 'manual' ? ' (수동)' : '') : '';
+  var headName = d.job_name ? esc(d.job_name) + (showManual(d.job_name, d.mode) ? ' (수동)' : '') : '';
   var headTime = '';
   if (d.start_time) {
     headTime = esc(d.start_time);
@@ -245,10 +302,12 @@ function renderDetail(d) {
     str += '<div><strong>집계</strong> — ' + aggTxt + '</div>';
   } else if (d.status == 'running') {
     str += '<div style="color:#888">작업이 끝나면 집계가 표시됩니다.</div>';
+  } else if (d.status == 'cancelled' || d.status == 'skipped') {
+    // 건너뛰거나 취소된 행은 집계 줄을 빼고, 아래 메시지 줄이 사유를 전한다.
   } else if (d.scan_duration == null) {
-    // 스캔이 실행되지 않은 행(비우기만 하는 작업·건너뛴 섹션)은 집계가
-    // 있을 수 없다. 결과 저장 전에 기록된 옛 행도 scan_duration이 비어 있다.
-    str += '<div style="color:#888">집계가 없습니다. (스캔이 실행되지 않았거나, 이 실행은 결과 저장이 되기 전에 기록됐습니다.)</div>';
+    // 스캔이 실행되지 않은 행(새로고침만·비우기만 하는 작업·옛 행)은
+    // 스캔 집계가 있을 수 없다.
+    str += '<div style="color:#888">스캔이 실행되지 않아 집계가 없습니다.</div>';
   } else {
     str += '<div style="color:#888">집계가 없습니다.</div>';
   }
@@ -268,18 +327,45 @@ function renderDetail(d) {
     if (!d.target_total) {
       str += '<span style="color:#888">없습니다.</span>';
     } else {
-      str += '<span style="color:#888">전체 ' + d.stat_total + '개' + (d.target_truncated ? ' (외 ' + (d.stat_total - d.target_total) + '개 더 있음)' : '') + '</span>';
+      // 파일 존재 요약 — 폴더를 펼치지 않아도 확인 결과를 알 수 있다.
+      // file_exists가 없는 옛 행에는 표시하지 않는다.
+      // 위 집계 줄에 전체 개수가 이미 나와 있으므로, 여기서는
+      // '전체 N개'를 빼고 존재 요약만 보여준다.
+      var feSummary = '';
+      if (d.file_exists) {
+        var feKeys = Object.keys(d.file_exists);
+        var nExist = 0, nMissing = 0;
+        for (var k = 0; k < feKeys.length; k++) {
+          if (d.file_exists[feKeys[k]] === true) nExist++;
+          else if (d.file_exists[feKeys[k]] === false) nMissing++;
+        }
+        if (feKeys.length) feSummary = '(파일 있음 ' + nExist + '개, 파일 없음 ' + nMissing + '개)';
+      }
+      var totalTxt = feSummary ? feSummary
+        : (d.stat_total != null ? '전체 ' + d.stat_total + '개'
+        : (d.target_total != null ? '전체 ' + d.target_total + '개' : ''));
+      str += '<span style="color:#888">' + totalTxt + (d.target_truncated ? ' (외 ' + (d.stat_total - d.target_total) + '개 더 있음)' : '') + '</span>';
       var tgroups = d.target_groups || [];
       str += '<ul style="margin:2px 0; padding-left:18px">';
       for (var g = 0; g < tgroups.length; g++) {
         var grp = tgroups[g];
         str += '<li><a href="#" class="target-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
-        if (grp.vfs_ok === true) str += ' <span style="color:#2f855a">· VFS OK</span>';
-        else if (grp.vfs_ok === false) str += ' <span style="color:#c0392b">· VFS 실패</span>';
+        if (grp.vfs_ok === true) str += ' <span style="color:#2f855a">· 새로고침 완료</span>';
+        else if (grp.vfs_ok === false) str += ' <span style="color:#c0392b">· 새로고침 실패</span>';
+        if (grp.scan_ok === true) str += ' <span style="color:#2f855a">· 스캔 OK</span>';
+        else if (grp.scan_ok === false) str += ' <span style="color:#c0392b">· 스캔 실패</span>';
         str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
         if (grp.vfs_ok === false && grp.vfs_error) str += '<div style="color:#888; font-size:12px; padding-left:14px">' + esc(grp.vfs_error) + '</div>';
+        if (grp.scan_ok === false && grp.scan_error) str += '<div style="color:#888; font-size:12px; padding-left:14px">' + esc(grp.scan_error) + '</div>';
         str += '<div class="target-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
-        for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
+        for (var f = 0; f < grp.files.length; f++) {
+          var fp = grp.folder + '/' + grp.files[f];
+          var fe = d.file_exists ? d.file_exists[fp] : undefined;
+          str += '<div>' + esc(grp.files[f]);
+          if (fe === true) str += ' <span style="color:#2f855a">· 파일 있음</span>';
+          else if (fe === false) str += ' <span style="color:#888">· 파일 없음</span>';
+          str += '</div>';
+        }
         str += '</div></li>';
       }
       str += '</ul>';
@@ -308,14 +394,14 @@ function renderDetail(d) {
     }
     str += '</div>';
   }
-  // 비운 파일 목록 — 폴더 단위 묶음. 추가 파일은 휴지통 작업에서
+  // 비운 파일 목록 — 폴더 단위 묶음. 추가 파일은 휴지통 스캔에서
   // 의미가 없어(다시 스캔하면 shyni가 휴지통 항목을 살리지 새로
   // 추가하지 않는다) 빼고, 비운 파일만 보여준다.
   // 비우기 단계가 없었던 행은 비운 개수가 없어 이 섹션을 표시하지 않는다.
   if (d.emptied_count != null) {
     str += '<div style="margin-top:6px"><strong>비운 파일</strong> ';
     if (d.emptied_total == null) {
-      str += '<span style="color:#888">파일 목록을 볼 수 없습니다. Relay가 꺼져 있으면 목록은 저장되지 않습니다.</span>';
+      str += '<span style="color:#888">Relay가 꺼져 있으면 파일 목록을 볼 수 없습니다.</span>';
     } else if (!d.emptied_total) {
       str += '<span style="color:#888">없습니다.</span>';
     } else {
@@ -437,6 +523,10 @@ $(document).ready(function () {
     setTimeout(loadCurrent, 2000);
   });
 
+  $(document).off('click', '#currentIdleClose').on('click', '#currentIdleClose', function () {
+    $('#trash_current_div').empty();
+  });
+
   $('#histLibSel').off('change').on('change', function () { loadHistory(1); });
   $('#histSearchBtn').off('click').on('click', function () { loadHistory(1); });
   $('#histSearch').off('keypress').on('keypress', function (e) {
@@ -486,7 +576,7 @@ $(document).ready(function () {
     e.stopPropagation();
     var key = $(this).data('key');
     if (key === null || key === undefined || key === '') return;
-    location.href = '/' + location.pathname.split('/')[1] + '/scan/trash?key=' + key;
+    location.href = '/' + location.pathname.split('/')[1] + '/trash/trash?key=' + key;
   });
 
   $('#histRefreshBtn').off('click').on('click', function () {

@@ -14,6 +14,7 @@
 <nav>
   {{ macros.m_tab_head_start() }}
     {{ macros.m_tab_head('normal', 'shyni 연결', true) }}
+    {{ macros.m_tab_head('etc', '기타', false) }}
   {{ macros.m_tab_head_end() }}
 </nav>
 <form id='setting'>
@@ -22,11 +23,17 @@
 {{ macros.m_tab_content_start('normal', true) }}
   {{ macros.setting_input_text('base_shyni_url', 'shyni 주소', value=arg['base_shyni_url'], desc=['shyni 서버 주소를 입력해 주세요. 예: http://localhost:7182']) }}
   {{ macros.setting_input_text('base_shyni_token', 'shyni 토큰', value=arg['base_shyni_token'], type='password', desc=['shyni의 X-Plex-Token 값을 입력해 주세요.']) }}
-  {{ macros.setting_input_text_and_buttons('base_shyni_log_path', 'shyni 로그 폴더', [['select_base_shyni_log_path_btn', '경로 선택']], value=arg['base_shyni_log_path'], desc=['대시보드의 마지막 스캔·파일수·신규·missing은 shyni 로그를 읽어서 log 기반으로 확인합니다.', 'docker container log가 들어있는 상위 폴더를 지정하세요. 폴더 아래에 컨테이너ID/컨테이너ID-json.log 파일이 있으면 됩니다.', '경로는 이 플러그인이 실행되는 컨테이너 안에서 본 경로입니다. 일반 docker 환경에서는 /var/lib/docker/containers 입니다.', '로그 파일 경로를 직접 지정하셔도 됩니다. 다만 컨테이너를 다시 만들면 ID가 바뀌니 폴더로 지정하시는 것을 권장합니다.']) }}
-  {{ macros.setting_input_text_and_buttons('base_shyni_data_path', 'shyni 데이터 폴더', [['select_base_shyni_data_path_btn', '경로 선택']], value=arg['base_shyni_data_path'], desc=['대시보드의 shyni 서버 정보 카드에서 데이터 용량을 계산할 때 씁니다.', '경로는 이 플러그인이 실행되는 컨테이너 안에서 본 shyni data 폴더입니다.']) }}
   {{ macros.setting_buttons([['shyni_test_btn', '연결 테스트']], left='연결 테스트', desc=['입력하신 주소와 토큰으로 라이브러리 목록이 잘 조회되는지, 저장하시기 전에 미리 확인해 보실 수 있습니다.'] ) }}
   {{ macros.m_hr() }}
-  {{ macros.setting_input_int('base_trash_counts_refresh_hours', '휴지통 개수 자동 갱신 주기', value=arg['base_trash_counts_refresh_hours'], desc=['기본값 12시간 · 단위: 시간', '대시보드와 건강도에 표시되는 라이브러리별 휴지통 개수를 자동으로 다시 읽어오는 주기(시간)입니다.', '휴지통 개수를 읽어오는 조회는 미디어가 많을수록 오래 걸려서, 매번 읽는 대신 한 번 읽어 둔 값을 저장해 두고 사용합니다. 이 주기가 지나면 다음 통계 계산 때 새로 읽어옵니다.', '휴지통 조회를 하거나 비우기를 하면 그때도 바로 새로 읽어옵니다. 0으로 두면 통계 계산 때마다 매번 읽어옵니다.']) }}
+  {{ macros.setting_input_text('base_shyni_admin_id', 'shyni 관리자 아이디', value=arg['base_shyni_admin_id'], desc=['shyni 관리자 계정의 아이디를 입력해 주세요. 휴지통 목록·스캔 상태 같은 관리자 전용 정보를 가져올 때 로그인에 사용합니다.']) }}
+  {{ macros.setting_input_text('base_shyni_admin_pw', 'shyni 관리자 비밀번호', value=arg['base_shyni_admin_pw'], type='password', desc=['shyni 관리자 계정의 비밀번호를 입력해 주세요. v1.0.0 정식 배포부터는 암호화해서 저장합니다.']) }}
+  {{ macros.setting_buttons([['shyni_admin_test_btn', '관리자 로그인 테스트']], left='관리자 로그인 테스트', desc=['입력하신 아이디와 비밀번호로 shyni 로그인이 되는지, 저장하시기 전에 미리 확인해 보실 수 있습니다.']) }}
+  {{ macros.m_hr() }}
+  {{ macros.setting_input_text_and_buttons('base_shyni_data_path', 'shyni 데이터 폴더', [['select_base_shyni_data_path_btn', '경로 선택']], value=arg['base_shyni_data_path'], desc=['대시보드의 shyni 서버 정보 카드에서 데이터 용량을 계산할 때 씁니다.', '경로는 이 플러그인이 실행되는 컨테이너 안에서 본 shyni data 폴더입니다.']) }}
+{{ macros.m_tab_content_end() }}
+
+{{ macros.m_tab_content_start('etc', false) }}
+  {{ macros.setting_input_int('scan_max_library_scan_count', '라이브러리 동시 스캔 수', min=1, max=20, value=arg['scan_max_library_scan_count'], desc=['대시보드 · 주기적 스캔 · 휴지통 스캔은 이 개수까지만 동시에 진행하며,', '동일한 라이브러리는 한 번에 하나만 스캔하고, 스캔 수 초과시 시작하지 않고 취소합니다.', '스캔 큐(폴더 단위)는 스캔 메뉴의 설정에서 동시 스캔 수로 별도로 제한됩니다.']) }}
 {{ macros.m_tab_content_end() }}
 
 </div>
@@ -41,13 +48,9 @@ $("body").on('click', '#shyni_test_btn', function(e){
   globalSendCommand('shyni_test', $('#base_shyni_url').val().trim(), $('#base_shyni_token').val().trim());
 });
 
-$("body").on('click', '#select_base_shyni_log_path_btn', function(e){
+$("body").on('click', '#shyni_admin_test_btn', function(e){
   e.preventDefault();
-  var path = $('#base_shyni_log_path').val().trim();
-  if (path == '') path = '/';
-  globalSelectLocalFolder("shyni 로그 폴더 선택", path, function(result){
-    $('#base_shyni_log_path').val(result);
-  });
+  globalSendCommand('shyni_admin_test', $('#base_shyni_admin_id').val().trim(), $('#base_shyni_admin_pw').val());
 });
 
 $("body").on('click', '#select_base_shyni_data_path_btn', function(e){
@@ -60,8 +63,8 @@ $("body").on('click', '#select_base_shyni_data_path_btn', function(e){
 });
 
 $(document).ready(function(){
-  // 토큰 칸 보기/숨기기
-  $('#base_shyni_token').each(function(){
+  // 토큰·비밀번호 칸 보기/숨기기
+  $('#base_shyni_token, #base_shyni_admin_pw').each(function(){
     var $input = $(this);
     var $btn = $('<button type="button" class="btn btn-sm btn-outline-secondary" style="margin-left:6px">보기</button>');
     $btn.on('click', function(){

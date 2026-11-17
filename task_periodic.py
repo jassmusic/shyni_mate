@@ -176,14 +176,14 @@ def _scan_poll_outcome(status_code, job):
 
 def _periodic_skip_decision(trash_parse_ok, trash_section_key, status_busy, key):
     """섹션 시작 시 건너뜀 판정 — 순수 함수(하니스 검증용).
-    휴지통 작업 상태를 확인할 수 없으면 fail-closed로 건너뛴다 (W5).
-    (건너뜀 사유 | None)을 돌려준다."""
+    휴지통 스캔 상태를 확인할 수 없으면 fail-closed로 건너뛴다 (W5).
+    (건너뜀 안내 문장 | None)을 돌려준다."""
     if not trash_parse_ok:
-        return '휴지통 작업 상태를 확인할 수 없음'
+        return '휴지통 스캔 상태를 확인할 수 없어 건너뛰었습니다.'
     if trash_section_key is not None and str(trash_section_key) == str(key):
-        return '휴지통 작업 실행 중'
+        return '휴지통 스캔이 실행 중이라 건너뛰었습니다.'
     if status_busy:
-        return '현황에서 작업 중'
+        return '현황에서 작업 중이라 건너뛰었습니다.'
     return None
 
 
@@ -199,6 +199,49 @@ def _write_status(key, slot, entry, label='주기적 스캔'):
         logger.warning(f'[{label}] 현황 상태 기록 실패: {e}')
 
 
+def _record_scan_progress(key):
+    """스캔 진행률을 현황 'scan' 슬롯에 기록한다. 실패하면 무시한다.
+    진행 표시용으로만 쓰고, 완료 판정은 job 폴링이 계속 맡는다."""
+    try:
+        from .shyni_admin import api_scan_status
+        st = api_scan_status(key)
+        if not st:
+            return
+        cur = ModuleStatus._get_state(int(key))
+        entry = dict(cur.get('scan') or {})
+        if entry.get('status') != 'running':
+            return
+        entry['scan_progress'] = {
+            'processed': st.get('processed'),
+            'total': st.get('total'),
+            'stage': st.get('stage'),
+            'stage_processed': st.get('stage_processed'),
+            'stage_total': st.get('stage_total'),
+            'current_file': st.get('current_file'),
+            'status': st.get('status'),
+        }
+        cur['scan'] = entry
+        ModuleStatus._set_state(int(key), cur)
+    except Exception:
+        pass
+
+
+def current_scan_progress(section_key, source):
+    """진행 중 배너용 — 현황 'scan' 슬롯에 기록된 진행률을 돌려준다.
+    실행 중인 표시가 아니면 None을 돌려준다 (끝난 스캔의 낡은 수치가
+    새 작업의 배너에 안 보이게 한다). source는 'periodic'·'trash'."""
+    try:
+        st = ModuleStatus._get_state(int(section_key))
+        entry = st.get('scan') or {}
+        if entry.get('status') == 'running' and entry.get('source') == source:
+            sp = entry.get('scan_progress')
+            if isinstance(sp, dict):
+                return sp
+    except Exception:
+        pass
+    return None
+
+
 def _now_text():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -207,7 +250,7 @@ def apply_scan_result(item, job_id, stats, vfs_duration, scan_duration,
                       pre_max_id, section_key, label='주기적 스캔',
                       relay_total=None, collect_append=True):
     """완료된 스캔의 job stats와 추가 파일 목록을 이력 행에 채운다.
-    저장은 호출처의 finish()가 한다. 주기적 스캔·휴지통 작업이 함께 쓴다.
+    저장은 호출처의 finish()가 한다. 주기적 스캔·휴지통 스캔이 함께 쓴다.
     도서 스캔이면 relay_total(Relay 실측 파일 수)이 있을 때 stat_total을
     그 값으로 덮어쓴다. relay_total을 안 주면 여기서 직접 읽어본다.
     collect_append=False면 추가 파일 목록을 수집하지 않는다 — 휴지통
@@ -649,7 +692,7 @@ class TaskPeriodic:
     @staticmethod
     def _section_skip_reason(key):
         """섹션 시작 시 건너뜀 사유 — None이면 진행한다.
-        휴지통 작업 중인 섹션은 건너뛰고, 가드 조회에 실패하면
+        휴지통 스캔 중인 섹션은 건너뛰고, 가드 조회에 실패하면
         fail-closed로 건너뛴다 (W5). 섹션 시작 시마다 다시 읽는다."""
         trash_parse_ok = True
         trash_section_key = None
@@ -700,8 +743,8 @@ class TaskPeriodic:
         skip_reason = TaskPeriodic._section_skip_reason(key)
         if skip_reason is not None:
             item = ModelPeriodicItem(job_name, key, title, mode, action)
-            item.finish('cancelled', f'건너뜀 ({skip_reason})')
-            logger.info(f'주기적 스캔: {title} 건너뜀 ({skip_reason})')
+            item.finish('skipped', skip_reason)
+            logger.info(f'주기적 스캔: {title} {skip_reason}')
             return False
         item = ModelPeriodicItem(job_name, key, title, mode, action)
         item.save()
@@ -778,6 +821,13 @@ class TaskPeriodic:
                 # 복구해도 쓸 수 있게 진행 상태에 함께 남긴다.
                 cur['pre_max_id'] = pre_max_id
                 _set_current(cur)
+            # 라이브러리 동시 스캔 수 게이트 — 같은 라이브러리가 스캔
+            # 중이거나 상한까지 돌고 있으면 이 섹션은 실패로 끝낸다
+            # (기다리지 않는다).
+            gate_msg = ModuleStatus.library_gate_check(key, exclude_source='periodic')
+            if gate_msg:
+                item.finish('failed', gate_msg)
+                return False
             scan_started = _now_text()
             _write_status(key, 'scan', {
                 'job': None, 'path': sec.get('path', ''),
@@ -952,17 +1002,21 @@ class TaskPeriodic:
             except Exception:
                 pass
         logger.info(f"주기적 스캔: {sec.get('title')} 스캔 전송 (job {job_id})")
-        return TaskPeriodic._poll_scan_job(url, token, job_id, t0)
+        return TaskPeriodic._poll_scan_job(url, token, job_id, t0,
+                                           section_key=sec['key'])
 
     @staticmethod
-    def _poll_scan_job(url, token, job_id, t0):
+    def _poll_scan_job(url, token, job_id, t0, section_key=None):
         """compat job 완료까지 폴링한다. _do_scan과 재시작 복구가 함께 쓴다.
         {'status': done|failed|cancelled, 'message', 'job_id', 'stats',
          'duration': 초}를 돌려준다. 6시간 기한이 있고, 폴링 중 일시적
         오류는 재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7).
-        job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3)."""
+        job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3).
+        section_key가 있으면 60초마다 스캔 진행률을 현황에 기록한다
+        (진행 표시용 — 완료 판정은 job 폴링이 계속 맡는다)."""
         deadline = time.time() + WAIT_TIMEOUT_SEC
         fail_count = 0
+        poll_count = 0
         while time.time() < deadline:
             if _cancel_requested():
                 return {'status': 'cancelled',
@@ -1013,6 +1067,10 @@ class TaskPeriodic:
                             'duration': int(time.time() - t0)}
             else:
                 fail_count = 0
+            # 진행률 기록 — 60초마다 (폴링 10초 × 6회).
+            poll_count += 1
+            if section_key and poll_count % 6 == 0:
+                _record_scan_progress(section_key)
             time.sleep(SCAN_POLL_SEC)
         return {'status': 'failed',
                 'message': '스캔이 기한 안에 끝나지 않았습니다.',
@@ -1060,7 +1118,8 @@ class TaskPeriodic:
             return
         logger.info(f'주기적 스캔 복구: {item.section_title} '
                     f'스캔(job {job_id}) 완료 확인을 이어서 합니다.')
-        res = TaskPeriodic._poll_scan_job(url, token, job_id, time.time())
+        res = TaskPeriodic._poll_scan_job(url, token, job_id, time.time(),
+                                          section_key=key)
         stats = res.get('stats')
         # 스캔 소요는 섹션 시작부터 끝까지에서 VFS 소요를 뺀 값으로 본다
         # (재시작으로 멈췄던 시간도 벽시계 기준으로는 스캔 단계에 든 시간이다).

@@ -329,7 +329,24 @@ def library_main_label(library_id):
 
     종류를 알 수 없으면 ('', '미디어')를 돌려준다 — 문구에 종류별 단위가
     필요한 곳(메타 새로고침 안내 등)에서 쓴다.
+    섹션 목록 캐시(API)를 먼저 보고, 없으면 Relay로 폴백한다.
     """
+    # API 우선 — 대시보드가 캐시해 둔 섹션 목록(status_sections_cache,
+    # ModuleStatus.SECTIONS_CACHE_KEY)에서 종류를 찾는다. 캐시가 없거나
+    # 해당 라이브러리가 없으면 Relay 폴백으로 넘어간다.
+    try:
+        raw = P.ModelSetting.get('status_sections_cache')
+        if raw:
+            data = json.loads(raw).get('data') or []
+            for sec in data:
+                if str(sec.get('key')) == str(library_id):
+                    t = sec.get('type') or ''
+                    info = TYPE_INFO.get(t)
+                    if info is None:
+                        return t, '미디어'
+                    return t, info['main_label']
+    except Exception:
+        pass
     conn = connect()
     try:
         cur = conn.cursor()
@@ -444,6 +461,40 @@ def metadata_info(metadata_id):
         conn.close()
 
 
+def list_sessions():
+    """전 사용자 세션 목록 (Relay). 마지막 활동 순.
+    [{id, user, is_admin, device_name, app_name,
+      created_at, last_active_at}] — 시각은 ISO 문자열.
+    Relay가 꺼져 있거나 조회에 실패하면 None.
+    (shyni 소스 /app/app/api/auth.py 실측: sessions 테이블은
+    id·user_id·token_hash·device_name·app_name·created_at·
+    last_active_at·expires_at. 토큰은 해시라 원문을 알 수 없다.)"""
+    if not db_ready():
+        return None
+    try:
+        conn = connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT s.id, u.display_name, u.is_admin, s.device_name,
+                       s.app_name, s.created_at, s.last_active_at
+                FROM sessions s JOIN users u ON u.id = s.user_id
+                ORDER BY s.last_active_at DESC
+            """)
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    out = []
+    for (sid, user, is_admin, device, app, created, last) in rows:
+        out.append({'id': sid, 'user': user, 'is_admin': bool(is_admin),
+                    'device_name': device, 'app_name': app,
+                    'created_at': created.isoformat() if created else None,
+                    'last_active_at': last.isoformat() if last else None})
+    return out
+
+
 # ---- 휴지통 조회 ----
 # 휴지통은 media_parts의 deleted_at 표시다. 파일(part)이 속한 항목에서
 # 작품(main) 단위까지 parent_id를 따라 올라가 묶는다 — 음악은 앨범,
@@ -509,12 +560,13 @@ def _trash_load(library_id, progress_cb=None):
         row = cur.fetchone()
         lib_type = (row[0] or 'music') if row else 'music'
         cur.execute("""
-            SELECT id, metadata_item_id, file_path, deleted_at, deleted_reason
+            SELECT id, metadata_item_id, file_path, deleted_at, deleted_reason, status
             FROM media_parts
             WHERE library_id=%s AND deleted_at IS NOT NULL
         """, (int(library_id),))
         parts = [{'id': r[0], 'item_id': r[1], 'path': r[2] or '',
-                  'deleted_at': r[3], 'reason': r[4] or ''}
+                  'deleted_at': r[3], 'reason': r[4] or '',
+                  'status': r[5] or ''}
                  for r in cur.fetchall()]
         if progress_cb:
             progress_cb(15)
@@ -725,6 +777,8 @@ def trash_compute(library_id, progress_cb=None):
     groups = {}
     files = {}
     total = len(parts)
+    n_missing = 0
+    n_trashed = 0
     for idx, p in enumerate(parts):
         if progress_cb and idx % 200 == 0:
             progress_cb(45 + int(50 * idx / max(1, total)))
@@ -739,7 +793,8 @@ def trash_compute(library_id, progress_cb=None):
                  'parent_title': (parent['title'] if parent else ''),
                  'file_count': 0,
                  'first_dt': None, 'last_dt': None,
-                 'reasons': set(), 'folder': '', 'subs': [], 'paths': []}
+                 'reasons': set(), 'statuses': set(),
+                 'folder': '', 'subs': [], 'paths': []}
             groups[rid] = g
             files[rid] = []
         g['file_count'] += 1
@@ -751,6 +806,13 @@ def trash_compute(library_id, progress_cb=None):
                 g['last_dt'] = da
         if p['reason']:
             g['reasons'].add(p['reason'])
+        st = p.get('status') or ''
+        if st:
+            g['statuses'].add(st)
+            if st == 'missing':
+                n_missing += 1
+            elif st == 'trashed':
+                n_trashed += 1
         if p['path']:
             g['paths'].append(p['path'])
         item = items.get(p['item_id']) or {}
@@ -774,6 +836,7 @@ def trash_compute(library_id, progress_cb=None):
             'first_days_ago': ((now - g['first_dt']).days
                                if g['first_dt'] else None),
             'reasons': sorted(g['reasons']),
+            'statuses': sorted(g['statuses']),
             'folder': g['folder'],
             'subs': g['subs'],
             '_first': g['first_dt'].timestamp() if g['first_dt'] else None,
@@ -786,7 +849,8 @@ def trash_compute(library_id, progress_cb=None):
         progress_cb(98)
     return {'lib_type': lib_type, 'main_label': info['main_label'],
             'retention_days': days,
-            'summary': {'files': total, 'groups': len(groups)},
+            'summary': {'files': total, 'groups': len(groups),
+                        'missing': n_missing, 'trashed': n_trashed},
             'groups': out_groups, 'files': out_files}
 
 
@@ -811,7 +875,7 @@ def trash_group_files(library_id, root_id, limit=500):
 
 
 # ---- 스캔 결과: 추가 파일 목록 ----
-# 주기적 스캔·휴지통 작업이 스캔 완료 후에 이력에 남길 추가 파일 목록을
+# 주기적 스캔·휴지통 스캔이 스캔 완료 후에 이력에 남길 추가 파일 목록을
 # Relay 경유로 조회한다. Relay가 꺼져 있으면 조회하지 않고 개수까지만 둔다.
 # 1차: 완료된 job의 stats.analyze.metadata_item_ids → media_parts 조인으로
 # 경로를 구한다 (이 job이 분석한 항목만 정확히 가져온다).

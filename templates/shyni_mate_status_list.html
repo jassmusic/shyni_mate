@@ -56,13 +56,10 @@
 <div id="server_card_div" style="margin-bottom:16px">
   <div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; color:#888">서버 정보를 불러오는 중입니다.</div>
 </div>
-<div id="lib_head_div" style="margin-bottom:6px; display:flex; justify-content:space-between; align-items:center"><span><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></g></svg>라이브러리 정보</strong></span><span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888; margin-left:auto; margin-right:10px">표시 <button type="button" id="lib_show_btn" class="btn btn-default" style="height:26px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="lib_show_panel" style="display:none; position:absolute; right:0; top:30px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="lib_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="lib_show_all" checked> 전체</label><span id="lib_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span><label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 <select id="status_lib_sort" onchange="setStatusLibSort(this.value)" style="display:inline-block; width:auto; height:26px; padding:2px 6px; font-size:12px; vertical-align:middle"><option value="default">기본</option><option value="name">이름</option><option value="nometa">메타</option><option value="media">미디어</option><option value="trash">휴지통</option></select></label></div>
+<div id="lib_head_div" style="margin-bottom:6px; display:flex; justify-content:space-between; align-items:center"><span><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></g></svg>라이브러리 정보</strong> <span id="lib_db_basis" style="font-size:12px; color:#888; display:none">Shyni 데이터베이스 기준</span></span><span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888; margin-left:auto; margin-right:10px">표시 <button type="button" id="lib_show_btn" class="btn btn-default" style="height:26px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="lib_show_panel" style="display:none; position:absolute; right:0; top:30px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="lib_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="lib_show_all" checked> 전체</label><span id="lib_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span><label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 <select id="status_lib_sort" onchange="setStatusLibSort(this.value)" style="display:inline-block; width:auto; height:26px; padding:2px 6px; font-size:12px; vertical-align:middle"><option value="default">기본</option><option value="name">이름</option><option value="nometa">메타</option><option value="media">미디어</option><option value="trash">휴지통</option></select></label></div>
 <div id="type_counts_div" style="font-size:13px; color:#555; margin-bottom:8px; display:flex; align-items:baseline"><span id="type_counts_txt"></span><span id="info_ago" style="color:#aaa; margin-left:auto"></span></div>
 <div id="status_list_div">
   <div style="padding:24px 4px; color:#888">대시보드를 불러오는 중입니다. 잠시만 기다려 주세요.</div>
-</div>
-<div id="logwarn_div" style="display:none; margin-top:8px; font-size:13px; color:#c0392b">
-  로그를 찾지 못했습니다. 폴더를 다시 확인해주세요.
 </div>
 <div id="status_btn_guide" style="font-size:13px; color:#888; margin-top:14px; line-height:1.8">
   <div id="btn_guide_toggle" style="font-weight:bold; color:#666; cursor:pointer">버튼 안내 <span id="btn_guide_arrow" style="font-weight:normal; font-size:12px; color:#999">▸ 펼치기</span></div>
@@ -77,7 +74,7 @@
   </div>
 </div>
 <div id="status_foot_comment" style="font-size:13px; color:#888; margin-top:10px">
-  파일수·신규·missing은 shyni 로그를 읽어서 보여 드립니다. 아직 로그에 기록이 없는 라이브러리는 스캔이 끝난 뒤에 내용이 채워집니다. 미디어 수는 로그에 기록되지 않아 표시하지 않습니다.
+  파일수(도서는 처리)·신규·missing 항목은 라이브러리 스캔이 끝난 뒤에 내용이 채워집니다. 휴지통은 휴지통 조회시 내용이 채워지며, 미디어 수와 메타 없음 수는 Relay에서 연결 테스트를 통과하면 Shyni 데이터베이스 기준으로 나타냅니다. (설정 › PostgreSQL Relay)
 </div>
 <div id="meta_choice_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
   <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
@@ -167,19 +164,44 @@ function fmt(t) {
   return t.substring(5, 19);
 }
 
+// shyni 스캔 단계 영문 → 한글 표시 (2026-11-17 실측: refresh|collect|
+// register|analyze|metadata|views|done|cancelled|idle). 모르는 값은
+// 원문 그대로 보여 준다.
+var STAGE_LABELS = {refresh: '새로고침중', collect: '수집중', register: '등록중', analyze: '분석중', metadata: '메타 새로고침중', views: '목록 갱신중', done: '완료', cancelled: '취소됨', idle: '대기중'};
+
+function stageText(sp) {
+  var label = STAGE_LABELS[sp.stage] || sp.stage;
+  if (sp.stage_total) {
+    var pct = Math.round((sp.stage_processed || 0) * 100 / sp.stage_total);
+    return label + ' ' + fmtNum(sp.stage_processed || 0) + '/' + fmtNum(sp.stage_total) + ' (' + pct + '%)';
+  }
+  return label;
+}
+
 function jobText(job, label, jobLabel) {
   if (!job) return '';
   var hasJob = job.job !== null && job.job !== undefined && job.job !== '';
   var jp = hasJob ? ' · ' + jobLabel + ' ' + job.job : '';
-  // 주기적 스캔·휴지통 작업이 남긴 표시에는 작업명을 함께 보여 준다
+  // 주기적 스캔·휴지통 스캔이 남긴 표시에는 작업명을 함께 보여 준다
   var srcTag = '';
   if (job.job_name) {
     if (job.source == 'periodic') srcTag = '주기적 스캔: ' + job.job_name;
-    else if (job.source == 'trash') srcTag = '휴지통 작업: ' + job.job_name;
+    else if (job.source == 'trash') srcTag = '휴지통 스캔: ' + job.job_name;
   }
   var src = srcTag ? ' · ' + srcTag : '';
   var sum = job.summary ? ' · ' + job.summary : '';
-  if (job.status == 'running') return label + ' 중 (' + fmt(job.started_at) + ' 시작' + src + jp + ')';
+  if (job.status == 'running') {
+    var prog = '';
+    var sp = job.scan_progress;
+    if (sp) {
+      if (sp.total) {
+        var pct = Math.round((sp.processed || 0) * 100 / sp.total);
+        prog = ' · ' + fmtNum(sp.processed || 0) + '/' + fmtNum(sp.total) + ' (' + pct + '%)';
+      }
+      if (sp.stage) prog += ' · ' + stageText(sp);
+    }
+    return label + ' 중 (' + fmt(job.started_at) + ' 시작' + src + jp + prog + ')';
+  }
   if (job.status == 'requested') return label + ' 전송됨 (' + fmt(job.started_at) + src + jp + ')';
   if (job.status == 'done') return label + ' 완료 (' + fmt(job.finished_at) + src + sum + jp + ')';
   if (job.status == 'failed') return label + ' 실패' + src + (hasJob ? ' (' + jobLabel + ' ' + job.job + ')' : '') + (job.error ? ': ' + job.error : '');
@@ -373,6 +395,39 @@ function paintInfoAgo() {
   }
 }
 
+// DB 통계 저장 시각 → 'MM-DD HH:MM' (브라우저 현지 시각)
+function fmtStaleAt(ts) {
+  if (!ts) return '';
+  var d = new Date(ts * 1000);
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
+    + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+// 하단 안내 문구 — warn이면 주황색(연결 실패), 아니면 회색
+function setStatusFoot(text, warn) {
+  $('#status_foot_comment').text(text)
+    .css('color', warn ? '#c05621' : '#888');
+}
+// Relay 미연결(데이터 없음)일 때 하단 문구 — Relay가 꺼진 걸 확인한 뒤에만
+// JS에서 넣는다. 기본 HTML 문구에 바로 넣으면, Relay를 켠 첫 로딩 중에도
+// 'Relay를 연결하면 보입니다'가 보여서 틀린 말이 되기 때문이다.
+var FOOT_TEXT_NO_RELAY = '파일수(도서는 처리)·신규·missing 항목은 라이브러리 스캔이 끝난 뒤에 내용이 채워집니다. 휴지통은 휴지통 조회시 내용이 채워지며, 미디어 수와 메타 없음 수는 Relay에서 연결 테스트를 통과하면 Shyni 데이터베이스 기준으로 나타냅니다. (설정 › PostgreSQL Relay)';
+// DB 통계 상태에 맞는 하단 문구를 고른다 (목록 응답·DB 폴링 응답 공용)
+function footTextForDb(relayOff, failed, at) {
+  var when = fmtStaleAt(at);
+  if (relayOff) {
+    return when
+      ? '마지막 Relay 연결시 ' + when + '에 저장된 이전 데이터를 보여 드립니다.'
+      : 'Relay가 꺼져 있어 이전에 저장된 데이터를 보여 드립니다.';
+  }
+  if (failed) {
+    return when
+      ? 'Shyni 데이터베이스에 연결하지 못했습니다. ' + when + '에 저장된 이전 데이터를 보여 드립니다.'
+      : 'Shyni 데이터베이스에 연결하지 못했습니다. 이전에 저장된 데이터를 보여 드립니다.';
+  }
+  return '파일수·신규·missing은 Shyni 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 Shyni 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.';
+}
+
 // 상태 줄 자동 갱신 — 화면 밖에서 시작된 작업도 보이도록 30초마다 상태만 가볍게 다시 읽는다
 var stateKnownRunning = false;
 function pollStates() {
@@ -529,7 +584,6 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
   lastStatusArgs = [data, logFiles, periodicCurrent, trashCurrent];
   window.__stateKeys = (data || []).map(function (x) { return x.key; });
   stateKnownRunning = (data || []).some(function (x) { var t = x.state || {}; return (t.vfs && t.vfs.status == 'running') || (t.scan && (t.scan.status == 'running' || t.scan.status == 'requested')) || (t.meta && t.meta.status == 'running'); });
-  $('#logwarn_div').toggle(logFiles === 0);
   buildShowPanel(data || []);
   var str = '';
   var sortedData = sortedStatusLibs(data).filter(function (s) { return !statusHiddenLibs[String(s.key)]; });
@@ -554,7 +608,7 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
     }
     if (hlTrash) {
       var trashStageTxt = {'refresh': '새로고침 중', 'scan': '스캔 중', 'empty': '비우는 중'}[trashCurrent.stage] || '진행 중';
-      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">휴지통 작업 진행 중 · ' + trashStageTxt + '</span>';
+      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">휴지통 스캔 진행 중 · ' + trashStageTxt + '</span>';
     }
     str += '</div>';
     var stateHtml0 = stateLineHtml(st);
@@ -586,9 +640,9 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
     // 4줄: 앨범·트랙·메타 없음·휴지통 — 모든 카드에서 같은 열 위치, 좁은 화면에서는 2x2
     var statsCols = (s.db_stats && s.db_stats.file_count != null) ? '104px 118px 100px 112px 1fr' : '112px 118px 112px 1fr';
     str += '<div class="stats-grid" style="font-size:13px; margin-top:5px; display:grid; grid-template-columns:' + statsCols + '; column-gap:12px; row-gap:6px; align-items:center">';
-    if (s.db_stats) {
+    if (s.db_stats && s.db_stats.main_count != null) {
       str += '<span id="dbstats-' + s.key + '" style="display:contents">' + dbStatsHtml(s.db_stats) + '</span>';
-    } else if (window.__dbLoading) {
+    } else if (window.__dbLoading && !window.__dbFailed) {
       str += '<span id="dbstats-' + s.key + '" class="dbstats-ph" style="color:#888; grid-column:span 3">미디어·항목·메타 없음 로딩중…</span>';
     } else {
       str += '<span style="grid-column:span 3"></span>';
@@ -730,11 +784,20 @@ function startDbPoll() {
             }
           }
           markInfoUpdated();
-          $('#status_foot_comment').text('파일수·신규·missing은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
+          window.__dbFailed = !!r.db_stats_failed;
+          setStatusFoot(footTextForDb(r.db_relay_off, r.db_stats_failed, r.db_stats_at), !!r.db_stats_failed);
+          $('#lib_db_basis').show();
           finishProgressIfIdle();
+        } else if (r.db_stats_failed) {
+          // 연결 실패 — 폴링은 계속 둔다 (복구되면 다음 폴링에서 숫자가 옴)
+          window.__dbFailed = true;
+          setStatusFoot('Shyni 데이터베이스에 연결하지 못했습니다. 파일수(도서는 처리)·신규·missing 항목은 라이브러리 스캔이 끝난 뒤에 내용이 채워집니다.', true);
+          $('.dbstats-ph').text('');
         } else if (r.db_off) {
           clearInterval(dbPollTimer); dbPollTimer = null;
           $('.dbstats-ph').text('');
+          $('#lib_db_basis').hide();
+          setStatusFoot(FOOT_TEXT_NO_RELAY, false);
           finishProgressIfIdle();
         }
       },
@@ -926,7 +989,7 @@ function load_list(force, quiet) {
           hasData = true;
           stopProgressCreep();
           $('#load_progress_wrap').hide();
-          $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide, #logwarn_div').hide();
+          $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').hide();
           $('#server_card_div').html('');
           $('#type_counts_txt').html('');
           $('#status_list_div').html('<div style="padding:24px 4px; color:#888">대시보드를 보기 위해 설정에서 정보를 입력해 주세요.</div>');
@@ -957,7 +1020,17 @@ function load_list(force, quiet) {
         listHasRows = !!(ret.data && ret.data.length);
         $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
-        if (ret.db_stats_on) $('#status_foot_comment').text('파일수·신규·missing은 데이터베이스의 스캔 기록에서 읽어 보여 드립니다. 미디어·항목·메타 없음·휴지통 수는 데이터베이스의 라이브러리 정보를 읽어 보여 드립니다.');
+        window.__dbFailed = !!ret.db_stats_failed;
+        if (ret.db_stats_on) {
+          setStatusFoot(footTextForDb(ret.db_relay_off, ret.db_stats_failed, ret.db_stats_at), !!ret.db_stats_failed);
+        } else if (ret.db_stats_failed) {
+          // Relay는 켜져 있는데 연결이 안 되고, 이전 데이터도 없음
+          setStatusFoot('Shyni 데이터베이스에 연결하지 못했습니다. 파일수(도서는 처리)·신규·missing 항목은 라이브러리 스캔이 끝난 뒤에 내용이 채워집니다.', true);
+        } else if (ret.db_relay_off) {
+          // Relay 미연결 + 데이터 없음 (1-2)
+          setStatusFoot(FOOT_TEXT_NO_RELAY, false);
+        }
+        $('#lib_db_basis').toggle(!!ret.db_stats_on);
         render(ret.data, ret.log_files, ret.periodic_current, ret.trash_current);
         markInfoUpdated();
         scheduleStatePoll(ret.data);
@@ -1084,7 +1157,7 @@ $(document).ready(function () {
     var key = trashConfirmKey;
     closeTrashConfirm();
     if (key === null || key === undefined) return;
-    location.href = '/' + location.pathname.split('/')[1] + '/scan/trash?key=' + key;
+    location.href = '/' + location.pathname.split('/')[1] + '/trash/trash?key=' + key;
   });
   $('#trash_run_btn').on('click', function () { runTrashAction(); });
   $('#trash_step2_back_btn').on('click', function () {

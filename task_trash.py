@@ -5,11 +5,11 @@ import time
 
 import requests
 
-from .model_scan import ModelScanItem
 from .setup import *
 from .shyni_backend import ShyniBackend
 from .task_periodic import (WAIT_TIMEOUT_SEC, _extract_job_id,
-                            _scan_poll_outcome, _stat_int, _write_status,
+                            _record_scan_progress, _scan_poll_outcome,
+                            _stat_int, _write_status,
                             apply_scan_result, scan_summary_text)
 
 logger = P.logger
@@ -36,6 +36,25 @@ POLL_FAIL_MAX = 3
 VFS_POLL_SEC = 10
 SCAN_POLL_SEC = 20
 EMPTY_POLL_SEC = 10
+
+
+def _trash_file_paths(key):
+    """휴지통 파일 경로 목록 — 관리자 API 우선, Relay 폴백 (Step4).
+    둘 다 안 되면 None을 돌려준다."""
+    try:
+        from . import shyni_admin
+        paths = shyni_admin.api_trash_file_paths(key)
+        if paths is not None:
+            return paths
+    except Exception as e:
+        logger.warning(f'[휴지통 스캔] 휴지통 목록 API 읽기 실패: {e}')
+    try:
+        from . import db_support
+        if db_support.db_ready():
+            return db_support.trash_file_paths(key)
+    except Exception as e:
+        logger.warning(f'[휴지통 스캔] 휴지통 목록 Relay 읽기 실패: {e}')
+    return None
 
 ACTION_LABEL = {
     'refresh': '새로고침',
@@ -122,24 +141,20 @@ def _trash_done_message(action, target_count, restored, emptied_count,
         if emptied is not None:
             bits.append(f'휴지통 파일 {emptied}개 비움')
     if not bits:
-        return '완료됐습니다.'
-    return '완료됐습니다. (' + ' · '.join(bits) + ')'
+        return '작업 완료'
+    return '작업 완료 (' + ' · '.join(bits) + ')'
 
 
-def _trash_skip_decision(periodic_parse_ok, periodic_section_key,
-                         running_query_ok, running_section_keys, key):
+def _trash_skip_decision(running_library_keys, key):
     """섹션 시작 시 건너뜀 판정 — 순수 함수(하니스 검증용).
-    가드 조회에 실패하면 fail-closed로 건너뛴다 (W5).
-    (건너뜀 사유 | None)을 돌려준다."""
-    if not periodic_parse_ok:
-        return '주기적 스캔 상태를 확인할 수 없음'
-    if not running_query_ok:
-        return '실행 중인 스캔 항목을 확인할 수 없음'
-    if periodic_section_key is not None and str(periodic_section_key) == str(key):
-        return '주기적 스캔 실행 중'
-    running_keys = {str(k) for k in (running_section_keys or []) if k is not None}
+    같은 라이브러리에 라이브러리 단위 스캔(대시보드·주기적 스캔)이
+    돌아가고 있으면 건너뛴다. 스캔 큐(폴더 단위)는 세지 않는다 —
+    라이브러리 동시 스캔 수 게이트와 같은 기준이다.
+    (건너뜀 안내 문장 | None)을 돌려준다."""
+    running_keys = {str(k) for k in (running_library_keys or [])
+                    if k is not None}
     if str(key) in running_keys:
-        return '스캔 항목 실행 중'
+        return '동일 라이브러리의 스캔이 실행 중이므로 건너뜁니다.'
     return None
 
 
@@ -230,7 +245,7 @@ def _same_job_busy(name):
                        ModelTrashItem.status == 'waiting').first())
         return row is not None
     except Exception as e:
-        logger.warning(f'[휴지통 작업] 대기 중 작업 조회 실패: {e}')
+        logger.warning(f'[휴지통 스캔] 대기 중 작업 조회 실패: {e}')
         return False
 
 
@@ -264,7 +279,7 @@ def _finish_job_row(row_id, status, message):
         if item is not None:
             item.finish(status, message)
     except Exception as e:
-        logger.warning(f'[휴지통 작업] 대기 행 정리 실패: {e}')
+        logger.warning(f'[휴지통 스캔] 대기 행 정리 실패: {e}')
 
 
 def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=None):
@@ -280,7 +295,7 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
         return (None, 0)
     max_min = _max_wait_min()
     if max_min <= 0:
-        fail_trash_start(name, mode, '이미 진행 중인 휴지통 작업이 있어 시작하지 못했습니다.', section_label, action)
+        fail_trash_start(name, mode, '이미 진행 중인 휴지통 스캔이 있어 시작하지 못했습니다.', section_label, action)
         return (None, None)
     running_name = (get_trash_current() or {}).get('job_name') or ''
     if running_name:
@@ -293,7 +308,7 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
     try:
         item.save()
     except Exception as e:
-        logger.error(f'[휴지통 작업] 대기 행 저장 실패: {e}')
+        logger.error(f'[휴지통 스캔] 대기 행 저장 실패: {e}')
         fail_trash_start(name, mode, '대기 기록을 남기지 못했습니다.', section_label, action)
         return (None, None)
     row_id = item.id
@@ -312,11 +327,11 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
                     row.message = f'대기 {_fmt_wait(waited)} 후 시작했습니다.'
                     row.save()
             except Exception as e:
-                logger.warning(f'[휴지통 작업] 대기 행 시작 기록 실패: {e}')
+                logger.warning(f'[휴지통 스캔] 대기 행 시작 기록 실패: {e}')
             return (row_id, waited)
     _finish_job_row(row_id, 'failed',
                     f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (최대 대기 {_fmt_wait(max_min * 60)})')
-    logger.warning(f'[휴지통 작업] {name}: 최대 대기 시간 초과로 시작하지 않습니다.')
+    logger.warning(f'[휴지통 스캔] {name}: 최대 대기 시간 초과로 시작하지 않습니다.')
     return (None, None)
 
 
@@ -329,7 +344,7 @@ def _record_trash_start_error(job_name, reason):
              'reason': str(reason or '')[:500]},
             ensure_ascii=False))
     except Exception as e:
-        logger.warning(f'[휴지통 작업] 시작 오류 기록 실패: {e}')
+        logger.warning(f'[휴지통 스캔] 시작 오류 기록 실패: {e}')
 
 
 def _clear_trash_start_error():
@@ -373,7 +388,7 @@ def fail_trash_start(job_name, mode, reason, section_label='전체', action=None
         item = ModelTrashItem(job_name, '', section_label, mode, action)
         item.finish('failed', reason)
     except Exception as e:
-        logger.error(f'[휴지통 작업] 시작 실패 이력 기록 실패: {e}')
+        logger.error(f'[휴지통 스캔] 시작 실패 이력 기록 실패: {e}')
     _record_trash_start_error(job_name, reason)
 
 
@@ -418,15 +433,18 @@ def _wait_vfs(addr, jobid, timeout=WAIT_TIMEOUT_SEC):
     return {'result': 'failed', 'duration': int(time.time() - t0)}
 
 
-def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_SEC):
+def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_SEC,
+              section_key=None):
     """shyni job 완료를 기다린다 (스캔·비우기 공통).
     {'result': done|failed|cancelled|not_found, 'job': job 응답 또는 None,
      'duration': 초}를 돌려준다. job 조회에서 404를 받으면 즉시 실패로
     끝낸다 (W3). 폴링 중 일시적 오류는 재시도하고 연속 3회 실패 시에만
-    실패로 확정한다."""
+    실패로 확정한다. section_key가 있으면 60초마다 스캔 진행률을 현황에
+    기록한다 (스캔 job만 — 비우기 job은 section_key를 넘기지 않는다)."""
     t0 = time.time()
     deadline = time.time() + timeout
     fail_count = 0
+    poll_count = 0
     while time.time() < deadline:
         if _trash_cancel_requested():
             return {'result': 'cancelled', 'job': None,
@@ -466,13 +484,18 @@ def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_S
                         'duration': int(time.time() - t0)}
         else:
             fail_count = 0
+        # 진행률 기록 — 60초마다 (폴링 간격 × 횟수, SCAN_POLL_SEC 20초 기준 3회).
+        poll_count += 1
+        if section_key and poll_count % max(1, int(60 / max(poll_sec, 1))) == 0:
+            _record_scan_progress(section_key)
         time.sleep(poll_sec)
     return {'result': 'failed', 'job': None, 'duration': int(time.time() - t0)}
 
 
-def _wait_scan(url, token, job_id, timeout=WAIT_TIMEOUT_SEC):
+def _wait_scan(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, section_key=None):
     """shyni 스캔 job 완료를 기다린다 — _wait_job과 같은 결과를 돌려준다."""
-    return _wait_job(url, token, job_id, timeout=timeout, poll_sec=SCAN_POLL_SEC)
+    return _wait_job(url, token, job_id, timeout=timeout, poll_sec=SCAN_POLL_SEC,
+                     section_key=section_key)
 
 
 def _send_folder_scan(url, token, key, folder, seq):
@@ -509,7 +532,7 @@ def _refresh_folder_vfs(key, folder, name):
         'job': None, 'path': folder,
         'started_at': started, 'finished_at': None,
         'status': 'running', 'source': 'trash',
-        'job_name': name}, label='휴지통 작업')
+        'job_name': name}, label='휴지통 스캔')
     t0 = time.time()
     try:
         ret = ModuleStatus._rc(addr, 'vfs/refresh',
@@ -520,7 +543,7 @@ def _refresh_folder_vfs(key, folder, name):
             'job': None, 'path': folder,
             'started_at': started, 'finished_at': _now_text(),
             'status': 'failed', 'source': 'trash',
-            'job_name': name}, label='휴지통 작업')
+            'job_name': name}, label='휴지통 스캔')
         return {'result': 'failed', 'duration': int(time.time() - t0),
                 'error': str(e)[:200]}
     jobid = ret.get('jobid') if isinstance(ret, dict) else None
@@ -529,14 +552,14 @@ def _refresh_folder_vfs(key, folder, name):
             'job': jobid, 'path': folder,
             'started_at': started, 'finished_at': None,
             'status': 'running', 'source': 'trash',
-            'job_name': name}, label='휴지통 작업')
+            'job_name': name}, label='휴지통 스캔')
         w = _wait_vfs(addr, jobid)
         _write_status(key, 'vfs', {
             'job': jobid, 'path': folder,
             'started_at': started, 'finished_at': _now_text(),
             'status': {'done': 'done', 'failed': 'failed',
                        'cancelled': 'cancelled'}.get(w['result'], 'failed'),
-            'source': 'trash', 'job_name': name}, label='휴지통 작업')
+            'source': 'trash', 'job_name': name}, label='휴지통 스캔')
         if w['result'] == 'done':
             return {'result': 'done', 'duration': w['duration'], 'error': ''}
         if w['result'] == 'cancelled':
@@ -561,38 +584,25 @@ def _refresh_folder_vfs(key, folder, name):
         'job': None, 'path': folder,
         'started_at': started, 'finished_at': _now_text(),
         'status': 'done' if ok else 'failed', 'source': 'trash',
-        'job_name': name}, label='휴지통 작업')
+        'job_name': name}, label='휴지통 스캔')
     return {'result': 'done' if ok else 'failed',
             'duration': int(time.time() - t0), 'error': error}
 
 
 def _compute_skip_reason(key):
     """이 섹션을 건너뛸 사유 — None이면 진행한다.
-    가드 조회에 실패하면 fail-closed로 건너뛴다 (W5).
+    라이브러리 동시 스캔 수 게이트와 같은 목록(대시보드·주기적·
+    휴지통 스캔)으로 판정한다. 스캔 큐(폴더 단위)는 세지 않는다.
+    자기 작업의 진행 상태는 빼고 센다. 목록을 읽지 못하면
+    게이트와 마찬가지로 막지 않고 진행한다.
     섹션 시작 시마다 다시 읽는다."""
-    periodic_parse_ok = True
-    periodic_section_key = None
-    raw_cur = P.ModelSetting.get('periodic_current')
-    if raw_cur:
-        try:
-            cur = json.loads(raw_cur)
-            if isinstance(cur, dict):
-                periodic_section_key = cur.get('section_key')
-            else:
-                periodic_parse_ok = False
-        except Exception:
-            periodic_parse_ok = False
-    running_query_ok = True
-    running_keys = []
     try:
-        running = F.db.session.query(ModelScanItem).filter(
-            ModelScanItem.shyni_status == 'RUNNING').all()
-        running_keys = [it.section_id for it in running if it.section_id]
+        running = ModuleStatus.running_library_scans(exclude_source='trash')
+        running_keys = [k for k, _ in running]
     except Exception as e:
-        running_query_ok = False
-        logger.warning(f'[휴지통 작업] 실행 중인 스캔 항목 조회 실패: {e}')
-    return _trash_skip_decision(periodic_parse_ok, periodic_section_key,
-                                running_query_ok, running_keys, key)
+        running_keys = []
+        logger.warning(f'[휴지통 스캔] 실행 중인 라이브러리 스캔 조회 실패: {e}')
+    return _trash_skip_decision(running_keys, key)
 
 
 class TaskTrash:
@@ -655,7 +665,7 @@ class TaskTrash:
             if changed:
                 ModuleStatus._set_state(int(key), st)
         except Exception as e:
-            logger.warning(f'[휴지통 작업] 현황 상태 정리 실패: {e}')
+            logger.warning(f'[휴지통 스캔] 현황 상태 정리 실패: {e}')
 
     @staticmethod
     def _run(idx, mode):
@@ -663,14 +673,14 @@ class TaskTrash:
         from .mod_status import ModuleStatus
         jobs = get_trash_jobs()
         if idx < 0 or idx >= len(jobs):
-            logger.warning(f'[휴지통 작업] 없는 작업 번호: {idx}')
+            logger.warning(f'[휴지통 스캔] 없는 작업 번호: {idx}')
             _record_trash_start_error('', f'잘못된 작업 번호라 시작하지 못했습니다: {idx}')
             return
         job = jobs[idx]
         name = job.get('name') or f'작업 {idx + 1}'
         # 같은 작업이 이미 돌거나 기다리고 있으면 중복으로 세지 않는다.
         if _same_job_busy(name):
-            logger.info(f'[휴지통 작업] {name}: 이미 실행 중이거나 대기 중이라 건너뜁니다.')
+            logger.info(f'[휴지통 스캔] {name}: 이미 실행 중이거나 대기 중이라 건너뜁니다.')
             return
         action = job.get('action') or 'empty'
         steps = ACTION_STEPS.get(action, ['empty'])
@@ -678,7 +688,7 @@ class TaskTrash:
             action = 'empty'
         P.ModelSetting.set(TRASH_CANCEL_KEY, '')
         job_started = _now_text()
-        logger.info(f'[휴지통 작업] 시작: {name} ({ACTION_LABEL.get(action, action)}, {mode})')
+        logger.info(f'[휴지통 스캔] 시작: {name} ({ACTION_LABEL.get(action, action)}, {mode})')
 
         # 안전장치: 기준 경로가 하나라도 보이지 않으면 전체를 중단한다
         anchors = [a.strip() for a in
@@ -687,7 +697,7 @@ class TaskTrash:
         for anchor in anchors:
             if not os.path.exists(anchor):
                 fail_trash_start(name, mode, f'기준 경로를 찾을 수 없습니다 — {anchor}', '전체', action)
-                logger.error(f'[휴지통 작업] 중단: 기준 경로 없음 — {anchor}')
+                logger.error(f'[휴지통 스캔] 중단: 기준 경로 없음 — {anchor}')
                 return
 
         sections, err = ModuleStatus._sections()
@@ -725,22 +735,27 @@ class TaskTrash:
                 item = ModelTrashItem(name, key, title, mode, action)
                 item.finish('cancelled', '취소 요청으로 실행하지 않았습니다.')
                 continue
-            # 건너뜀 가드는 섹션 시작 시마다 다시 읽는다 (W5)
-            skip_reason = _compute_skip_reason(key)
+            # 건너뜀 가드는 스캔이 들어간 동작에만 적용한다 — 새로고침만·
+            # 비우기만은 스캔과 충돌하지 않아 가드에서 뺀다. 가드는 섹션
+            # 시작 시마다 다시 읽는다 (W5).
+            guard_applies = 'scan' in steps
+            skip_reason = _compute_skip_reason(key) if guard_applies else None
             if skip_reason is not None:
                 item = ModelTrashItem(name, key, title, mode, action)
-                item.finish('cancelled', f'건너뜀 ({skip_reason})')
-                logger.info(f'[휴지통 작업] {title}: 건너뜀 ({skip_reason})')
+                item.finish('skipped', skip_reason)
+                logger.info(f'[휴지통 스캔] {title}: {skip_reason}')
                 continue
-            try:
-                st = ModuleStatus._get_state(int(key))
-                busy = any((st.get(k) or {}).get('status') == 'running'
-                           for k in ('vfs', 'scan', 'meta'))
-            except Exception:
-                busy = False
+            busy = False
+            if guard_applies:
+                try:
+                    st = ModuleStatus._get_state(int(key))
+                    busy = any((st.get(k) or {}).get('status') == 'running'
+                               for k in ('vfs', 'scan', 'meta'))
+                except Exception:
+                    busy = False
             if busy:
                 item = ModelTrashItem(name, key, title, mode, action)
-                item.finish('cancelled', '건너뜀 (현황에서 작업 중)')
+                item.finish('skipped', '현황에서 작업 중이라 건너뛰었습니다.')
                 continue
 
             item = ModelTrashItem(name, key, title, mode, action)
@@ -760,6 +775,8 @@ class TaskTrash:
             restored_count = None
             remaining_count = None
             vfs_results = None
+            scan_results = None
+            file_exists = None
             vfs_failed_folders = 0
             scan_failed_folders = 0
             empty_skipped = False
@@ -767,33 +784,32 @@ class TaskTrash:
                 # 실행 전 휴지통 목록 확인 — 0개면 스킵, 모르면 새로고침·
                 # 스캔 포함 동작은 실행하지 않는다. 비우기만은 목록 없이도
                 # 섹션 비우기로 실행한다.
+                # (db_support는 아래 group_append_paths에서도 쓰므로 여기서
+                # 가져온다 — Phase1에서 이 줄을 빼먹어 NameError가 났음,
+                # 2026-11-17 실측)
                 from . import db_support
                 list_error = None
                 try:
-                    if db_support.db_ready():
-                        target_files = db_support.trash_file_paths(key)
-                    else:
-                        list_error = 'relay_off'
+                    target_files = _trash_file_paths(key)
+                    if target_files is None:
+                        list_error = 'read_failed'
                 except Exception as e:
-                    logger.warning(f'[휴지통 작업] 휴지통 목록 읽기 실패: {e}')
+                    logger.warning(f'[휴지통 스캔] 휴지통 목록 읽기 실패: {e}')
                     list_error = 'read_failed'
                     target_files = None
                 if target_files is None:
                     if len(steps) == 1 and steps[0] == 'empty':
                         pass
                     else:
-                        if list_error == 'relay_off':
-                            skip_msg = '건너뜀 (Relay가 꺼져 있어 휴지통 항목을 확인할 수 없습니다.)'
-                        else:
-                            skip_msg = '건너뜀 (휴지통 항목 확인 실패 — DB를 읽지 못했습니다.)'
-                        item.finish('cancelled', skip_msg)
-                        logger.info(f'[휴지통 작업] {title}: cancelled {skip_msg}')
+                        skip_msg = '휴지통 항목을 확인하지 못해 건너뛰었습니다. (관리자 API와 Relay 둘 다 읽지 못했습니다.)'
+                        item.finish('skipped', skip_msg)
+                        logger.info(f'[휴지통 스캔] {title}: skipped {skip_msg}')
                         continue
                 elif not target_files:
                     item.stat_total = 0
                     item.target_files = '[]'
                     item.finish('done', '휴지통 파일이 없어 건너뛰었습니다.')
-                    logger.info(f'[휴지통 작업] {title}: done 휴지통 파일이 없어 건너뜀')
+                    logger.info(f'[휴지통 스캔] {title}: done 휴지통 파일이 없어 건너뜀')
                     continue
                 else:
                     target_groups = db_support.group_append_paths(target_files)
@@ -805,7 +821,7 @@ class TaskTrash:
                         # 실패한 폴더가 있으면 비우지 않는다 — 재확인
                         # 못한 항목을 비우면 안 된다.
                         empty_skipped = True
-                        logger.info(f'[휴지통 작업] 비우기 생략: 실패한 폴더가 있음 '
+                        logger.info(f'[휴지통 스캔] 비우기 생략: 실패한 폴더가 있음 '
                                     f'(VFS {vfs_failed_folders}개 · 스캔 {scan_failed_folders}개)')
                         continue
                     _set_trash_current({
@@ -819,6 +835,7 @@ class TaskTrash:
                             # 폴더별 VFS 새로고침 — 하나가 실패해도
                             # 나머지는 계속한다. 전부 실패하면 실패로 끝낸다.
                             vfs_results = {}
+                            file_exists = {}
                             vfs_total = 0
                             for grp in target_groups:
                                 if _trash_cancel_requested():
@@ -833,9 +850,19 @@ class TaskTrash:
                                 ok = w['result'] == 'done'
                                 vfs_results[folder] = {'ok': ok,
                                                        'error': w.get('error') or ''}
+                                if ok:
+                                    # 새로고침이 끝난 폴더는 목록을 한 번 읽어
+                                    # 대상 파일이 실제로 있는지 확인한다.
+                                    # 폴더당 1회만 읽으므로 파일이 많아도 빠르다.
+                                    try:
+                                        names = set(os.listdir(folder))
+                                        for fn in grp['files']:
+                                            file_exists[folder + '/' + fn] = fn in names
+                                    except Exception:
+                                        pass
                                 if not ok:
                                     vfs_failed_folders += 1
-                                    logger.warning(f'[휴지통 작업] VFS 새로고침 실패: '
+                                    logger.warning(f'[휴지통 스캔] VFS 새로고침 실패: '
                                                    f'{folder} — {w.get("error")}')
                             vfs_duration = vfs_total
                             if status == 'cancelled':
@@ -852,6 +879,18 @@ class TaskTrash:
                                 g for g in target_groups
                                 if vfs_results is None
                                 or (vfs_results.get(g['folder']) or {}).get('ok')]
+                            # 라이브러리 동시 스캔 수 게이트 — 같은 라이브러리가
+                            # 스캔 중이거나 상한까지 돌고 있으면 실패로 끝낸다
+                            # (기다리지 않는다). 폴더마다 검사하지 않고 섹션
+                            # 단위로 한 번만 검사한다. 스캔할 폴더가 없으면
+                            # 검사할 필요가 없다.
+                            if scan_folders:
+                                gate_msg = ModuleStatus.library_gate_check(
+                                    key, exclude_source='trash')
+                                if gate_msg:
+                                    status, message = 'failed', gate_msg
+                                    break
+                            scan_results = {}
                             scan_total = 0
                             first_scan_error = ''
                             for seq, grp in enumerate(scan_folders):
@@ -864,7 +903,7 @@ class TaskTrash:
                                     'job': None, 'path': folder,
                                     'started_at': scan_started, 'finished_at': None,
                                     'status': 'running', 'source': 'trash',
-                                    'job_name': name}, label='휴지통 작업')
+                                    'job_name': name}, label='휴지통 스캔')
                                 try:
                                     job_id = _send_folder_scan(url, token, key, folder, seq)
                                     send_error = ''
@@ -873,6 +912,10 @@ class TaskTrash:
                                     send_error = str(e)[:200]
                                 if job_id is None:
                                     scan_failed_folders += 1
+                                    scan_results[folder] = {
+                                        'ok': False,
+                                        'error': (send_error
+                                                  or '스캔 작업 번호를 받지 못했습니다.')}
                                     if not first_scan_error:
                                         first_scan_error = (send_error
                                                             or '스캔 작업 번호를 받지 못했습니다.')
@@ -881,8 +924,8 @@ class TaskTrash:
                                         'started_at': scan_started,
                                         'finished_at': _now_text(),
                                         'status': 'failed', 'source': 'trash',
-                                        'job_name': name}, label='휴지통 작업')
-                                    logger.warning(f'[휴지통 작업] 폴더 스캔 전송 실패: '
+                                        'job_name': name}, label='휴지통 스캔')
+                                    logger.warning(f'[휴지통 스캔] 폴더 스캔 전송 실패: '
                                                    f'{folder} — {first_scan_error}')
                                     continue
                                 scan_job_ids.append(job_id)
@@ -890,11 +933,11 @@ class TaskTrash:
                                     'job': job_id, 'path': folder,
                                     'started_at': scan_started, 'finished_at': None,
                                     'status': 'running', 'source': 'trash',
-                                    'job_name': name}, label='휴지통 작업')
+                                    'job_name': name}, label='휴지통 스캔')
                                 cur = get_trash_current() or {}
                                 cur['scan_job'] = job_id
                                 _set_trash_current(cur)
-                                w = _wait_scan(url, token, job_id)
+                                w = _wait_scan(url, token, job_id, section_key=key)
                                 scan_total += w['duration']
                                 job_stats = (w.get('job') or {}).get('stats') or {}
                                 summary = scan_summary_text(job_stats)
@@ -907,19 +950,24 @@ class TaskTrash:
                                     'source': 'trash', 'job_name': name}
                                 if summary:
                                     scan_entry['summary'] = summary
-                                _write_status(key, 'scan', scan_entry, label='휴지통 작업')
+                                _write_status(key, 'scan', scan_entry, label='휴지통 스캔')
                                 if w['result'] == 'cancelled':
                                     status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                                     break
                                 if w['result'] != 'done':
                                     scan_failed_folders += 1
                                     job_err = ((w.get('job') or {}).get('error') or '')
+                                    scan_results[folder] = {
+                                        'ok': False,
+                                        'error': (job_err[:200] if job_err
+                                                  else '스캔이 완료되지 않았습니다.')}
                                     if not first_scan_error:
                                         first_scan_error = (job_err[:200] if job_err
                                                             else '스캔이 완료되지 않았습니다.')
-                                    logger.warning(f'[휴지통 작업] 폴더 스캔 실패: '
+                                    logger.warning(f'[휴지통 스캔] 폴더 스캔 실패: '
                                                    f'{folder} — {first_scan_error}')
                                     continue
+                                scan_results[folder] = {'ok': True}
                                 scan_stats_list.append(job_stats)
                             scan_duration = scan_total
                             if status == 'cancelled':
@@ -930,14 +978,14 @@ class TaskTrash:
                             # 복원 판정 — 같은 실행 안의 스캔 전/후
                             # 목록 비교. 이력은 판단에 쓰지 않는다.
                             try:
-                                post_files = db_support.trash_file_paths(key)
+                                post_files = _trash_file_paths(key)
                                 post_set = set(post_files or [])
                                 restored_files = [f for f in target_files
                                                   if f not in post_set]
                                 restored_count = len(restored_files)
                                 remaining_count = len(target_files) - restored_count
                             except Exception as e:
-                                logger.warning(f'[휴지통 작업] 스캔 후 휴지통 목록 읽기 실패: {e}')
+                                logger.warning(f'[휴지통 스캔] 스캔 후 휴지통 목록 읽기 실패: {e}')
                                 restored_files = None
                                 restored_count = None
                                 remaining_count = None
@@ -947,20 +995,18 @@ class TaskTrash:
                             # 스캔 단계가 있었다면 스캔이 끝난 뒤라, 스캔에서
                             # 복원된 파일은 빠지고 여전히 없는 것만 남는다.
                             try:
-                                from . import db_support
-                                if db_support.db_ready():
-                                    emptied_files = db_support.trash_file_paths(key)
-                                else:
-                                    logger.info('[휴지통 작업] Relay가 꺼져 있어 비운 파일 목록을 저장하지 않습니다.')
+                                emptied_files = _trash_file_paths(key)
+                                if emptied_files is None:
+                                    logger.info('[휴지통 스캔] 휴지통 목록을 읽지 못해 비운 파일 목록을 저장하지 않습니다.')
                             except Exception as e:
-                                logger.warning(f'[휴지통 작업] 비우기 전 휴지통 목록 읽기 실패: {e}')
+                                logger.warning(f'[휴지통 스캔] 비우기 전 휴지통 목록 읽기 실패: {e}')
                                 emptied_files = None
                             empty_started = _now_text()
                             _write_status(key, 'trash', {
                                 'job': None, 'mode': action,
                                 'started_at': empty_started, 'finished_at': None,
                                 'status': 'running', 'source': 'trash',
-                                'job_name': name}, label='휴지통 작업')
+                                'job_name': name}, label='휴지통 스캔')
                             res = requests.get(f'{url}/library/sections/{key}/emptyTrash',
                                                headers={'X-Plex-Token': token,
                                                         'Accept': 'application/json'},
@@ -970,7 +1016,7 @@ class TaskTrash:
                                     'job': None, 'mode': action,
                                     'started_at': empty_started, 'finished_at': _now_text(),
                                     'status': 'failed', 'source': 'trash',
-                                    'job_name': name}, label='휴지통 작업')
+                                    'job_name': name}, label='휴지통 스캔')
                                 status, message = 'failed', f'비우기 실패 (응답 코드 {res.status_code})'
                                 break
                             # 비우기는 job으로 돌아오므로, 완료 후 job을 조회해
@@ -981,7 +1027,7 @@ class TaskTrash:
                                     'job': empty_job_id, 'mode': action,
                                     'started_at': empty_started, 'finished_at': None,
                                     'status': 'running', 'source': 'trash',
-                                    'job_name': name}, label='휴지통 작업')
+                                    'job_name': name}, label='휴지통 스캔')
                                 w = _wait_job(url, token, empty_job_id,
                                               poll_sec=EMPTY_POLL_SEC)
                                 if w['result'] == 'cancelled':
@@ -990,7 +1036,7 @@ class TaskTrash:
                                         'started_at': empty_started,
                                         'finished_at': _now_text(),
                                         'status': 'cancelled', 'source': 'trash',
-                                        'job_name': name}, label='휴지통 작업')
+                                        'job_name': name}, label='휴지통 스캔')
                                     status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                                     break
                                 if w['result'] == 'not_found':
@@ -999,7 +1045,7 @@ class TaskTrash:
                                         'started_at': empty_started,
                                         'finished_at': _now_text(),
                                         'status': 'failed', 'source': 'trash',
-                                        'job_name': name}, label='휴지통 작업')
+                                        'job_name': name}, label='휴지통 스캔')
                                     status, message = 'failed', '비우기 작업 기록을 찾을 수 없습니다.'
                                     break
                                 if w['result'] != 'done':
@@ -1008,7 +1054,7 @@ class TaskTrash:
                                         'started_at': empty_started,
                                         'finished_at': _now_text(),
                                         'status': 'failed', 'source': 'trash',
-                                        'job_name': name}, label='휴지통 작업')
+                                        'job_name': name}, label='휴지통 스캔')
                                     status, message = 'failed', '비우기가 완료되지 않았습니다.'
                                     break
                                 estat = (w.get('job') or {}).get('stats') or {}
@@ -1020,37 +1066,37 @@ class TaskTrash:
                                 'job_name': name}
                             if emptied_count is not None:
                                 trash_entry['summary'] = f'{emptied_count}개 비움'
-                            _write_status(key, 'trash', trash_entry, label='휴지통 작업')
+                            _write_status(key, 'trash', trash_entry, label='휴지통 스캔')
                             # 비우기에 성공했으니 이 라이브러리 휴지통은 0개 —
                             # 개수 캐시에 바로 반영한다.
                             try:
                                 from .task_status import set_trash_count
                                 set_trash_count(key, 0)
                             except Exception as e:
-                                logger.warning(f'[휴지통 작업] 휴지통 개수 캐시 반영 실패: {e}')
+                                logger.warning(f'[휴지통 스캔] 휴지통 개수 캐시 반영 실패: {e}')
                             # 휴지통 개수가 바뀌므로 현황·건강도 개수 캐시를 새로 읽어 둔다
                             try:
                                 from .task_status import refresh_trash_counts_async
                                 refresh_trash_counts_async()
                             except Exception as e:
-                                logger.warning(f'[휴지통 작업] 휴지통 개수 새로 읽기 실패: {e}')
+                                logger.warning(f'[휴지통 스캔] 휴지통 개수 새로 읽기 실패: {e}')
                             # 비운 라이브러리의 상세 캐시 목록은 낡으므로 지운다
                             try:
                                 from .task_trash_view import clear_cache
                                 clear_cache(key)
                             except Exception as e:
-                                logger.warning(f'[휴지통 작업] 휴지통 상세 캐시 정리 실패: {e}')
+                                logger.warning(f'[휴지통 스캔] 휴지통 상세 캐시 정리 실패: {e}')
                     except Exception as e:
                         status, message = 'failed', f'{STAGE_LABEL.get(step, step)} 단계 오류: {e}'
                         break
             except Exception as e:
-                logger.error(f'[휴지통 작업] {title} 처리 실패: {e}')
+                logger.error(f'[휴지통 스캔] {title} 처리 실패: {e}')
                 logger.error(traceback.format_exc())
                 status, message = 'failed', str(e)
                 TaskTrash._fail_running_status(key, name)
             # 집계 — '전체'는 대상 휴지통 파일 수, 복원은 스캔 전/후
             # 목록 비교(못 읽었으면 job stats로 대체), 누락은 전체-복원.
-            # 추가 파일 목록은 휴지통 작업에서 의미가 없어 수집하지 않는다.
+            # 추가 파일 목록은 휴지통 스캔에서 의미가 없어 수집하지 않는다.
             summed_stats = _sum_scan_stats(scan_stats_list)
             target_count = len(target_files) if target_files is not None else None
             eff_restored = restored_count
@@ -1075,7 +1121,7 @@ class TaskTrash:
                     job_id_display += f' 외 {len(scan_job_ids) - 1}개'
                 apply_scan_result(item, job_id_display, synth_stats, vfs_duration,
                                   scan_duration, None, key,
-                                  label='휴지통 작업', collect_append=False)
+                                  label='휴지통 스캔', collect_append=False)
             else:
                 item.vfs_duration = vfs_duration
                 item.scan_duration = scan_duration
@@ -1093,6 +1139,10 @@ class TaskTrash:
                                                  ensure_ascii=False)
             if vfs_results is not None:
                 item.vfs_results = json.dumps(vfs_results, ensure_ascii=False)
+            if file_exists is not None:
+                item.file_exists = json.dumps(file_exists, ensure_ascii=False)
+            if scan_results is not None:
+                item.scan_results = json.dumps(scan_results, ensure_ascii=False)
             if status == 'done':
                 done_msg = _trash_done_message(
                     action, target_count, eff_restored, emptied_count,
@@ -1102,7 +1152,7 @@ class TaskTrash:
                 item.finish('done', done_msg)
             else:
                 item.finish(status, message)
-            logger.info(f'[휴지통 작업] {title}: {status} {message}')
+            logger.info(f'[휴지통 스캔] {title}: {status} {message}')
             if status == 'done' and 'scan' in steps:
                 # 스캔으로 휴지통 구성이 바뀌었을 수 있어 상세 캐시를 지우고
                 # 개수 캐시는 '오래됨'으로 표시해 다음 통계 계산 때 읽게 한다.
@@ -1111,17 +1161,17 @@ class TaskTrash:
                     from .task_trash_view import clear_cache
                     clear_cache(key)
                 except Exception as e:
-                    logger.warning(f'[휴지통 작업] 휴지통 상세 캐시 정리 실패: {e}')
+                    logger.warning(f'[휴지통 스캔] 휴지통 상세 캐시 정리 실패: {e}')
                 try:
                     from .task_status import mark_trash_counts_stale
                     mark_trash_counts_stale()
                 except Exception as e:
-                    logger.warning(f'[휴지통 작업] 휴지통 개수 캐시 표시 실패: {e}')
+                    logger.warning(f'[휴지통 스캔] 휴지통 개수 캐시 표시 실패: {e}')
                 try:
                     from .task_status import request_stats
                     request_stats()
                 except Exception as e:
-                    logger.warning(f'[휴지통 작업] 통계 재계산 요청 실패: {e}')
+                    logger.warning(f'[휴지통 스캔] 통계 재계산 요청 실패: {e}')
         # 진행 상태는 작업이 끝날 때까지 유지한다 — 라이브러리마다
         # 지우면 지운 틈에 다른 작업이 비어 있다고 보고 시작해버린다.
         # (주기적 스캔은 처음부터 끝날 때만 지운다.)
@@ -1131,4 +1181,4 @@ class TaskTrash:
             else:
                 _finish_job_row(job_row_id, 'done', '완료됐습니다.')
         _set_trash_current(None)
-        logger.info(f'[휴지통 작업] 종료: {name}')
+        logger.info(f'[휴지통 스캔] 종료: {name}')

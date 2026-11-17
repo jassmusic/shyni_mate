@@ -20,6 +20,11 @@ class ModuleBase(PluginModuleBase):
             f'{self.name}_db_version' : '1',
             f'{self.name}_shyni_url' : '',
             f'{self.name}_shyni_token' : '',
+            # 관리자 계정 — 관리자 API용 세션 토큰 발급에 쓴다 (Step2·3).
+            # v1.0.0 정식 배포부터는 비밀번호·토큰을 암호화해서 저장한다.
+            f'{self.name}_shyni_admin_id' : '',
+            f'{self.name}_shyni_admin_pw' : '',
+            f'{self.name}_shyni_session_token' : '',
             f'{self.name}_shyni_log_path' : '',
             f'{self.name}_shyni_data_path' : '',
             # 고급 설정 — PostgreSQL Relay (배포 기본값은 표준값을 넣고 비밀번호만 비워 둔다)
@@ -129,6 +134,16 @@ class ModuleBase(PluginModuleBase):
             except Exception as e:
                 logger.error(f'[Base] shyni 연결 테스트 실패: {url} {e}')
                 ret = {'ret':'warning', 'msg':f'연결에 실패했습니다: {e}'}
+        if command == 'shyni_admin_test':
+            from . import shyni_admin
+            ok, msg, _is_admin = shyni_admin.test_credentials(
+                (arg1 or '').strip(), arg2 or '')
+            if ok:
+                ret['title'] = 'shyni 관리자 로그인 테스트'
+                ret['modal'] = (msg + '<br>설정을 저장하면 이 계정으로 '
+                                '세션 토큰을 받아 관리자 API를 씁니다.')
+            else:
+                ret = {'ret': 'warning', 'msg': msg}
         if command == 'db_test':
             return jsonify(self._db_test(arg1, arg2, arg3))
         return jsonify(ret)

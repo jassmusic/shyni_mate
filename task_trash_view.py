@@ -18,6 +18,7 @@
 import json
 import threading
 import time
+from datetime import datetime
 
 from .setup import *
 from . import db_support
@@ -168,8 +169,12 @@ def request_view(lib_id, force=False):
         return {'ret': 'fail',
                 'msg': '다른 라이브러리의 조회가 대기 중입니다. 끝난 뒤에 다시 시도해 주세요.',
                 'lib': state.get('lib'), 'requested_at': requested_at}
+    # 새 요청을 받으면 이전 계산의 started_at을 지운다 — 공유 상태라
+    # 낡은 값이 남아 있으면 완료 표시의 소요시간이 터무니없이 커진다
+    # (01:36 계산 값이 03:19 완료에 붙어 102분으로 나온 전례, 2026-11-18).
+    # 워커가 계산을 시작하면 compute_view가 새 started_at을 찍는다.
     return write_state(lib=lib_id, requested_at=now, progress=0, error=None,
-                       cancel=False, cancelled=False)
+                       cancel=False, cancelled=False, started_at=None)
 
 
 def read_bulk():
@@ -259,9 +264,190 @@ def page_from_cache(data, page=1, per_page=30, search='', order='old'):
     return {'lib_type': data.get('lib_type'),
             'main_label': data.get('main_label'),
             'retention_days': data.get('retention_days'),
+            'source': data.get('source'),
             'summary': data.get('summary'),
             'total_groups': filtered, 'page': page, 'pages': pages,
             'groups': chunk}
+
+
+def _parse_api_dt(value):
+    """API의 ISO 시각 문자열을 datetime으로 바꾼다. 실패하면 None."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        text = str(value).strip()
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def trash_compute_via_api(library_id, progress_cb=None):
+    """휴지통 조회 계산 (관리자 API 버전) — Relay 없이 동작한다.
+    db_support.trash_compute와 같은 구조를 돌려준다.
+
+    그룹핑: 파일이 속한 항목을 media_info API로 한 번씩 조회해
+    parent_id로 작품(main) 단위를 찾는다. 트랙은 부모 앨범 id로,
+    책은 부모 시리즈 id로 묶인다 (CD1/CD2도 같은 앨범으로 묶임).
+    에피소드는 부모 시즌 id로 묶인다.
+    """
+    import os
+    from datetime import datetime, timezone
+    from . import shyni_admin
+
+    # 1. 휴지통 목록 (API)
+    api_items = shyni_admin.api_trash_list(library_id)
+    if api_items is None:
+        raise Exception('휴지통 목록을 관리자 API로 읽지 못했습니다.')
+    if progress_cb:
+        progress_cb(15)
+
+    # 2. 라이브러리 종류 (compat 섹션 목록 — Relay와 무관)
+    lib_type = 'music'
+    try:
+        from .mod_status import ModuleStatus
+        sections, _err = ModuleStatus._sections()
+        for s in sections or []:
+            if int(s.get('key') or 0) == int(library_id):
+                lib_type = s.get('type') or 'music'
+                break
+    except Exception:
+        pass
+    info = db_support.TYPE_INFO.get(lib_type) or db_support.TYPE_INFO['music']
+    main_type = info['main']
+
+    # 3. 보관 기간 (라이브러리 상세 API, 실패하면 7일)
+    days = 7
+    try:
+        detail = shyni_admin.api_library_detail(library_id)
+        if detail and detail.get('trash_retention_days'):
+            days = int(detail['trash_retention_days'])
+    except Exception:
+        pass
+
+    # 4. 항목 정보 조회 (중복 제거 — 파일마다가 아니라 항목마다 한 번)
+    item_info = {}  # metadata_item_id -> media_info 응답의 item dict
+    distinct_ids = {it.get('metadata_item_id') for it in api_items
+                    if it.get('metadata_item_id')}
+    for idx, item_id in enumerate(sorted(distinct_ids)):
+        if progress_cb and idx % 20 == 0:
+            progress_cb(15 + int(30 * idx / max(1, len(distinct_ids))))
+        try:
+            res = shyni_admin.api_item_info(library_id, item_id)
+            if res and res.get('item'):
+                item_info[int(item_id)] = res['item']
+        except Exception:
+            pass
+
+    def _group_key_and_titles(item_id, api_title, api_type):
+        """항목의 그룹 키(root_id)와 표시 제목·부모 제목을 정한다.
+        (root_id, title, parent_title, year)를 돌려준다."""
+        row = item_info.get(int(item_id)) if item_id else None
+        if row is None:
+            # 조회 실패 — API 응답의 제목을 그대로 쓴다
+            return item_id, api_title or '', '', None
+        itype = int(row.get('metadata_type') or api_type or 0)
+        title = row.get('title') or api_title or ''
+        year = row.get('year')
+        parent_title = row.get('parent_title') or ''
+        grand_title = row.get('grandparent_title') or ''
+        parent_id = row.get('parent_id')
+        if itype == main_type:
+            # 이미 작품 단위 — 자기 id가 그룹 키
+            return int(item_id), title, parent_title, year
+        if parent_id:
+            # 하위 항목 — 부모 id가 그룹 키. 표시 제목은 종류별로 정한다.
+            if lib_type == 'tv':
+                # 에피소드 → 쇼(조부모)를 제목으로, 시즌(부모)을 부모 제목으로
+                return int(parent_id), grand_title or parent_title, parent_title, year
+            # 음악 트랙 → 앨범(부모)을 제목으로, 아티스트(조부모)를 부모 제목으로.
+            # 도서 책 → 시리즈(부모)를 제목으로.
+            return int(parent_id), parent_title or title, grand_title, year
+        return int(item_id), title, parent_title, year
+
+    now = datetime.now(timezone.utc)
+    groups = {}
+    files = {}
+    total = len(api_items)
+    n_missing = 0
+    n_trashed = 0
+    for idx, p in enumerate(api_items):
+        if progress_cb and idx % 200 == 0:
+            progress_cb(45 + int(50 * idx / max(1, total)))
+        item_id = p.get('metadata_item_id')
+        rid, gtitle, gparent, gyear = _group_key_and_titles(
+            item_id, p.get('title') or '', p.get('metadata_type'))
+        g = groups.get(rid)
+        if g is None:
+            g = {'root_id': rid, 'title': gtitle, 'year': gyear,
+                 'parent_title': gparent, 'file_count': 0,
+                 'first_dt': None, 'last_dt': None,
+                 'reasons': set(), 'statuses': set(),
+                 'folder': '', 'subs': [], 'paths': []}
+            groups[rid] = g
+            files[rid] = []
+        g['file_count'] += 1
+        da = _parse_api_dt(p.get('deleted_at'))
+        if da is not None:
+            if da.tzinfo is None:
+                da = da.replace(tzinfo=timezone.utc)
+            if g['first_dt'] is None or da < g['first_dt']:
+                g['first_dt'] = da
+            if g['last_dt'] is None or da > g['last_dt']:
+                g['last_dt'] = da
+        reason = p.get('deleted_reason') or ''
+        if reason:
+            g['reasons'].add(reason)
+        st = p.get('status') or ''
+        if st:
+            g['statuses'].add(st)
+            if st == 'missing':
+                n_missing += 1
+            elif st == 'trashed':
+                n_trashed += 1
+        path = p.get('file_path') or ''
+        if path:
+            g['paths'].append(path)
+        files[rid].append({'id': p.get('part_id'),
+                           'name': os.path.basename(path),
+                           'path': path,
+                           'item_title': p.get('title') or '',
+                           'deleted_at': db_support._fmt_dt(da),
+                           'reason': reason})
+    out_groups = []
+    out_files = {}
+    for rid, g in groups.items():
+        last = g['last_dt']
+        g['folder'], g['subs'] = db_support._trash_common_folder(g['paths'])
+        out_groups.append({
+            'root_id': rid, 'title': g['title'], 'year': g['year'],
+            'parent_title': g['parent_title'],
+            'file_count': g['file_count'],
+            'first_deleted': db_support._fmt_dt(g['first_dt']),
+            'last_deleted': db_support._fmt_dt(last),
+            'days_ago': (now - last).days if last else None,
+            'first_days_ago': ((now - g['first_dt']).days
+                               if g['first_dt'] else None),
+            'reasons': sorted(g['reasons']),
+            'statuses': sorted(g['statuses']),
+            'folder': g['folder'],
+            'subs': g['subs'],
+            '_first': g['first_dt'].timestamp() if g['first_dt'] else None,
+            '_last': last.timestamp() if last else None,
+        })
+        fl = files[rid]
+        fl.sort(key=lambda x: x['path'])
+        out_files[str(rid)] = fl
+    if progress_cb:
+        progress_cb(98)
+    return {'lib_type': lib_type, 'main_label': info['main_label'],
+            'retention_days': days,
+            'summary': {'files': total, 'groups': len(groups),
+                        'missing': n_missing, 'trashed': n_trashed},
+            'groups': out_groups, 'files': out_files}
 
 
 def compute_view(lib_id):
@@ -283,7 +469,21 @@ def compute_view(lib_id):
             if read_state().get('cancel'):
                 raise _Cancelled()
             write_state(progress=max(2, min(98, int(pct))))
-        data = db_support.trash_compute(lib_id, progress_cb=cb)
+        # 관리자 API 우선, 실패하면 Relay로 폴백 (Step4)
+        data = None
+        api_error = None
+        try:
+            data = trash_compute_via_api(lib_id, progress_cb=cb)
+        except _Cancelled:
+            raise
+        except Exception as e:
+            api_error = e
+            logger.info(f'[Trash] 휴지통 조회 API 실패, Relay로 폴백: {e}')
+        if data is None:
+            data = db_support.trash_compute(lib_id, progress_cb=cb)
+        # 데이터 출처를 기록한다 — API로 조회한 결과에서는 개별 선택
+        # 실행을 막는다 (사용자 지시, 2026-11-17)
+        data['source'] = 'relay' if api_error is not None else 'api'
         if not write_cache(lib_id, data):
             # 캐시를 저장하지 못했으면 완료 표시를 남기지 않고 오류로 끝낸다.
             # finished_at은 함께 찍는다 — 화면이 오류를 보려면 끝난 시각이

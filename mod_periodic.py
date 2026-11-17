@@ -4,7 +4,8 @@ from .model_periodic import ModelPeriodicItem
 from .mod_status import ModuleStatus
 from .setup import *
 from .task_periodic import (TaskPeriodic, annotate_total_labels,
-                            clear_start_error, fail_start, get_current,
+                            clear_start_error, current_scan_progress,
+                            fail_start, get_current,
                             get_jobs, get_last_start_error,
                             periodic_action_to_kind_use_vfs,
                             periodic_kind_use_vfs_to_action, request_cancel,
@@ -13,7 +14,7 @@ from .task_periodic import (TaskPeriodic, annotate_total_labels,
 name = 'periodic'
 logger = P.logger
 
-# 라이브러리 선택 목록 정렬 — 주기적 스캔·휴지통 작업이 같은 설정을 쓴다.
+# 라이브러리 선택 목록 정렬 — 주기적 스캔·휴지통 스캔이 같은 설정을 쓴다.
 PICK_SORTS = ('default_asc', 'default_desc', 'name_asc', 'name_desc')
 PICK_SORT_KEY = 'jobs_lib_pick_sort'
 
@@ -23,7 +24,7 @@ class ModulePeriodic(PluginModuleBase):
     (옵션) VFS 새로고침 → 스캔을 하나씩 순차로 실행한다."""
 
     def __init__(self, P):
-        super(ModulePeriodic, self).__init__(P, name=name, first_menu='jobs')
+        super(ModulePeriodic, self).__init__(P, name=name, first_menu='setting')
         self.db_default = {
             f'{self.name}_db_version': '1',
             f'{self.name}_jobs': '[]',
@@ -170,7 +171,7 @@ class ModulePeriodic(PluginModuleBase):
 
     # ---------- 화면 ----------
     def process_menu(self, sub, req):
-        # 서브메뉴: jobs(작업 관리) · result(스캔 결과) · setting(설정) · manual(매뉴얼)
+        # 서브메뉴: jobs(작업 관리) · result(작업 결과) · setting(설정) · manual(매뉴얼)
         arg = P.ModelSetting.to_dict()
         try:
             # 라이브러리 목록은 페이지가 뜬 뒤 ajax('sections')로 따로
@@ -288,7 +289,7 @@ class ModulePeriodic(PluginModuleBase):
                 return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 주기적 스캔이 없습니다.'})
             request_cancel()
             logger.info('[Periodic] 취소 요청')
-            ret['msg'] = '취소를 요청했습니다. 진행 중인 단계가 정리되면 멈춥니다.'
+            ret['msg'] = '취소를 요청했습니다. 진행 중인 단계가 정리되면 멈춥니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'
         return jsonify(ret)
 
     # ---------- 화면 AJAX ----------
@@ -303,6 +304,9 @@ class ModulePeriodic(PluginModuleBase):
             if cur and cur.get('action'):
                 from .model_periodic import action_label
                 cur['action_label'] = action_label(cur.get('action'))
+            if cur and cur.get('stage') == 'scan' and cur.get('section_key'):
+                cur['scan_progress'] = current_scan_progress(
+                    cur['section_key'], 'periodic')
             return jsonify({'ret': 'success', 'data': cur,
                             'last_error': get_last_start_error()})
         if sub == 'clear_start_error':

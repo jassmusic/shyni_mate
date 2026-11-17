@@ -1,7 +1,5 @@
-import glob
 import json
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -21,26 +19,23 @@ logger = P.logger
 _meta_refresh_threads = {}
 _vfs_scan_threads = {}
 _trash_chain_threads = {}
+# 카드 스캔 시작 직렬화 — 동시에 누른 카드 스캔이 게이트 검사를 함께
+# 통과해 자리를 초과하는 틈을 줄인다. 같은 프로세스 안에서만 유효하고,
+# Celery 워커(주기·휴지통)와는 공유되지 않아 프로세스 간 틈은 남는다.
+_library_scan_gate_lock = threading.Lock()
 
 
 class ModuleStatus(PluginModuleBase):
     """현황 — 라이브러리 목록과 라이브러리별 VFS 새로고침/스캔 실행·상태.
 
     섹션 목록·경로는 shyni 토큰 API(GET /library/sections)에서 가져온다.
-    마지막 스캔·파일수·신규·missing은 기본 설정에서 지정한 shyni 로그 폴더의
-    docker 로그(*-json.log)에서 [scan complete]/[scan failed] 기록을 읽어 표시한다.
-    로그에 기록이 없는 라이브러리는 '스캔 후 내용이 반영됩니다'로 표시한다.
-    앨범수는 로그에 기록되지 않아 표시할 수 없다.
+    마지막 스캔·파일수·신규·missing은 Relay가 켜져 있으면 shyni DB의
+    compat_jobs에서 읽고, 꺼져 있으면 주기 스캔 이력으로 채운다.
+    이력이 없는 라이브러리는 '스캔 후 내용이 반영됩니다'로 표시한다.
     작업 상태는 이 플러그인이 시작한 작업만 섹션별로 기록해 표시한다.
     스캔 취소는 토큰으로 불가능하다(DELETE /libraries/{id}/scan은 관리자 전용 401).
     VFS 새로고침 취소는 rclone RC job/stop으로 가능하다.
     """
-
-    _log_cache = {}
-    _RE_EVENT = re.compile(r'\[scan (complete|failed)\] library=(\d+)')
-    _RE_PATH = re.compile(r'\[scan (?:complete|failed)\] library=\d+ path=(\S+)')
-    _RE_NUM = {k: re.compile(r"'%s': (\d+)" % k)
-               for k in ('total', 'new', 'missing', 'registered')}
 
     def __init__(self, P):
         super(ModuleStatus, self).__init__(P, name=name, first_menu='list')
@@ -272,74 +267,12 @@ class ModuleStatus(PluginModuleBase):
             pass
         return out, None
 
-    # ---------- shyni 로그에서 스캔 이력 읽기 ----------
-    @classmethod
-    def _log_files(cls):
-        base = (P.ModelSetting.get('base_shyni_log_path') or '').strip()
-        if not base:
-            return []
-        if os.path.isfile(base):
-            return [base]
-        if not os.path.isdir(base):
-            return []
-        files, seen = [], set()
-        for pat in (os.path.join(base, '*-json.log*'),
-                    os.path.join(base, '*', '*-json.log*')):
-            for f in glob.glob(pat):
-                if f not in seen and os.path.isfile(f) and not f.endswith('.gz'):
-                    seen.add(f)
-                    files.append(f)
-        files.sort(key=lambda f: os.path.getmtime(f))
-        return files
-
-    @classmethod
-    def _parse_log_file(cls, path, offset=0, records=None):
-        """파일에서 라이브러리별 전체 스캔(path=None) 최신 기록을 뽑는다.
-
-        offset부터 새로 붙은 부분만 읽는 증분 파싱을 지원한다.
-        쓰기 중인 마지막 줄(개행 없음)은 다음 호출로 미룬다.
-        반환: (records, 다음 offset)
-        """
-        records = dict(records or {})
-        try:
-            with open(path, 'rb') as fp:
-                fp.seek(offset)
-                data = fp.read()
-            cut = data.rfind(b'\n')
-            if cut < 0:
-                return records, offset
-            data = data[:cut + 1]
-            new_offset = offset + len(data)
-            for line in data.decode('utf-8', errors='replace').splitlines():
-                if '[scan complete]' not in line and '[scan failed]' not in line:
-                    continue
-                try:
-                    env = json.loads(line)
-                    text = env.get('log') or ''
-                    ts_raw = env.get('time') or ''
-                except Exception:
-                    continue
-                m = cls._RE_EVENT.search(text)
-                if not m:
-                    continue
-                pm = cls._RE_PATH.search(text)
-                if pm and pm.group(1) != 'None':
-                    continue  # 부분 스캔은 라이브러리 전체 스캔 기록으로 쓰지 않음
-                kind, lib = m.group(1), m.group(2)
-                rec = {'result': 'done' if kind == 'complete' else 'failed',
-                       'time': ts_raw}
-                if kind == 'complete':
-                    for k, rx in cls._RE_NUM.items():
-                        mm = rx.search(text)
-                        rec[k] = int(mm.group(1)) if mm else None
-                prev = records.get(lib)
-                if prev is None or ts_raw >= prev['time']:
-                    records[lib] = rec
-            return records, new_offset
-        except Exception as e:
-            logger.error(f'shyni 로그 읽기 실패 ({path}): {e}')
-            return records, offset
-
+    # ---------- shyni DB에서 스캔 이력 읽기 ----------
+    # 로그 파싱은 0.9.9에서 뺐다 — beta.13은 [scan complete] 기록을 아예
+    # 남기지 않아 로그를 읽어도 결과가 없고, 수십 MB를 읽는 동안 웹이
+    # 멈추기만 한다 (2026-11-18 사용자 결정). Relay가 켜져 있으면 DB
+    # compat_jobs가 정본이고, 꺼져 있으면 빈 기록을 돌려주고 주기 스캔
+    # 이력 폴백(_fill_last_scan_from_periodic)이 카드를 채운다.
     @staticmethod
     def _to_kst(ts_raw):
         try:
@@ -404,48 +337,23 @@ class ModuleStatus(PluginModuleBase):
 
     @classmethod
     def _scan_history(cls):
-        """로그 파일들을 병합해 라이브러리별 최신 스캔 기록을 만든다. (기록, 파일수)
+        """라이브러리별 최신 스캔 기록을 만든다. (기록, 파일수)
 
-        Relay가 켜져 있으면 DB compat_jobs가 정본이라 로그 파싱을 생략한다
-        — 로그는 수십 MB(2026-11-15 실측 44MB·13만 줄)라 파싱이 CPU를
-        오래 붙잡고, 웹에서 하면 FF 웹 전체가 멈춘다. DB 기록은 스캔이
-        만들었던 compat job과 같은 출처라 로그와 같은 내용을 담는다.
-        DB에 기록이 없으면(스캔 전·DB 오류) 로그로 폴백한다.
+        Relay가 켜져 있으면 shyni DB compat_jobs가 정본이다.
+        Relay가 꺼져 있으면 빈 기록을 돌려준다 — 로그 파싱은 0.9.9에서
+        뺐다. beta.13은 [scan complete] 기록을 아예 남기지 않아 로그를
+        읽어도 결과가 없고, 수십 MB를 읽는 동안 웹이 멈추기만 한다
+        (2026-11-18 사용자 결정). 빈 카드는 주기 스캔 이력 폴백
+        (_fill_last_scan_from_periodic)이 채운다.
+        두 번째 값은 예전 로그 파일 수 자리 — 항상 0이다.
         """
-        files = cls._log_files()
         try:
             from . import db_support
             if db_support.db_ready():
-                db_recs = cls._db_scan_history()
-                if db_recs:
-                    return db_recs, len(files)
+                return cls._db_scan_history(), 0
         except Exception:
             pass
-        merged = {}
-        for f in files:
-            try:
-                st = os.stat(f)
-            except Exception:
-                continue
-            cached = cls._log_cache.get(f)
-            if cached and cached['ino'] == st.st_ino \
-                    and cached['size'] == st.st_size and cached['mtime'] == st.st_mtime:
-                recs = cached['records']
-            elif cached and cached['ino'] == st.st_ino and st.st_size > cached['offset']:
-                recs, off = cls._parse_log_file(f, cached['offset'], cached['records'])
-                cls._log_cache[f] = {'ino': st.st_ino, 'size': st.st_size,
-                                     'mtime': st.st_mtime, 'offset': off, 'records': recs}
-            else:
-                recs, off = cls._parse_log_file(f)
-                cls._log_cache[f] = {'ino': st.st_ino, 'size': st.st_size,
-                                     'mtime': st.st_mtime, 'offset': off, 'records': recs}
-            for lib, rec in recs.items():
-                prev = merged.get(lib)
-                if prev is None or rec['time'] >= prev['time']:
-                    merged[lib] = rec
-        for rec in merged.values():
-            rec['time_text'] = cls._to_kst(rec['time'])
-        return merged, len(files)
+        return {}, 0
 
     @classmethod
     def _fill_book_new(cls, rows):
@@ -517,10 +425,180 @@ class ModuleStatus(PluginModuleBase):
                 ls.pop('_new_from_periodic', None)
                 ls.pop('_new_from_card', None)
 
+    @classmethod
+    def _fill_last_scan_from_periodic(cls, rows):
+        """스캔 이력이 없는 카드의 last_scan을 주기 스캔 이력으로 채운다.
+
+        Relay가 꺼져 있으면 _scan_history가 빈 기록을 돌려준다 —
+        로그 파싱은 0.9.9에서 뺐다 (beta.13은 [scan complete] 기록을
+        아예 남기지 않아, 2026-11-17 실측: 로그 46MB 전수 0건).
+        그래서 이력이 없는 카드만 플러그인 자체 기록(주기 스캔 이력의
+        가장 최근 완료 행)으로 채운다. 주기 스캔 작업 결과 페이지에
+        나오는 수치와 같은 값이다. 대시보드에서 누른 스캔·새로고침도
+        주기 스캔 이력에 남으니 카드에 반영된다.
+        - DB·수동 이력이 있는 카드는 건드리지 않는다.
+        - 채운 기록에는 '_from': 'periodic' 표시를 남긴다 — 캐시 응답 때
+          우리 채움만 갈아 끼우거나 정리하고, 다른 출처의 값은 건드리지
+          않기 위해서다 (_fill_book_new와 같은 방식).
+        - 주기 이력이 사라지면(기록 삭제 등) 우리 채움도 다시 비운다.
+        - 도서는 stat_total이 entries(이번 스캔 처리 수)일 수 있고
+          stat_new이 비어 있을 수 있다 — 템플릿이 도서에는 '처리' 라벨을
+          쓰고 new가 없으면 '-'로 표시한다.
+        목록을 새로 만들 때와 캐시로 답할 때 양쪽에서 부른다.
+        """
+        targets = {}
+        for sec in rows:
+            ls = sec.get('last_scan')
+            if ls is None or (isinstance(ls, dict)
+                              and ls.get('_from') == 'periodic'):
+                targets[str(sec['key'])] = sec
+        if not targets:
+            return
+        try:
+            from .model_periodic import ModelPeriodicItem
+            stats = ModelPeriodicItem.latest_done_stats_map(list(targets))
+        except Exception as e:
+            logger.warning(f'[Status] 주기 스캔 이력 조회 실패: {e}')
+            return
+        for key, sec in targets.items():
+            rec = stats.get(key)
+            if rec is None:
+                # 우리 채움이 있었는데 이력이 사라졌으면 다시 비운다.
+                if sec.get('last_scan') is not None:
+                    sec['last_scan'] = None
+                continue
+            finish = rec.get('finish')
+            try:
+                time_text = finish.strftime('%m-%d %H:%M') \
+                    if finish is not None else ''
+            except Exception:
+                time_text = ''
+            try:
+                time_iso = finish.isoformat() if finish is not None else ''
+            except Exception:
+                time_iso = ''
+            sec['last_scan'] = {
+                'result': 'done',
+                'time': time_iso,
+                'time_text': time_text,
+                'total': rec.get('total'),
+                'new': rec.get('new'),
+                'missing': rec.get('missing'),
+                '_from': 'periodic',
+            }
+
     # 카드 스캔 신규 측정값 저장소 (ModelSetting JSON, 주기 이력과 별개).
     # {섹션 key(str): {'new': int, 'at': float(epoch), 'job': str|None}}
     _CARD_NEW_KEY = 'status_card_scan_new'
     _card_new_lock = threading.Lock()
+
+    # 대시보드에서 누른 동작의 이력 작업명 — 주기적·휴지통 이력에
+    # '대시보드 (수동)'으로 남는다 (모드 manual이라 '(수동)'은 화면에서 붙는다).
+    _DASHBOARD_JOB_NAME = '대시보드'
+
+    @classmethod
+    def _dashboard_row_create(cls, key, title, action, trash=False, shyni_job_id=None):
+        """대시보드 동작의 이력 행을 만든다 — 주기적 스캔 이력(periodic_item)
+        또는 휴지통 스캔 이력(trash_item). 성공하면 행 id, 실패하면 None.
+        이력 실패가 동작 자체를 막지 않는다. 행 id는 현황 슬롯
+        (vfs/scan의 history_row_id)에 남겨 완료 때 끝낸다."""
+        try:
+            if trash:
+                from .model_trash import ModelTrashItem as Model
+            else:
+                from .model_periodic import ModelPeriodicItem as Model
+            with F.app.app_context():
+                item = Model(cls._DASHBOARD_JOB_NAME, key, title, 'manual', action)
+                if shyni_job_id:
+                    item.shyni_job_id = str(shyni_job_id)
+                item.save()
+                return item.id
+        except Exception as e:
+            logger.warning(f'[현황] 대시보드 이력 행 만들기 실패: {e}')
+            return None
+
+    @classmethod
+    def _dashboard_row_finish(cls, row_id, status, message=None, trash=False,
+                              job=None, job_id=None, vfs_duration=None,
+                              scan_duration=None, pre_max_id=None):
+        """대시보드 이력 행을 끝낸다. 이미 끝난 행이면 건드리지 않는다 —
+        완료 감지와 실행 스레드가 둘 다 끝내려 해도 한 번만 끝난다.
+        job이 있으면 스캔 통계를 채운다 (주기적 스캔과 같은 방식)."""
+        if not row_id:
+            return
+        try:
+            if trash:
+                from .model_trash import ModelTrashItem as Model
+            else:
+                from .model_periodic import ModelPeriodicItem as Model
+            with F.app.app_context():
+                item = (F.db.session.query(Model)
+                        .filter(Model.id == row_id).first())
+                if item is None or item.status != 'running':
+                    return
+                if job is not None and not trash:
+                    from .task_periodic import apply_scan_result
+                    stats = job.get('stats') if isinstance(job, dict) else None
+                    apply_scan_result(item, job_id, stats, vfs_duration,
+                                      scan_duration, pre_max_id,
+                                      item.section_key, label='대시보드')
+                else:
+                    if vfs_duration is not None:
+                        item.vfs_duration = vfs_duration
+                    if scan_duration is not None:
+                        item.scan_duration = scan_duration
+                item.finish(status, message)
+        except Exception as e:
+            logger.warning(f'[현황] 대시보드 이력 행 끝내기 실패: {e}')
+
+    @classmethod
+    def _dashboard_row_set_vfs_duration(cls, row_id, seconds):
+        """대시보드 이력 행에 VFS 소요만 저장한다 (스캔이 이어질 때)."""
+        if not row_id or seconds is None:
+            return
+        try:
+            from .model_periodic import ModelPeriodicItem
+            with F.app.app_context():
+                item = (F.db.session.query(ModelPeriodicItem)
+                        .filter(ModelPeriodicItem.id == row_id).first())
+                if item is None or item.status != 'running':
+                    return
+                item.vfs_duration = seconds
+                item.save()
+        except Exception as e:
+            logger.warning(f'[현황] 대시보드 이력 VFS 소요 저장 실패: {e}')
+
+    @classmethod
+    def _dashboard_row_set_scan_job(cls, row_id, job_id):
+        """대시보드 이력 행에 shyni 작업 번호를 남긴다 — 재시작 후 복구가
+        이 번호로 스캔 완료를 이어서 확인할 수 있다 (주기적 스캔과 같은 방식)."""
+        if not row_id or not job_id:
+            return
+        try:
+            from .model_periodic import ModelPeriodicItem
+            with F.app.app_context():
+                item = (F.db.session.query(ModelPeriodicItem)
+                        .filter(ModelPeriodicItem.id == row_id).first())
+                if item is None or item.status != 'running':
+                    return
+                item.shyni_job_id = str(job_id)
+                item.save()
+        except Exception as e:
+            logger.warning(f'[현황] 대시보드 이력 작업 번호 저장 실패: {e}')
+
+    @staticmethod
+    def _slot_seconds(started_at, finished_at=None):
+        """현황 슬롯 시각 두 개 사이의 초 — 읽을 수 없으면 None.
+        finished_at이 없으면 지금을 끝으로 본다."""
+        try:
+            t0 = datetime.strptime(started_at or '', '%Y-%m-%d %H:%M:%S').timestamp()
+            if finished_at:
+                t1 = datetime.strptime(finished_at, '%Y-%m-%d %H:%M:%S').timestamp()
+            else:
+                t1 = time.time()
+            return max(0, int(t1 - t0))
+        except Exception:
+            return None
 
     @classmethod
     def _card_scan_new_read(cls):
@@ -694,6 +772,28 @@ class ModuleStatus(PluginModuleBase):
                         else:
                             logger.info(f"[현황] VFS 새로고침 완료: 섹션 {key} job {vfs['job']}")
                         changed = True
+                        # 대시보드 이력 행 — 새로고침만이면 여기서 끝내고,
+                        # 새로고침 후 스캔이면 VFS 소요만 남긴다 (스캔이 이어진다).
+                        # 스캔이 이어지는 행은 스캔 완료 때 끝낸다.
+                        row_id = vfs.get('history_row_id')
+                        if row_id:
+                            vfs_secs = cls._slot_seconds(vfs.get('started_at'),
+                                                         vfs.get('finished_at'))
+                            if vfs.get('then_scan'):
+                                if vfs['status'] == 'done':
+                                    cls._dashboard_row_set_vfs_duration(row_id, vfs_secs)
+                                else:
+                                    cls._dashboard_row_finish(
+                                        row_id, 'failed',
+                                        vfs.get('error') or 'VFS 새로고침에 실패했습니다.',
+                                        vfs_duration=vfs_secs)
+                            else:
+                                cls._dashboard_row_finish(
+                                    row_id,
+                                    'done' if vfs['status'] == 'done' else 'failed',
+                                    'VFS 새로고침이 완료됐습니다.' if vfs['status'] == 'done'
+                                    else (vfs.get('error') or 'VFS 새로고침에 실패했습니다.'),
+                                    vfs_duration=vfs_secs)
                 except requests.HTTPError as e:
                     # rclone 재시작 등으로 job 기록이 사라진 경우 — 실행 중으로 굳지 않게 중단으로 정리한다
                     body = ''
@@ -706,6 +806,9 @@ class ModuleStatus(PluginModuleBase):
                         vfs['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         logger.warning(f"[현황] VFS 새로고침 job {vfs['job']} 기록이 없어 중단으로 정리: 섹션 {key}")
                         changed = True
+                        cls._dashboard_row_finish(
+                            vfs.get('history_row_id'), 'failed',
+                            'VFS 새로고침 작업 기록을 찾을 수 없습니다.')
                 except Exception:
                     pass
         meta = state.get('meta')
@@ -764,6 +867,14 @@ class ModuleStatus(PluginModuleBase):
                                        timeout=15)
                     if res.status_code == 200:
                         job = res.json()
+                        # 이 스캔에 딸린 VFS 소요 — 같은 이력 행의 vfs
+                        # 슬롯일 때만 쓴다 (옛 새로고침 기록을 섞지 않는다).
+                        vfs_slot = state.get('vfs') or {}
+                        vfs_secs = None
+                        if vfs_slot.get('history_row_id') and \
+                                vfs_slot.get('history_row_id') == scan.get('history_row_id'):
+                            vfs_secs = cls._slot_seconds(vfs_slot.get('started_at'),
+                                                         vfs_slot.get('finished_at'))
                         if job.get('status') == 'completed':
                             scan['status'] = 'done'
                             scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -789,12 +900,39 @@ class ModuleStatus(PluginModuleBase):
                                 cls._maybe_measure_card_scan_new(key, scan, job)
                             except Exception as e:
                                 logger.warning(f'[현황] 카드 스캔 신규 측정 시작 실패: {e}')
+                            # 대시보드 이력 행 — 스캔 통계를 채워 끝낸다.
+                            # 카드 숫자는 이 이력에서 채워진다.
+                            try:
+                                from .task_periodic import scan_summary_text
+                                summary = scan_summary_text(
+                                    job.get('stats') if isinstance(job, dict) else None)
+                            except Exception:
+                                summary = None
+                            done_msg = '스캔이 완료됐습니다.'
+                            if summary:
+                                done_msg = f'{done_msg} ({summary})'
+                            cls._dashboard_row_finish(
+                                scan.get('history_row_id'), 'done', done_msg,
+                                job=job, job_id=scan.get('job'),
+                                vfs_duration=vfs_secs,
+                                scan_duration=cls._slot_seconds(
+                                    scan.get('started_at'), scan.get('finished_at')),
+                                pre_max_id=scan.get('pre_max_id'))
                         elif job.get('status') == 'failed':
                             scan['status'] = 'failed'
                             scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             scan['error'] = str(job.get('error') or '')[:200]
                             logger.error(f"[현황] 스캔 실패: 섹션 {key} job {scan['job']} — {scan['error']}")
                             changed = True
+                            # 실패한 스캔도 부분 통계를 이력에 남긴다 (주기적 스캔과 동일).
+                            cls._dashboard_row_finish(
+                                scan.get('history_row_id'), 'failed',
+                                f"스캔 실패: {scan.get('error') or ''}",
+                                job=job, job_id=scan.get('job'),
+                                vfs_duration=vfs_secs,
+                                scan_duration=cls._slot_seconds(
+                                    scan.get('started_at'), scan.get('finished_at')),
+                                pre_max_id=scan.get('pre_max_id'))
                     elif res.status_code == 404:
                         # job 기록이 사라지면(보관 기간 경과·shyni 재시작 등)
                         # 완료를 확인할 길이 없어 진행 중으로 굳는다 — 중단으로 정리한다
@@ -803,6 +941,8 @@ class ModuleStatus(PluginModuleBase):
                         scan['error'] = 'job 기록을 찾을 수 없습니다'
                         logger.warning(f"[현황] 스캔 job {scan['job']} 기록이 없어 중단으로 정리: 섹션 {key}")
                         changed = True
+                        cls._dashboard_row_finish(scan.get('history_row_id'), 'failed',
+                                                  '스캔 작업 기록을 찾을 수 없습니다.')
                 except Exception:
                     pass
         if scan and scan.get('status') == 'requested' and not scan.get('job'):
@@ -817,9 +957,109 @@ class ModuleStatus(PluginModuleBase):
                 scan['error'] = '스캔 상태를 확인할 수 없어 중단으로 정리했습니다'
                 logger.warning(f'[현황] 스캔 전송됨 표시가 오래돼 중단으로 정리: 섹션 {key}')
                 changed = True
+                cls._dashboard_row_finish(scan.get('history_row_id'), 'failed',
+                                          '스캔 상태를 확인할 수 없어 중단으로 정리했습니다')
         if changed:
             cls._set_state(key, state)
         return state
+
+    # ---------- 라이브러리 동시 스캔 수 게이트 ----------
+    # 스캔이 들어간 작업은 경로와 상관없이 1건으로 세서, 설정
+    # '라이브러리 동시 스캔 수'(기본값 2)까지만 동시에 돈다.
+    # 대시보드 스캔·새로고침 후 스캔은 누른 시점부터 1건이고,
+    # 주기적·휴지통은 스캔이 들어간 작업이 실행 중이면 1건이다.
+    # 상한에 걸리거나 같은 라이브러리가 스캔 중이면 시작하지 않고
+    # 취소한다 — 기다리지 않는다.
+    # 스캔 큐(폴더 단위)는 기존 '동시 스캔 수'가 따로 제한하므로
+    # 여기서 세지 않는다. 실행 중 집계는 현황 scan 슬롯을 compat
+    # job으로 직접 확인해 센다 — shyni 스캔 상태 API는 큐 스캔까지
+    # 스캔 중으로 보여 자리를 차지하므로 쓰지 않는다.
+    LIBRARY_SCAN_LIMIT_KEY = 'scan_max_library_scan_count'
+    LIBRARY_SCAN_LIMIT_DEFAULT = 2
+    LIBRARY_SCAN_SAME_MESSAGE = '현재 해당 라이브러리 스캔 작업이 진행중 입니다.'
+
+    @classmethod
+    def library_scan_limit(cls):
+        """라이브러리 동시 스캔 수 설정 — 없거나 잘못됐으면 기본값 2."""
+        try:
+            v = P.ModelSetting.get_int(cls.LIBRARY_SCAN_LIMIT_KEY)
+        except Exception:
+            v = None
+        if not v:
+            return cls.LIBRARY_SCAN_LIMIT_DEFAULT
+        return max(1, min(20, v))
+
+    @classmethod
+    def running_library_scans(cls, exclude_source=None):
+        """지금 스캔 중인 라이브러리 — [(key, title)].
+        현황 scan 슬롯을 compat job으로 확인해 세므로, 대시보드를
+        열지 않아 표시만 낡게 남은 스캔은 세지 않는다. 새로고침 후
+        스캔은 새로고침 단계부터 센다. 주기적·휴지통은 진행 상태에
+        스캔이 들어간 작업이 있으면 그 라이브러리를 센다.
+        exclude_source='periodic'/'trash'면 그쪽 진행 상태는 빼고
+        센다 (자기 작업이 자기 자리를 막지 않게). 목록을 읽지 못하면
+        빈 목록을 돌려준다 (게이트가 스캔을 막지 않게)."""
+        try:
+            sections, err = cls._sections()
+        except Exception:
+            return []
+        if err or not sections:
+            return []
+        titles = {}
+        running = {}
+        for sec in sections:
+            key = sec.get('key')
+            if key is None:
+                continue
+            titles[str(key)] = sec.get('title') or f'라이브러리 {key}'
+            try:
+                state = cls._refresh_state(int(key), cls._get_state(int(key)))
+            except Exception:
+                continue
+            scan = (state or {}).get('scan') or {}
+            if scan.get('status') in ('running', 'requested'):
+                running[str(key)] = titles[str(key)]
+                continue
+            vfs = (state or {}).get('vfs') or {}
+            if vfs.get('status') == 'running' and vfs.get('then_scan'):
+                running[str(key)] = titles[str(key)]
+        for source, setting_key in (('periodic', 'periodic_current'),
+                                    ('trash', 'trash_current')):
+            if source == exclude_source:
+                continue
+            try:
+                raw = P.ModelSetting.get(setting_key)
+                cur = json.loads(raw) if raw else None
+            except Exception:
+                cur = None
+            if not isinstance(cur, dict):
+                continue
+            skey = cur.get('section_key')
+            if not skey:
+                continue
+            if 'scan' not in str(cur.get('action') or ''):
+                continue
+            skey = str(skey)
+            if skey not in running:
+                running[skey] = (titles.get(skey)
+                                 or cur.get('section_title')
+                                 or f'라이브러리 {skey}')
+        order = {str(sec.get('key')): i for i, sec in enumerate(sections)}
+        return sorted(running.items(), key=lambda kv: order.get(kv[0], 999))
+
+    @classmethod
+    def library_gate_check(cls, key, exclude_source=None):
+        """스캔 시작 전 게이트 검사 — 막아야 하면 안내 문구, 아니면 None.
+        같은 라이브러리가 이미 스캔 중이면 그 문구를 먼저 낸다."""
+        running = cls.running_library_scans(exclude_source=exclude_source)
+        if str(key) in {str(k) for k, _ in running}:
+            return cls.LIBRARY_SCAN_SAME_MESSAGE
+        limit = cls.library_scan_limit()
+        if len(running) >= limit:
+            names = ', '.join(t for _, t in running)
+            return (f'다른 라이브러리 스캔 {len(running)}개가 실행 중입니다 '
+                    f'({names}). (라이브러리 동시 스캔 수: {limit}개)')
+        return None
 
     # ---------- 대시보드 목록 재구축 (Celery 워커 전용) ----------
     @classmethod
@@ -827,10 +1067,10 @@ class ModuleStatus(PluginModuleBase):
         """대시보드 목록 payload를 처음부터 만든다 — Celery 워커가 부른다.
 
         웹은 이 함수를 직접 부르지 않는다. 재구축(섹션 API·스캔 이력·
-        건강·용량)은 수 초가 걸리고, 그중 로그 파싱은 CPU 작업이라 웹
-        프로세스에서 하면 FF 웹(gevent 단일 루프) 전체가 멈춘다.
-        웹은 저장된 복사본만 읽고, 재구축 요청은 워커에 남긴다.
-        실패하면 None을 돌려준다 (워커가 error 상태로 기록한다).
+        건강·용량)은 수 초가 걸려 웹 프로세스에서 하면 FF 웹(gevent
+        단일 루프) 전체가 멈춘다. 웹은 저장된 복사본만 읽고, 재구축
+        요청은 워커에 남긴다. 실패하면 None을 돌려준다 (워커가 error
+        상태로 기록한다).
         """
         sections, err = cls._sections()
         if err:
@@ -843,6 +1083,9 @@ class ModuleStatus(PluginModuleBase):
             sec['state'] = state
             sec['last_scan'] = history.get(str(sec['key']))
             rows.append(sec)
+        # 스캔 이력이 없는 카드는 주기 스캔 이력으로 채운다
+        # (Relay OFF면 스캔 이력이 비어 있다).
+        cls._fill_last_scan_from_periodic(rows)
         # 도서 카드 신규는 주기 스캔 이력 실측값으로 채운다
         # (shyni 도서 stats에는 신규 키가 없어 last_scan이 비어 있다).
         cls._fill_book_new(rows)
@@ -880,15 +1123,18 @@ class ModuleStatus(PluginModuleBase):
         if sub == 'db_stats':
             # 화면 폴링용: DB 통계가 준비됐는지와 진척률만 가볍게 돌려준다
             try:
-                bundle, loading = self._db_stats()
+                bundle, loading, db_status = self._db_stats()
                 if type(self)._db_stats_busy:
                     # 강제 새로고침으로 재계산이 돌고 있으면 끝날 때까지 로딩중으로 본다
                     loading = True
             except Exception:
-                bundle, loading = None, False
+                bundle, loading, db_status = None, False, {}
             return jsonify({'ret': 'success',
                             'ready': bundle is not None and not loading,
                             'db_off': bundle is None and not loading,
+                            'db_relay_off': bool(db_status.get('relay_off')),
+                            'db_stats_failed': bool(db_status.get('failed')),
+                            'db_stats_at': db_status.get('at'),
                             'progress': self._overall_progress(loading),
                             'libs': (bundle or {}).get('libs') or {}})
         if sub == 'states':
@@ -901,6 +1147,26 @@ class ModuleStatus(PluginModuleBase):
                 except Exception:
                     out[k] = self._get_state(k)
             return jsonify({'ret': 'success', 'states': out})
+        if sub == 'sessions':
+            # 세션 탭용: Relay가 켜져 있으면 전 사용자 세션 목록을,
+            # 꺼져 있으면 안내 문구를 보여 준다.
+            from . import db_support
+            if not db_support.db_ready():
+                return jsonify({'ret': 'success', 'relay_off': True, 'sessions': [],
+                                'refresh_min': self._refresh_min()})
+            sessions = db_support.list_sessions()
+            if sessions is None:
+                return jsonify({'ret': 'fail', 'msg': '세션 목록을 불러오지 못했습니다.'})
+            # 현재 세션 표시 — 관리자 API로 현재 세션 id 확인
+            current_id = None
+            try:
+                from .shyni_admin import api_current_session_id
+                current_id = api_current_session_id()
+            except Exception:
+                current_id = None
+            return jsonify({'ret': 'success', 'relay_off': False,
+                            'sessions': sessions, 'current_id': current_id,
+                            'refresh_min': self._refresh_min()})
         if sub == 'list':
             cfg_url, cfg_token = ShyniBackend.get_config()
             if not cfg_url or not cfg_token:
@@ -961,6 +1227,9 @@ class ModuleStatus(PluginModuleBase):
                                 'type_counts': {},
                                 'db_stats_on': False,
                                 'db_loading': False,
+                                'db_stats_at': None,
+                                'db_relay_off': False,
+                                'db_stats_failed': False,
                                 'list_loading': True,
                                 'progress': 0,
                                 'health': None,
@@ -978,6 +1247,14 @@ class ModuleStatus(PluginModuleBase):
                     sec['state'] = self._refresh_state(sec['key'], self._get_state(sec['key']))
                 except Exception:
                     pass
+            # 스캔 이력이 없는 카드는 주기 스캔 이력으로 채운다 —
+            # 캐시를 만든 뒤에 끝난 주기 스캔도 다음 주기까지 기다리지
+            # 않고 바로 보인다. 도서 신규 채움보다 먼저 해야
+            # 채운 기록의 신규도 바로 채워진다.
+            try:
+                self._fill_last_scan_from_periodic(rows)
+            except Exception:
+                pass
             # 신규도 마찬가지 — 캐시를 만든 뒤에 끝난 주기 스캔의 신규가
             # 다음 주기까지 '-'로 남지 않게 그 자리에서 다시 채운다.
             try:
@@ -989,8 +1266,9 @@ class ModuleStatus(PluginModuleBase):
             db_stats_on = False
             health = None
             db_loading = False
+            db_status = {}
             try:
-                bundle, db_loading = self._db_stats(force=force)
+                bundle, db_loading, db_status = self._db_stats(force=force)
                 if bundle:
                     db_stats_on = True
                     stats = bundle['libs']
@@ -1001,6 +1279,20 @@ class ModuleStatus(PluginModuleBase):
                     health = self._health_payload(bundle, rows, periodic_current)
             except Exception as e:
                 logger.warning(f'[Status] DB 통계 조회 실패(무시): {e}')
+            if not db_stats_on:
+                # Relay가 꺼져 있어 DB 통계가 없어도 휴지통 개수는
+                # 휴지통 조회·비우기 때 저장된 개수 캐시에서 보여 준다 —
+                # 휴지통 개수는 관리자 API로도 읽을 수 있어 Relay와 무관하다.
+                # 최소 정보(trash)만 넣어, 미디어·메타 없음은 빈 칸 그대로 둔다.
+                try:
+                    from .task_status import read_trash_cache
+                    cached = read_trash_cache().get('data') or {}
+                    for sec in rows:
+                        v = cached.get(str(sec['key']))
+                        if v is not None:
+                            sec['db_stats'] = {'trash': int(v)}
+                except Exception:
+                    pass
             return jsonify({'ret': 'success', 'data': rows,
                             'log_files': base['log_files'],
                             'refresh_min': interval,
@@ -1009,6 +1301,9 @@ class ModuleStatus(PluginModuleBase):
                             'type_counts': base['type_counts'],
                             'db_stats_on': db_stats_on,
                             'db_loading': db_loading,
+                            'db_stats_at': db_status.get('at'),
+                            'db_relay_off': bool(db_status.get('relay_off')),
+                            'db_stats_failed': bool(db_status.get('failed')),
                             'list_loading': list_loading,
                             # 목록 재구축 중에는 진행률을 40%로 묶어 둔다 —
                             # DB 통계가 준비돼 100%가 찍히면 목록이 아직
@@ -1019,7 +1314,12 @@ class ModuleStatus(PluginModuleBase):
                             'from_cache': from_cache,
                             'cached_at': base.get('cached_at'),
                             'server': base['server'],
-                            'storage': base['storage']})
+                            # 용량은 캐시가 아니라 그 자리에서 다시 읽는다 —
+                            # 캐시(60분 TTL)에는 측정 중 표시가 안 남고 측정한
+                            # 새 값도 안 들어 있어, 동그라미가 금방 멈추고
+                            # 측정이 끝나도 값이 안 바뀌어 보였던 원인이다.
+                            # _storage()는 디스크 사용량 + 설정 읽기뿐이라 가볍다.
+                            'storage': self._storage()})
 
         if sub == 'refresh_data_size':
             # 데이터 폴더 용량 수동 측정 — du 전체 순회는 디스크를 오래
@@ -1124,8 +1424,8 @@ class ModuleStatus(PluginModuleBase):
                         P.ModelSetting.set('periodic_cancel', '1')
                         logger.info(f"[현황] 주기적 스캔 취소 요청: {sec['title']}")
                         return jsonify({'ret': 'success',
-                                        'msg': '주기적 스캔 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다.'})
-                # 휴지통 작업이 이 라이브러리를 실행 중이면 그쪽 취소를 요청한다
+                                        'msg': '주기적 스캔 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'})
+                # 휴지통 스캔이 이 라이브러리를 실행 중이면 그쪽 취소를 요청한다
                 raw_trash = P.ModelSetting.get('trash_current')
                 if raw_trash:
                     try:
@@ -1136,9 +1436,9 @@ class ModuleStatus(PluginModuleBase):
                         # task_trash가 이 모듈을 참조하므로 순환을 피하려 안에서 가져온다
                         from .task_trash import request_trash_cancel
                         request_trash_cancel()
-                        logger.info(f"[현황] 휴지통 작업 취소 요청: {sec['title']}")
+                        logger.info(f"[현황] 휴지통 스캔 취소 요청: {sec['title']}")
                         return jsonify({'ret': 'success',
-                                        'msg': '휴지통 작업 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다.'})
+                                        'msg': '휴지통 스캔 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'})
                 meta = state.get('meta')
                 if meta and meta.get('status') == 'running':
                     meta['cancel'] = True
@@ -1158,6 +1458,8 @@ class ModuleStatus(PluginModuleBase):
                     vfs['status'] = 'cancelled'
                     vfs['finished_at'] = now
                     self._set_state(key, state)
+                    self._dashboard_row_finish(vfs.get('history_row_id'), 'cancelled',
+                                               '취소 요청으로 중단했습니다.')
                     logger.info(f"[현황] VFS 새로고침 취소: {sec['title']} job {vfs['job']}")
                     return jsonify({'ret': 'success', 'msg': f"{sec['title']} VFS 새로고침을 취소했습니다."})
                 scan = state.get('scan')
@@ -1180,25 +1482,37 @@ class ModuleStatus(PluginModuleBase):
                                    {'dir': remote, 'recursive': 'true', '_async': 'true'})
                 except Exception as e:
                     return jsonify({'ret': 'fail', 'msg': f'VFS 새로고침을 시작하지 못했습니다: {e}'})
+                row_id = self._dashboard_row_create(key, sec['title'], 'refresh')
                 state['vfs'] = {'job': ret.get('jobid'), 'path': sec['path'],
-                                'started_at': now, 'finished_at': None, 'status': 'running'}
+                                'started_at': now, 'finished_at': None, 'status': 'running',
+                                'history_row_id': row_id}
                 self._set_state(key, state)
                 logger.info(f"[현황] VFS 새로고침 시작: {sec['title']} job {ret.get('jobid')} ({remote})")
                 return jsonify({'ret': 'success', 'msg': f"{sec['title']} VFS 새로고침을 시작했습니다."})
 
             if sub == 'vfs_scan':
-                addr, remote = self._rc_target(sec['path'])
-                if not addr:
-                    return jsonify({'ret': 'fail', 'msg': '이 라이브러리 경로가 VFS 새로고침 규칙과 맞지 않습니다. 스캔 설정의 규칙을 확인해 주세요.'})
-                try:
-                    ret = self._rc(addr, 'vfs/refresh',
-                                   {'dir': remote, 'recursive': 'true', '_async': 'true'})
-                except Exception as e:
-                    return jsonify({'ret': 'fail', 'msg': f'VFS 새로고침을 시작하지 못했습니다: {e}'})
-                state['vfs'] = {'job': ret.get('jobid'), 'path': sec['path'],
-                                'started_at': now, 'finished_at': None, 'status': 'running',
-                                'then_scan': True}
-                self._set_state(key, state)
+                # 누른 시점에 같은 라이브러리가 스캔 중이거나 자리가
+                # 없으면 새로고침부터 시작하지 않는다. 새로고침이 끝날
+                # 때 자리가 찼으면 스캔은 취소된다.
+                # 자리 검사부터 표시 기록까지 락으로 묶어, 동시에 누른
+                # 카드가 자리를 겹쳐 세는 것을 막는다.
+                with _library_scan_gate_lock:
+                    gate_msg = self.library_gate_check(key)
+                    if gate_msg:
+                        return jsonify({'ret': 'fail', 'msg': gate_msg})
+                    addr, remote = self._rc_target(sec['path'])
+                    if not addr:
+                        return jsonify({'ret': 'fail', 'msg': '이 라이브러리 경로가 VFS 새로고침 규칙과 맞지 않습니다. 스캔 설정의 규칙을 확인해 주세요.'})
+                    try:
+                        ret = self._rc(addr, 'vfs/refresh',
+                                       {'dir': remote, 'recursive': 'true', '_async': 'true'})
+                    except Exception as e:
+                        return jsonify({'ret': 'fail', 'msg': f'VFS 새로고침을 시작하지 못했습니다: {e}'})
+                    row_id = self._dashboard_row_create(key, sec['title'], 'refresh_scan')
+                    state['vfs'] = {'job': ret.get('jobid'), 'path': sec['path'],
+                                    'started_at': now, 'finished_at': None, 'status': 'running',
+                                    'then_scan': True, 'history_row_id': row_id}
+                    self._set_state(key, state)
                 th = threading.Thread(target=self._run_vfs_scan,
                                       args=(key, sec['title'], ret.get('jobid')), daemon=True)
                 _vfs_scan_threads[str(key)] = th
@@ -1255,42 +1569,54 @@ class ModuleStatus(PluginModuleBase):
                                 'msg': f"{sec['title']} 메타 새로고침을 시작했습니다. {scope_label} {len(ids)}개를 순서대로 처리합니다."})
 
             if sub == 'scan':
-                url, token = ShyniBackend.get_config()
-                # 신규 측정 기준점 — 스캔 전송 전에 기록한다 (주기 스캔과 동일 방식).
-                pre_max_id = self._card_scan_pre_max_id()
-                try:
-                    res = requests.get(f"{url}/library/sections/{key}/refresh",
-                                       headers={'X-Plex-Token': token, 'Accept': 'application/json'},
-                                       timeout=30)
-                    res.raise_for_status()
-                except Exception as e:
-                    return jsonify({'ret': 'fail', 'msg': f'스캔 전송에 실패했습니다: {e}'})
-                job_id = res.headers.get('X-Job-Id')
-                if not job_id:
+                # 게이트 검사부터 전송·표시까지 직렬화한다 — 동시에 누른
+                # 카드 스캔이 검사를 함께 통과하지 않게 한다.
+                with _library_scan_gate_lock:
+                    gate_msg = self.library_gate_check(key)
+                    if gate_msg:
+                        return jsonify({'ret': 'fail', 'msg': gate_msg})
+                    url, token = ShyniBackend.get_config()
+                    # 신규 측정 기준점 — 스캔 전송 전에 기록한다 (주기 스캔과 동일 방식).
+                    pre_max_id = self._card_scan_pre_max_id()
                     try:
-                        body = res.json()
-                        if isinstance(body, dict):
-                            job_id = body.get('job_id') or body.get('jobId') or body.get('jobID')
-                    except Exception:
-                        job_id = None
-                state['scan'] = {'job': job_id, 'path': sec['path'],
-                                 'started_at': now, 'finished_at': None,
-                                 'status': 'running' if job_id else 'requested'}
-                if pre_max_id is not None:
-                    state['scan']['pre_max_id'] = pre_max_id
-                self._set_state(key, state)
-                logger.info(f"[현황] 스캔 전송: {sec['title']} job {job_id}")
-                return jsonify({'ret': 'success', 'msg': f"{sec['title']} 스캔을 전송했습니다."})
+                        res = requests.get(f"{url}/library/sections/{key}/refresh",
+                                           headers={'X-Plex-Token': token, 'Accept': 'application/json'},
+                                           timeout=30)
+                        res.raise_for_status()
+                    except Exception as e:
+                        return jsonify({'ret': 'fail', 'msg': f'스캔 전송에 실패했습니다: {e}'})
+                    job_id = res.headers.get('X-Job-Id')
+                    if not job_id:
+                        try:
+                            body = res.json()
+                            if isinstance(body, dict):
+                                job_id = body.get('job_id') or body.get('jobId') or body.get('jobID')
+                        except Exception:
+                            job_id = None
+                    row_id = self._dashboard_row_create(key, sec['title'], 'scan',
+                                                        shyni_job_id=job_id)
+                    state['scan'] = {'job': job_id, 'path': sec['path'],
+                                     'started_at': now, 'finished_at': None,
+                                     'status': 'running' if job_id else 'requested',
+                                     'history_row_id': row_id}
+                    if pre_max_id is not None:
+                        state['scan']['pre_max_id'] = pre_max_id
+                    self._set_state(key, state)
+                    logger.info(f"[현황] 스캔 전송: {sec['title']} job {job_id}")
+                    return jsonify({'ret': 'success', 'msg': f"{sec['title']} 스캔을 전송했습니다."})
 
             if sub == 'trash_empty':
                 url, token = ShyniBackend.get_config()
                 if not url or not token:
                     return jsonify({'ret': 'fail', 'msg': 'Shyni 연결 설정이 비어 있습니다. 기본 설정을 확인해 주세요.'})
+                row_id = self._dashboard_row_create(key, sec['title'], 'empty', trash=True)
                 state['trash'] = {'job': None, 'mode': 'empty',
                                   'started_at': now, 'finished_at': None,
                                   'status': 'running'}
                 self._set_state(key, state)
                 ok, err = self._empty_trash_now(key)
+                self._dashboard_row_finish(row_id, 'done' if ok else 'failed',
+                                           '작업 완료' if ok else err, trash=True)
                 state = self._get_state(key)
                 tr = state.get('trash') or {}
                 tr['status'] = 'done' if ok else 'failed'
@@ -1312,16 +1638,19 @@ class ModuleStatus(PluginModuleBase):
     _list_cache = {'at': 0, 'data': None}
 
     def _db_stats(self, force=False):
-        """DB 통계를 (데이터, 로딩중) 으로 돌려준다. 계산은 Celery 워커(task_status)가
+        """DB 통계를 (데이터, 로딩중, 상태) 로 돌려준다. 계산은 Celery 워커(task_status)가
         전담하고, 웹은 저장된 결과만 읽어 즉시 돌려준다 — 계산 중에도 화면이
         무거워지지 않는다. 결과가 없거나 오래됐거나 force(강제 새로고침)면
         워커에 계산 요청만 남긴다. 워커가 저장한 최신 결과가 메모리 복사본보다
-        새로우면 받아들여, 옛 결과가 화면에 고착되지 않게 한다."""
+        새로우면 받아들여, 옛 결과가 화면에 고착되지 않게 한다.
+        상태 dict: relay_off(Relay 꺼짐/미테스트), at(저장 시각 unix),
+        failed(마지막 계산 실패 — Relay가 켜져 있는데 연결이 안 될 때).
+        Relay가 꺼져 있어도 이전에 저장된 결과는 보여 준다 — 화면에
+        '마지막 Relay 연결시 ... 이전 데이터' 문구와 함께 표시한다 (1-1a)."""
         from .db_support import db_ready
-        if not db_ready():
-            return None, False
-        from .task_status import read_state, request_stats
+        from .task_status import read_state, request_stats, read_last_error
         cls = type(self)
+        relay_off = not db_ready()
         try:
             saved_raw = P.ModelSetting.get('status_db_stats_cache')
             if saved_raw:
@@ -1334,11 +1663,21 @@ class ModuleStatus(PluginModuleBase):
                     cls._db_stats_cache = {'at': saved_at, 'data': data}
         except Exception:
             pass
+        cached = cls._db_stats_cache['data']
+        cached_at = cls._db_stats_cache['at'] or None
+        if relay_off:
+            # Relay가 꺼져 있으면 재계산을 요청하지 않는다 — 워커도
+            # 계산하지 않으니(주기 검사에서 db_ready 확인) 요청만 쌓인다.
+            # 이전 결과는 그대로 보여 주고, 화면이 낡은 데이터임을 알린다.
+            cls._db_stats_busy = False
+            cls._db_stats_progress = 0
+            return cached, False, {'relay_off': True, 'at': cached_at,
+                                   'failed': False}
+        failed = read_last_error() is not None
         state = read_state()
         pending = (state.get('requested_at') or 0) > (state.get('finished_at') or 0)
         cls._db_stats_busy = bool(state.get('busy')) or pending
         cls._db_stats_progress = state.get('progress') or 0
-        cached = cls._db_stats_cache['data']
         if cached is not None:
             if force:
                 request_stats(force=True)
@@ -1346,15 +1685,18 @@ class ModuleStatus(PluginModuleBase):
                 pending = (state.get('requested_at') or 0) > (state.get('finished_at') or 0)
                 cls._db_stats_busy = bool(state.get('busy')) or pending
                 cls._db_stats_progress = state.get('progress') or 0
-                return cached, cls._db_stats_busy
+                return cached, cls._db_stats_busy, {'relay_off': False,
+                                                    'at': cached_at,
+                                                    'failed': failed}
             # 낡은 캐시라도 대시보드를 열 때마다 재계산을 트리거하지 않는다.
             # 재계산은 17초짜리 무거운 DB 집계(2026-11-15 실측)라, 열 때마다
             # 돌리면 서버가 무거워진다. 재계산은 스캔·비우기 완료 같은
             # 사건과 워커의 주기 검사(6시간)가 맡는다 — 대시보드는 저장된
             # 결과를 보여 주는 데 집중한다.
-            return cached, False
+            return cached, False, {'relay_off': False, 'at': cached_at,
+                                   'failed': failed}
         request_stats()
-        return None, True
+        return None, True, {'relay_off': False, 'at': None, 'failed': failed}
 
     @classmethod
     def _overall_progress(cls, db_loading):
@@ -1425,22 +1767,36 @@ class ModuleStatus(PluginModuleBase):
         새로고침이 취소·실패·중단되면 스캔은 보내지 않는다. 현황 목록 조회가
         먼저 완료를 표시한 경우에도 스캔 단계로 넘어간다."""
         try:
+            # 대시보드 이력 행 id — 시작 때 vfs 슬롯에 남겨 둔다.
+            # 스레드가 끝날 때(중단 포함) 이 행을 끝낸다.
+            row_id = (self._get_state(key).get('vfs') or {}).get('history_row_id')
             proceed = False
             deadline = time.time() + 6 * 3600
             while time.time() < deadline:
                 st = self._get_state(key)
                 vfs = (st or {}).get('vfs') or {}
                 if vfs.get('job') != jobid:
+                    self._dashboard_row_finish(row_id, 'failed',
+                                               '새로고침이 다른 작업으로 바뀌어 중단됐습니다.')
                     return
                 if vfs.get('status') == 'done':
                     proceed = True
                     break
                 if vfs.get('status') != 'running':
                     # cancelled / failed / interrupted — 스캔으로 이어지지 않는다
+                    if vfs.get('status') == 'cancelled':
+                        self._dashboard_row_finish(row_id, 'cancelled',
+                                                   '취소 요청으로 중단했습니다.')
+                    else:
+                        self._dashboard_row_finish(
+                            row_id, 'failed',
+                            vfs.get('error') or 'VFS 새로고침이 중단됐습니다.')
                     logger.info(f"[현황] 새로고침 후 스캔 중단: {title} (새로고침 {vfs.get('status')})")
                     return
                 addr, _ = self._rc_target(vfs.get('path', ''))
                 if not addr:
+                    self._dashboard_row_finish(row_id, 'failed',
+                                               'VFS 새로고침 규칙에서 RC 주소를 찾지 못했습니다.')
                     return
                 try:
                     job = self._rc(addr, 'job/status', {'jobid': jobid})
@@ -1457,6 +1813,8 @@ class ModuleStatus(PluginModuleBase):
                             st['vfs']['status'] = 'interrupted'
                             st['vfs']['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             self._set_state(key, st)
+                        self._dashboard_row_finish(row_id, 'failed',
+                                                   'VFS 새로고침 작업 기록을 찾을 수 없습니다.')
                         logger.warning(f'[현황] 새로고침 후 스캔 중단(job 기록 없음): {title} job {jobid}')
                         return
                     time.sleep(10)
@@ -1480,6 +1838,7 @@ class ModuleStatus(PluginModuleBase):
                     vfs['finished_at'] = now
                     vfs['error'] = str(job['error'])[:200]
                     self._set_state(key, st)
+                    self._dashboard_row_finish(row_id, 'failed', vfs['error'])
                     logger.error(f'[현황] 새로고침 후 스캔 중단(새로고침 실패): {title} — {vfs["error"]}')
                     return
                 vfs['status'] = 'done'
@@ -1489,14 +1848,25 @@ class ModuleStatus(PluginModuleBase):
                 proceed = True
                 break
             if not proceed:
+                self._dashboard_row_finish(row_id, 'failed',
+                                           'VFS 새로고침이 기한 안에 끝나지 않았습니다.')
                 logger.warning(f'[현황] 새로고침 후 스캔 시간 초과로 중단: {title} job {jobid}')
                 return
-            # 이어서 스캔 전송 — 이미 스캔이 걸려 있으면 건너뛴다
-            st = self._get_state(key)
-            scan = (st or {}).get('scan') or {}
-            if scan.get('status') in ('running', 'requested'):
-                logger.info(f'[현황] 새로고침 후 스캔 건너뜀(이미 스캔 중): {title}')
+            # 이어서 스캔 전송 — 같은 라이브러리가 스캔 중이거나
+            # 자리가 없으면 취소한다 (기다리지 않는다).
+            gate_msg = self.library_gate_check(key)
+            if gate_msg:
+                st = self._get_state(key)
+                st['scan'] = {'job': None, 'path': ((st or {}).get('vfs') or {}).get('path'),
+                              'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                              'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                              'status': 'cancelled',
+                              'error': gate_msg}
+                self._set_state(key, st)
+                self._dashboard_row_finish(row_id, 'failed', gate_msg)
+                logger.warning(f'[현황] 새로고침 후 스캔 취소: {title} — {gate_msg}')
                 return
+            st = self._get_state(key)
             vfs_path = ((st or {}).get('vfs') or {}).get('path')
             url, token = ShyniBackend.get_config()
             # 신규 측정 기준점 — 스캔 전송 전에 기록한다 (주기 스캔과 동일 방식).
@@ -1507,6 +1877,7 @@ class ModuleStatus(PluginModuleBase):
                                    timeout=30)
                 res.raise_for_status()
             except Exception as e:
+                self._dashboard_row_finish(row_id, 'failed', f'스캔 전송에 실패했습니다: {e}')
                 logger.error(f'[현황] 새로고침 후 스캔 전송 실패: {title} — {e}')
                 return
             job_id = res.headers.get('X-Job-Id')
@@ -1521,10 +1892,12 @@ class ModuleStatus(PluginModuleBase):
             st['scan'] = {'job': job_id, 'path': vfs_path,
                           'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                           'finished_at': None,
-                          'status': 'running' if job_id else 'requested'}
+                          'status': 'running' if job_id else 'requested',
+                          'history_row_id': row_id}
             if pre_max_id is not None:
                 st['scan']['pre_max_id'] = pre_max_id
             self._set_state(key, st)
+            self._dashboard_row_set_scan_job(row_id, job_id)
             logger.info(f'[현황] 새로고침 후 스캔 전송: {title} job {job_id}')
         finally:
             _vfs_scan_threads.pop(str(key), None)
@@ -1575,7 +1948,10 @@ class ModuleStatus(PluginModuleBase):
                 vfs = (st or {}).get('vfs') or {}
                 s_status = scan.get('status')
                 if s_status == 'done':
+                    trow_id = self._dashboard_row_create(key, title, 'empty', trash=True)
                     ok, err = self._empty_trash_now(key)
+                    self._dashboard_row_finish(trow_id, 'done' if ok else 'failed',
+                                               '작업 완료' if ok else err, trash=True)
                     st = self._get_state(key)
                     tr = st.get('trash') or {}
                     tr['status'] = 'done' if ok else 'failed'

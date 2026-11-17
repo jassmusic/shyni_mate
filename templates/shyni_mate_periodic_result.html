@@ -14,7 +14,7 @@
 .hist-table .c-num .missing { display:block; font-size:13px; color:#dc3545; }
 </style>
 
-<div id="periodic_current_div" style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">
+<div id="periodic_current_div">
   진행 상태를 불러오는 중입니다.
 </div>
 
@@ -97,15 +97,58 @@ function stageLabel(stage) {
   return stage || '';
 }
 
+// 스캔 단계 영문 → 한글 표시 — 대시보드와 같은 표기
+var STAGE_LABELS = {refresh: '새로고침중', collect: '수집중', register: '등록중', analyze: '분석중', metadata: '메타 새로고침중', views: '목록 갱신중', done: '완료', cancelled: '취소됨', idle: '대기중'};
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return '-';
+  return Number(n).toLocaleString();
+}
+
+// 단계별 진행률 — '분석중 18/19 (95%)' 형태, 단계 수치가 없으면 단계명만
+function stageText(sp) {
+  var label = STAGE_LABELS[sp.stage] || sp.stage;
+  if (sp.stage_total) {
+    var pct = Math.round((sp.stage_processed || 0) * 100 / sp.stage_total);
+    return label + ' ' + fmtNum(sp.stage_processed || 0) + '/' + fmtNum(sp.stage_total) + ' (' + pct + '%)';
+  }
+  return label;
+}
+
+// 진행률 전체 — ' · 16,558/16,626 (100%) · 분석중 132/200 (66%)' 형태
+function progressText(sp) {
+  var prog = '';
+  if (sp.total) {
+    var pct = Math.round((sp.processed || 0) * 100 / sp.total);
+    prog = ' · ' + fmtNum(sp.processed || 0) + '/' + fmtNum(sp.total) + ' (' + pct + '%)';
+  }
+  if (sp.stage) prog += ' · ' + stageText(sp);
+  return prog;
+}
+
+// 진행 상태 서명 — 바뀔 때만 다시 그려, ✕로 닫은 배너가
+// 15초 폴링마다 다시 뜨지 않게 한다. 진행률은 서명에 넣어
+// 스캔이 진행될 때마다 숫자가 갱신되게 한다. (작업 관리와 같은 방식)
+var currentSig = null;
+
+function currentSignature(cur) {
+  if (!cur) return '';
+  var sp = cur.scan_progress || {};
+  return [cur.job_idx, cur.section_key, cur.stage, sp.processed, sp.total, sp.stage_processed, sp.stage_total].join('|');
+}
+
 function renderCurrent(cur) {
   if (!cur) {
-    $('#periodic_current_div').html('<span style="color:#888">현재 진행 중인 주기적 스캔이 없습니다.</span>');
+    $('#periodic_current_div').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 주기적 스캔이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
     return;
   }
-  var str = '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
-  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
+  var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">';
+  str += '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
+  var prog = (cur.stage == 'scan' && cur.scan_progress) ? progressText(cur.scan_progress) : '';
+  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + prog + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
   str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
   str += '<button type="button" class="btn btn-sm btn-danger" id="periodicCancelBtn">취소</button>';
+  str += '</div>';
   str += '</div>';
   $('#periodic_current_div').html(str);
 }
@@ -113,7 +156,13 @@ function renderCurrent(cur) {
 function loadCurrent() {
   $.ajax({
     type: 'POST', url: API_BASE + 'current', data: {}, global: false,
-    success: function (ret) { if (ret.ret == 'success') renderCurrent(ret.data); }
+    success: function (ret) {
+      if (ret.ret != 'success') return;
+      var sig = currentSignature(ret.data || null);
+      if (sig === currentSig) return;
+      currentSig = sig;
+      renderCurrent(ret.data);
+    }
   });
 }
 
@@ -121,6 +170,7 @@ function statusText(s) {
   if (s == 'done') return '<span style="color:#2f855a">완료</span>';
   if (s == 'failed') return '<span style="color:#c0392b">실패</span>';
   if (s == 'cancelled') return '<span style="color:#b7791f">취소</span>';
+  if (s == 'skipped') return '<span style="color:#b7791f">건너뜀</span>';
   if (s == 'running') return '<span style="color:#2b6cb0">실행 중</span>';
   if (s == 'waiting') return '<span style="color:#6b46c1">대기 중</span>';
   if (s == 'terminated') return '<span style="color:#888">중단됨(재시작)</span>';
@@ -242,10 +292,12 @@ function renderDetail(d) {
     str += '<div><strong>집계</strong> — ' + aggTxt + '</div>';
   } else if (d.status == 'running') {
     str += '<div style="color:#888">스캔이 끝나면 집계가 표시됩니다.</div>';
+  } else if (d.status == 'cancelled' || d.status == 'skipped') {
+    // 건너뛰거나 취소된 행은 집계 줄을 빼고, 아래 메시지 줄이 사유를 전한다.
   } else if (d.scan_duration == null) {
-    // 스캔이 실행되지 않은 행(새로고침만 하는 작업·건너뛴 섹션)은 집계가
-    // 있을 수 없다. 결과 저장 전에 기록된 옛 행도 scan_duration이 비어 있다.
-    str += '<div style="color:#888">집계가 없습니다. (스캔이 실행되지 않았거나, 이 실행은 결과 저장이 되기 전에 기록됐습니다.)</div>';
+    // 스캔이 실행되지 않은 행(새로고침만 하는 작업·옛 행)은 스캔 집계가
+    // 있을 수 없다.
+    str += '<div style="color:#888">스캔이 실행되지 않아 집계가 없습니다.</div>';
   } else {
     str += '<div style="color:#888">집계가 없습니다.</div>';
   }
@@ -267,9 +319,9 @@ function renderDetail(d) {
     str += '<span style="color:#888">스캔이 끝나면 목록이 표시됩니다.</span>';
   } else if (d.append_total == null) {
     if (d.status != 'running' && d.scan_duration == null) {
-      str += '<span style="color:#888">없습니다. (스캔이 실행되지 않았거나, 이 실행은 결과 저장이 되기 전에 기록됐습니다.)</span>';
+      str += '<span style="color:#888">스캔이 실행되지 않아 목록이 없습니다.</span>';
     } else {
-      str += '<span style="color:#888">파일 목록을 볼 수 없습니다. Relay가 꺼져 있으면 목록은 저장되지 않습니다.</span>';
+      str += '<span style="color:#888">Relay가 꺼져 있으면 파일 목록을 볼 수 없습니다.</span>';
     }
   } else if (!d.append_total) {
     str += '<span style="color:#888">없습니다.</span>';
@@ -392,6 +444,10 @@ $(document).ready(function () {
     setTimeout(loadCurrent, 2000);
   });
 
+  $(document).off('click', '#currentIdleClose').on('click', '#currentIdleClose', function () {
+    $('#periodic_current_div').empty();
+  });
+
   $('#histLibSel').off('change').on('change', function () { loadHistory(1); });
   $('#histOnlyAppend').off('change').on('change', function () { loadHistory(1); });
   $('#histSearchBtn').off('click').on('click', function () { loadHistory(1); });
@@ -427,7 +483,7 @@ $(document).ready(function () {
     e.stopPropagation();
     var key = $(this).data('key');
     if (key === null || key === undefined || key === '') return;
-    location.href = '/' + location.pathname.split('/')[1] + '/scan/trash?key=' + key;
+    location.href = '/' + location.pathname.split('/')[1] + '/trash/trash?key=' + key;
   });
 
   $('#histRefreshBtn').off('click').on('click', function () {

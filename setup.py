@@ -22,6 +22,7 @@ setting = {
                 'list': [
                     {'uri': 'list', 'name': '대시보드'},
                     {'uri': 'health', 'name': '건강도'},
+                    {'uri': 'sessions', 'name': '세션'},
                 ]
             },
             {
@@ -30,7 +31,6 @@ setting = {
                 'list': [
                     {'uri': 'setting', 'name': '설정'},
                     {'uri': 'list', 'name': '스캔 목록'},
-                    {'uri': 'trash', 'name': '휴지통'},
                     {'uri': 'browser', 'name': '탐색'},
                     {'uri': 'manual', 'name': '매뉴얼'},
                 ]
@@ -39,19 +39,20 @@ setting = {
                 'uri': 'periodic',
                 'name': '주기적 스캔',
                 'list': [
-                    {'uri': 'jobs', 'name': '작업 관리'},
-                    {'uri': 'result', 'name': '스캔 결과'},
                     {'uri': 'setting', 'name': '설정'},
+                    {'uri': 'jobs', 'name': '작업 관리'},
+                    {'uri': 'result', 'name': '작업 결과'},
                     {'uri': 'manual', 'name': '매뉴얼'},
                 ]
             },
             {
                 'uri': 'trash',
-                'name': '휴지통 작업',
+                'name': '휴지통 스캔',
                 'list': [
+                    {'uri': 'setting', 'name': '설정'},
+                    {'uri': 'trash', 'name': '휴지통'},
                     {'uri': 'jobs', 'name': '작업 관리'},
                     {'uri': 'result', 'name': '작업 결과'},
-                    {'uri': 'setting', 'name': '설정'},
                     {'uri': 'manual', 'name': '매뉴얼'},
                 ]
             },

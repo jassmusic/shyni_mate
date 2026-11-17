@@ -1,9 +1,15 @@
 import json
+import threading
+
+import requests
 
 from .model_trash import ModelTrashItem
 from .mod_status import ModuleStatus
 from .setup import *
-from .task_periodic import annotate_total_labels
+from .shyni_backend import ShyniBackend
+from .task_trash_view import TaskTrashView
+from .task_trash_selected import TaskTrashSelected
+from .task_periodic import annotate_total_labels, current_scan_progress
 from .task_trash import (ACTION_LABEL, TaskTrash, clear_trash_start_error,
                          fail_trash_start, get_last_trash_start_error,
                          get_trash_current, get_trash_jobs,
@@ -12,9 +18,45 @@ from .task_trash import (ACTION_LABEL, TaskTrash, clear_trash_start_error,
 name = 'trash'
 logger = P.logger
 
-# 라이브러리 선택 목록 정렬 — 주기적 스캔·휴지통 작업이 같은 설정을 쓴다.
+# 라이브러리 선택 목록 정렬 — 주기적 스캔·휴지통 스캔이 같은 설정을 쓴다.
 PICK_SORTS = ('default_asc', 'default_desc', 'name_asc', 'name_desc')
 PICK_SORT_KEY = 'jobs_lib_pick_sort'
+
+
+def _parse_empty_stats(data):
+    """비우기 응답에서 (삭제 수, 보관 기간 남아 남은 수)를 읽는다.
+    관리자 API는 평평한 dict(removed_parts·retained_parts가 최상위),
+    compat API는 stats 안에 넣어 주는 경우도 있어 양쪽을 본다.
+    못 읽으면 None."""
+    if not isinstance(data, dict):
+        return None, None
+    stats = data.get('stats')
+    if not isinstance(stats, dict):
+        stats = {}
+
+    def _int(v):
+        try:
+            return int(v) if v is not None else None
+        except Exception:
+            return None
+    removed = _int(stats.get('removed_parts'))
+    if removed is None:
+        removed = _int(data.get('removed_parts'))
+    retained = _int(stats.get('retained_parts'))
+    if retained is None:
+        retained = _int(data.get('retained_parts'))
+    return removed, retained
+
+
+def _empty_result_message(removed, retained):
+    """비우기 결과 문구 — 'N개 삭제, M개는 보관 기간이 남아 남음'
+    (사용자 지정 형식, 2026-11-18). 보관 기간이 남아 남은 항목이
+    없으면 삭제 수만, 수를 못 읽었으면 기본 문구를 쓴다."""
+    if removed is None:
+        return '휴지통을 비웠습니다.'
+    if retained:
+        return f'{removed}개 삭제, {retained}개는 보관 기간이 남아 남음'
+    return f'{removed}개를 삭제했습니다.'
 
 
 class ModuleTrash(PluginModuleBase):
@@ -23,7 +65,7 @@ class ModuleTrash(PluginModuleBase):
     주기적 스캔과 같은 작업 목록 방식이다."""
 
     def __init__(self, P):
-        super(ModuleTrash, self).__init__(P, name=name, first_menu='jobs')
+        super(ModuleTrash, self).__init__(P, name=name, first_menu='setting')
         self.db_default = {
             f'{self.name}_db_version': '1',
             f'{self.name}_jobs': '[]',
@@ -60,6 +102,8 @@ class ModuleTrash(PluginModuleBase):
                         ('emptied_files', 'TEXT'),
                         ('target_files', 'TEXT'), ('restored_files', 'TEXT'),
                         ('vfs_results', 'TEXT'),
+                        ('scan_results', 'TEXT'),
+                        ('file_exists', 'TEXT'),
                         ('wait_seconds', 'INTEGER'),
                     ]
                     added = [c for c, _ in new_cols if c not in cols]
@@ -78,6 +122,14 @@ class ModuleTrash(PluginModuleBase):
         P.ModelSetting.set('trash_current', '')
         P.ModelSetting.set('trash_cancel', '')
         self.start()
+        # 휴지통 조회 워커 — 조회 페이지가 이 모듈로 이동하면서
+        # 워커 기동도 함께 옮김 (스캔 메뉴에서 이동, 2026-11-18)
+        def _start_trash_workers():
+            self.start_celery(TaskTrashView.start)
+            self.start_celery(TaskTrashSelected.start)
+        thread = threading.Thread(target=_start_trash_workers, args=())
+        thread.daemon = True
+        thread.start()
 
     # ---------- 스케줄러 ----------
     def start(self):
@@ -97,7 +149,7 @@ class ModuleTrash(PluginModuleBase):
             F.scheduler.add_job_instance(job)
             return True
         except Exception as e:
-            logger.error(f'휴지통 작업 스케줄 등록 실패: {e}')
+            logger.error(f'휴지통 스캔 스케줄 등록 실패: {e}')
             logger.error(traceback.format_exc())
         return False
 
@@ -163,7 +215,7 @@ class ModuleTrash(PluginModuleBase):
 
     # ---------- 화면 ----------
     def process_menu(self, sub, req):
-        # 서브메뉴: jobs(작업 관리) · result(작업 결과) · setting(설정) · manual(매뉴얼)
+        # 서브메뉴: setting(설정) · trash(휴지통) · jobs(작업 관리) · result(작업 결과) · manual(매뉴얼)
         arg = P.ModelSetting.to_dict()
         try:
             # 라이브러리 목록은 페이지가 뜬 뒤 ajax('sections')로 따로
@@ -172,6 +224,31 @@ class ModuleTrash(PluginModuleBase):
                 arg['trash_jobs_json'] = P.ModelSetting.get('trash_jobs') or '[]'
                 sort = P.ModelSetting.get(PICK_SORT_KEY) or 'default_asc'
                 arg['lib_pick_sort'] = sort if sort in PICK_SORTS else 'default_asc'
+            if sub == 'trash':
+                # 휴지통 조회 페이지 (스캔 메뉴에서 이동, 2026-11-18)
+                # 라이브러리 목록은 페이지가 뜬 뒤 ajax('sections')로 따로
+                # 불러온다 — shyni가 느릴 때 동기 호출이 페이지 표시를
+                # 15초 타임아웃까지 막는 것을 없애기 위해서다 (0.9.9).
+                # 현황 카드의 '휴지통 상세'로 넘어오면 그 라이브러리를 미리 골라 둔다
+                try:
+                    arg['trash_preselect'] = (req.args.get('key') or '') if req is not None else ''
+                except Exception:
+                    arg['trash_preselect'] = ''
+                # 캐시 현황과 휴지통 개수는 첫 화면부터 바로 보이게 페이지에
+                # 함께 실어 보낸다. 서버 응답을 기다리면 표시가 늦어지고,
+                # 그 사이에 캐시가 있는 줄 모르고 조회를 눌러 버릴 수 있다.
+                # 둘 다 저장된 값을 읽는 것이라 페이지 표시를 늦추지 않는다.
+                try:
+                    from .task_trash_view import cache_times
+                    arg['trash_cache_times'] = cache_times()
+                except Exception:
+                    arg['trash_cache_times'] = {}
+                try:
+                    from .task_status import read_trash_cache
+                    counts_cache = read_trash_cache() or {}
+                    arg['trash_counts_init'] = counts_cache.get('data') or {}
+                except Exception:
+                    arg['trash_counts_init'] = {}
             return render_template(f'{P.package_name}_{self.name}_{sub}.html', arg=arg)
         except Exception as e:
             logger.error(f'Exception:{str(e)}')
@@ -253,7 +330,7 @@ class ModuleTrash(PluginModuleBase):
             except Exception:
                 return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
             if get_trash_current() is not None:
-                return jsonify({'ret': 'warning', 'msg': '이미 진행 중인 휴지통 작업이 있습니다.'})
+                return jsonify({'ret': 'warning', 'msg': '이미 진행 중인 휴지통 스캔이 있습니다.'})
             jobs = get_trash_jobs()
             if idx < 0 or idx >= len(jobs):
                 return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
@@ -270,10 +347,356 @@ class ModuleTrash(PluginModuleBase):
                 ret['msg'] = '실행을 시작했습니다. 잠시 뒤 워커가 작업을 시작합니다.'
         elif command == 'cancel_current':
             if get_trash_current() is None:
-                return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 휴지통 작업이 없습니다.'})
+                return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 휴지통 스캔이 없습니다.'})
             request_trash_cancel()
             logger.info('[Trash] 취소 요청')
-            ret['msg'] = '취소를 요청했습니다. 진행 중인 단계가 정리되면 멈춥니다.'
+            ret['msg'] = '취소를 요청했습니다. 진행 중인 단계가 정리되면 멈춥니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'
+        elif command == 'trash_counts':
+            from . import shyni_admin, db_support
+            if not shyni_admin.admin_available() and not db_support.db_ready():
+                return jsonify({'ret': 'fail', 'msg': '관리자 API나 Relay 중 하나를 설정해 주세요.'})
+            try:
+                # 현황·건강도와 같은 개수 캐시를 쓴다 — 라이브러리 선택
+                # 팝업을 열 때마다 무거운 전체 읽기를 돌리지 않기 위해서다
+                from .task_status import trash_counts_for_stats
+                ret['data'] = trash_counts_for_stats()
+            except Exception as e:
+                return jsonify({'ret': 'fail', 'msg': f'휴지통 수를 읽지 못했습니다: {e}'})
+        elif command == 'trash_refresh_hours':
+            # 휴지통 페이지 우측 상단의 자동 갱신 주기 — 기본 설정에서
+            # 여기로 옮김 (2026-11-18). 바꾸면 바로 저장한다.
+            try:
+                hours = int((arg1 or '').strip())
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '시간 값을 숫자로 입력해 주세요.'})
+            if hours < 0:
+                return jsonify({'ret': 'warning', 'msg': '0 이상의 시간을 입력해 주세요.'})
+            P.ModelSetting.set('base_trash_counts_refresh_hours', str(hours))
+            if hours == 0:
+                ret['msg'] = '통계 계산 때마다 휴지통 개수를 새로 읽어옵니다.'
+            else:
+                ret['msg'] = f'자동 갱신 주기를 {hours}시간으로 저장했습니다.'
+        elif command == 'trash_query':
+            # 조회 계산은 워커(task_trash_view)가 수행한다 — 웹은 요청만 남기고
+            # 화면은 trash_state로 진행률을 폴링한다.
+            from . import shyni_admin, db_support
+            if not shyni_admin.admin_available() and not db_support.db_ready():
+                return jsonify({'ret': 'fail',
+                                'msg': '휴지통 조회는 관리자 API나 Relay 중 하나를 설정해야 사용할 수 있습니다.'})
+            try:
+                lib_id = int(arg1)
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '라이브러리를 선택해 주세요.'})
+            from .task_trash_view import request_view
+            ret['data'] = request_view(lib_id, force=(arg2 == '1'))
+        elif command == 'trash_query_all':
+            # 전체 조회 접수 — 계산은 워커가 라이브러리 단위로 수행한다
+            from . import shyni_admin, db_support
+            if not shyni_admin.admin_available() and not db_support.db_ready():
+                return jsonify({'ret': 'fail',
+                                'msg': '휴지통 조회는 관리자 API나 Relay 중 하나를 설정해야 사용할 수 있습니다.'})
+            try:
+                lib_ids = json.loads(arg1 or '[]')
+            except Exception:
+                lib_ids = []
+            from .task_trash_view import request_bulk
+            res = request_bulk(lib_ids)
+            if res.get('ret') == 'fail':
+                return jsonify(res)
+            ret['data'] = res
+        elif command == 'trash_query_all_cancel':
+            from .task_trash_view import cancel_bulk
+            cancel_bulk()
+        elif command == 'trash_query_cancel':
+            from .task_trash_view import cancel_query
+            cancel_query()
+        elif command == 'trash_state':
+            from .task_trash_view import cache_libs, cache_times, read_state, read_bulk
+            ret['data'] = {'state': read_state(),
+                           'cache_libs': cache_libs(),
+                           'cache_times': cache_times(),
+                           'bulk': read_bulk()}
+        elif command == 'trash_list':
+            # 워커가 계산해 둔 캐시를 검색·정렬·페이지 단위로 잘라 돌려준다.
+            from . import shyni_admin, db_support
+            if not shyni_admin.admin_available() and not db_support.db_ready():
+                return jsonify({'ret': 'fail',
+                                'msg': '휴지통 조회는 관리자 API나 Relay 중 하나를 설정해야 사용할 수 있습니다.'})
+            try:
+                lib_id = int(arg1)
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '라이브러리를 선택해 주세요.'})
+            try:
+                opts = json.loads(arg2 or '{}')
+                if not isinstance(opts, dict):
+                    opts = {}
+            except Exception:
+                opts = {}
+            from .task_trash_view import cached_data, page_from_cache
+            data = cached_data(lib_id)
+            if not data:
+                return jsonify({'ret': 'fail',
+                                'msg': '조회된 결과가 없습니다. 조회 버튼을 눌러 주세요.'})
+            try:
+                ret['data'] = page_from_cache(
+                    data,
+                    page=int(opts.get('page') or 1),
+                    search=(opts.get('search') or '').strip(),
+                    order=opts.get('order') or 'old')
+            except Exception as e:
+                logger.error(f'[휴지통] 조회 결과 표시 실패: {e}')
+                return jsonify({'ret': 'fail', 'msg': f'휴지통을 표시하지 못했습니다: {e}'})
+        elif command == 'trash_files':
+            from . import shyni_admin, db_support
+            if not shyni_admin.admin_available() and not db_support.db_ready():
+                return jsonify({'ret': 'fail', 'msg': '관리자 API나 Relay 중 하나를 설정해 주세요.'})
+            try:
+                lib_id = int(arg1)
+                root_id = int(arg2)
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '항목이 올바르지 않습니다.'})
+            from .task_trash_view import files_for
+            files = files_for(lib_id, root_id)
+            if files is None:
+                # 캐시에 없으면 웹에서 느린 조회를 하지 않는다 — 화면이 멈춘
+                # 느낌을 주지 않도록 다시 조회하도록 안내한다.
+                return jsonify({'ret': 'fail',
+                                'msg': '조회 결과가 바뀌었습니다. 조회 버튼을 눌러 다시 불러와 주세요.'})
+            ret['data'] = {'files': files[:500], 'total': len(files)}
+        elif command == 'trash_empty_all':
+            try:
+                lib_id = int(arg1)
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '라이브러리를 선택해 주세요.'})
+            url, token = ShyniBackend.get_config()
+            if not url or not token:
+                return jsonify({'ret': 'fail', 'msg': '기본 설정에서 shyni 주소와 토큰을 먼저 설정해 주세요.'})
+            try:
+                res = requests.get(f'{url}/library/sections/{lib_id}/emptyTrash',
+                                   headers={'X-Plex-Token': token, 'Accept': 'application/json'},
+                                   timeout=600)
+                res.raise_for_status()
+            except Exception as e:
+                return jsonify({'ret': 'fail', 'msg': f'휴지통 비우기에 실패했습니다: {e}'})
+            logger.info(f'[휴지통] 전체 비우기: 라이브러리 {lib_id}')
+            try:
+                from .task_trash_view import clear_cache
+                clear_cache(lib_id)
+            except Exception as e:
+                logger.warning(f'[휴지통] 전체 비우기 후 상세 캐시 지우기 실패: {e}')
+            try:
+                # 전부 비웠으므로 이 라이브러리 개수는 0이 확정이다 —
+                # 개수 캐시에도 바로 반영해 현황·선택 칸이 옛 값을 보지 않게 한다
+                from .task_status import set_trash_count
+                set_trash_count(lib_id, 0)
+            except Exception as e:
+                logger.warning(f'[휴지통] 전체 비우기 후 개수 반영 실패: {e}')
+            try:
+                from .task_status import request_stats
+                request_stats()
+            except Exception as e:
+                logger.warning(f'[휴지통] 전체 비우기 후 통계 재계산 요청 실패: {e}')
+            # 작업 결과에도 남긴다 — 휴지통 페이지에서 비운 것도 이력이다.
+            # 이력 기록이 실패해도 비우기 자체는 이미 끝났으니 경고만 남긴다.
+            removed, retained = None, None
+            try:
+                removed, retained = _parse_empty_stats(
+                    res.json() if res is not None else None)
+            except Exception:
+                pass
+            msg = _empty_result_message(removed, retained)
+            try:
+                title = (arg2 or '').strip()
+                if not title:
+                    try:
+                        sections, _ = ModuleStatus._sections()
+                        for s in sections or []:
+                            if int(s.get('key')) == lib_id:
+                                title = s.get('title') or ''
+                                break
+                    except Exception:
+                        title = ''
+                with F.app.app_context():
+                    item = ModelTrashItem('휴지통 (전체)', lib_id, title,
+                                          'manual', 'empty')
+                    if removed is not None:
+                        item.emptied_count = removed
+                    item.finish('done', msg)
+            except Exception as e:
+                logger.warning(f'[휴지통] 전체 비우기 이력 기록 실패: {e}')
+            ret['msg'] = msg
+        elif command == 'trash_empty_selected':
+            # 선택한 작품 폴더의 휴지통 항목만 비운다 (관리자 API, part_ids).
+            # 선택 실행(새로고침·스캔)과 달리 API로 조회한 결과에서도 된다 —
+            # 캐시된 파일 목록에 part_id가 들어 있어 (API·Relay 출처 모두)
+            # 폴더만으로 part_ids를 모을 수 있다. 보관 기간은 지킨다
+            # (ignore_retention/force를 보내지 않는다).
+            try:
+                lib_id = int(arg1)
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '라이브러리를 선택해 주세요.'})
+            try:
+                payload = json.loads(arg2 or '{}')
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            folders = payload.get('folders')
+            title = (payload.get('title') or '').strip()
+            from .task_trash_selected import MAX_FOLDERS
+            if not isinstance(folders, list) or not folders:
+                return jsonify({'ret': 'warning', 'msg': '비울 항목을 선택해 주세요.'})
+            folder_set = {str(f) for f in folders if str(f).strip()}
+            if not folder_set:
+                return jsonify({'ret': 'warning', 'msg': '비울 항목을 선택해 주세요.'})
+            if len(folder_set) > MAX_FOLDERS:
+                return jsonify({'ret': 'warning',
+                                'msg': f'한 번에 최대 {MAX_FOLDERS}개까지 비울 수 있습니다.'})
+            from . import shyni_admin
+            if not shyni_admin.admin_available():
+                return jsonify({'ret': 'fail',
+                                'msg': '선택 비우기는 관리자 API 설정이 필요합니다. 설정에서 관리자 아이디·비밀번호를 입력해 주세요.'})
+            # 대상 폴더는 지금 조회된(캐시된) 작품의 공통 폴더여야 한다 —
+            # 화면 밖의 임의 항목이 비워지지 않게 한다 (선택 실행과 같은 검증).
+            from .task_trash_view import cached_data
+            data = cached_data(lib_id)
+            if not data:
+                return jsonify({'ret': 'fail',
+                                'msg': '조회된 결과가 없습니다. 조회 버튼을 눌러 주세요.'})
+            groups = data.get('groups') or []
+            allowed = {g.get('folder') for g in groups if g.get('folder')}
+            unknown = [f for f in folder_set if f not in allowed]
+            if unknown:
+                return jsonify({'ret': 'warning',
+                                'msg': '조회 결과에 없는 항목이 섞여 있습니다. 조회 버튼을 눌러 다시 불러온 뒤 실행해 주세요.'})
+            # 폴더 → part_ids: 캐시된 파일 목록에서 모은다 (API·Relay 출처
+            # 모두 파일 항목에 part_id('id')가 있다).
+            files_map = data.get('files') or {}
+            part_ids = set()
+            for g in groups:
+                if g.get('folder') not in folder_set:
+                    continue
+                for f in files_map.get(str(g.get('root_id'))) or []:
+                    try:
+                        pid = int(f.get('id'))
+                    except Exception:
+                        continue
+                    if pid > 0:
+                        part_ids.add(pid)
+            if not part_ids:
+                return jsonify({'ret': 'warning',
+                                'msg': '선택한 항목에서 비울 파일을 찾지 못했습니다. 조회 버튼을 눌러 다시 불러와 주세요.'})
+            res = shyni_admin.api_empty_trash(lib_id, sorted(part_ids))
+            if res is None:
+                return jsonify({'ret': 'fail', 'msg': 'shyni에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.'})
+            if res.status_code == 409:
+                # 선택 항목이 바뀐 경우 — shyni 메시지를 그대로 보여준다
+                detail = None
+                try:
+                    detail = (res.json() or {}).get('detail')
+                except Exception:
+                    detail = None
+                return jsonify({'ret': 'warning',
+                                'msg': detail or '선택 항목이 변경되었습니다. 휴지통 목록을 새로고침하세요.'})
+            if res.status_code != 200:
+                return jsonify({'ret': 'fail',
+                                'msg': f'휴지통 비우기에 실패했습니다 (응답 코드 {res.status_code}).'})
+            removed, retained = None, None
+            try:
+                removed, retained = _parse_empty_stats(res.json())
+            except Exception:
+                pass
+            msg = _empty_result_message(removed, retained)
+            logger.info(f'[휴지통] 선택 비우기: 라이브러리 {lib_id} 폴더 {len(folder_set)}개 · '
+                        f'part {len(part_ids)}개 · {msg}')
+            try:
+                from .task_trash_view import clear_cache
+                clear_cache(lib_id)
+            except Exception as e:
+                logger.warning(f'[휴지통] 선택 비우기 후 상세 캐시 지우기 실패: {e}')
+            try:
+                from .task_status import refresh_trash_counts_async, request_stats
+                refresh_trash_counts_async()
+                request_stats()
+            except Exception as e:
+                logger.warning(f'[휴지통] 선택 비우기 후 개수·통계 갱신 요청 실패: {e}')
+            # 작업 결과에도 남긴다 — 이력 기록이 실패해도 비우기 자체는
+            # 이미 끝났으니 경고만 남긴다.
+            try:
+                if not title:
+                    try:
+                        sections, _ = ModuleStatus._sections()
+                        for s in sections or []:
+                            if int(s.get('key')) == lib_id:
+                                title = s.get('title') or ''
+                                break
+                    except Exception:
+                        title = ''
+                with F.app.app_context():
+                    item = ModelTrashItem('휴지통 (선택)', lib_id, title,
+                                          'manual', 'empty')
+                    if removed is not None:
+                        item.emptied_count = removed
+                    item.finish('done', msg)
+            except Exception as e:
+                logger.warning(f'[휴지통] 선택 비우기 이력 기록 실패: {e}')
+            ret['msg'] = msg
+        elif command == 'trash_selected_action':
+            # 선택한 작품 폴더에 새로고침·스캔·새로고침 후 스캔을 실행한다.
+            # 실행은 워커(task_trash_selected)가 전담하고 웹은 요청만 남긴다 —
+            # 웹 스레드로 돌리면 ff 재시작 때 실행이 끊기고 상태도 사라진다.
+            # 선택 비우기는 관리자 세션이 필요해 이 범위에 넣지 않는다.
+            try:
+                lib_id = int(arg1)
+            except Exception:
+                return jsonify({'ret': 'warning', 'msg': '라이브러리를 선택해 주세요.'})
+            try:
+                payload = json.loads(arg2 or '{}')
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            mode = (payload.get('mode') or '').strip()
+            folders = payload.get('folders')
+            from .task_trash_selected import (MAX_FOLDERS,
+                                               request_selected_action,
+                                               validate_request)
+            _, verr = validate_request(lib_id, mode, folders)
+            if verr:
+                return jsonify({'ret': 'warning', 'msg': verr})
+            # 대상 폴더는 지금 조회된(캐시된) 작품의 공통 폴더여야 한다 —
+            # 화면 밖의 임의 경로로 새로고침·스캔이 나가지 않게 한다.
+            from .task_trash_view import cached_data
+            data = cached_data(lib_id)
+            if not data:
+                return jsonify({'ret': 'fail',
+                                'msg': '조회된 결과가 없습니다. 조회 버튼을 눌러 주세요.'})
+            # API로 조회한 결과에서는 개별 선택 실행을 막는다
+            # (사용자 지시, 2026-11-17 — 화면에서도 체크박스를 숨긴다)
+            if (data.get('source') or 'relay') == 'api':
+                return jsonify({'ret': 'warning',
+                                'msg': '관리자 API로 조회한 결과에서는 개별 선택 실행을 할 수 없습니다.'})
+            allowed = {g.get('folder') for g in (data.get('groups') or [])
+                       if g.get('folder')}
+            folders, _ = validate_request(lib_id, mode, folders)
+            unknown = [f for f in folders if f not in allowed]
+            if unknown:
+                return jsonify({'ret': 'warning',
+                                'msg': '조회 결과에 없는 항목이 섞여 있습니다. 조회 버튼을 눌러 다시 불러온 뒤 실행해 주세요.'})
+            try:
+                state = request_selected_action(lib_id, mode, folders)
+            except ValueError as e:
+                return jsonify({'ret': 'warning', 'msg': str(e)})
+            if state is None:
+                return jsonify({'ret': 'warning',
+                                'msg': '이미 실행 중인 선택 작업이 있습니다. 끝난 뒤에 다시 시도해 주세요.'})
+            logger.info(f'[휴지통] 선택 실행 요청: 라이브러리 {lib_id} '
+                        f'동작 {mode} 폴더 {len(folders)}개 (최대 {MAX_FOLDERS}개)')
+            ret['data'] = state
+            ret['msg'] = '선택한 항목의 실행을 시작했습니다.'
+        elif command == 'trash_selected_state':
+            from .task_trash_selected import read_sel_state
+            ret['data'] = read_sel_state()
         return jsonify(ret)
 
     # ---------- 화면 AJAX ----------
@@ -288,6 +711,9 @@ class ModuleTrash(PluginModuleBase):
             if cur and cur.get('action'):
                 from .model_trash import action_label
                 cur['action_label'] = action_label(cur.get('action'))
+            if cur and cur.get('stage') == 'scan' and cur.get('section_key'):
+                cur['scan_progress'] = current_scan_progress(
+                    cur['section_key'], 'trash')
             return jsonify({'ret': 'success', 'data': cur,
                             'last_error': get_last_trash_start_error()})
         if sub == 'clear_start_error':

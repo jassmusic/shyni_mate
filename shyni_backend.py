@@ -297,13 +297,34 @@ class ShyniBackend:
                      'ANALYZE_TIMEOUT')
 
     @staticmethod
-    def _apply_album_info(db_item, metadata_id):
-        """DB 활용이 가능할 때 앨범 정보를 읽어 meta_info에 넣어 둔다 (목록 표시용)."""
+    def _metadata_info_for(db_item, metadata_id):
+        """앨범 정보 조회 — 관리자 API 우선, Relay 폴백. 없으면 None."""
+        if not metadata_id:
+            return None
+        section = ShyniBackend._section_of(db_item)
+        if section:
+            try:
+                from .shyni_admin import api_metadata_info
+                info = api_metadata_info(section, metadata_id)
+                if info:
+                    return info
+            except Exception:
+                pass
         try:
             from . import db_support
-            if not metadata_id or not db_support.db_ready():
+            if db_support.db_ready():
+                return db_support.metadata_info(metadata_id)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _apply_album_info(db_item, metadata_id):
+        """앨범 정보를 읽어 meta_info에 넣어 둔다 (목록 표시용)."""
+        try:
+            if not metadata_id:
                 return
-            info = db_support.metadata_info(metadata_id)
+            info = ShyniBackend._metadata_info_for(db_item, metadata_id)
             if not info or not info.get('title'):
                 return
             meta = [dict(m) for m in (db_item.meta_info or [{'name': '', 'summary': ''}])]
@@ -497,7 +518,7 @@ class ShyniBackend:
                 return
             res.raise_for_status()
             meta_id = res.json()['metadata_id']
-            old = db_support.metadata_info(meta_id) if db_support.db_ready() else None
+            old = ShyniBackend._metadata_info_for(db_item, meta_id)
             res = requests.put(f'{url}/library/metadata/{meta_id}/refresh',
                                headers={**headers,
                                         'Idempotency-Key': f'sm-manual-refresh-{item_id}-{int(time.time())}'},
@@ -514,7 +535,7 @@ class ShyniBackend:
                 while time.time() < deadline:
                     time.sleep(10)
                     try:
-                        now = db_support.metadata_info(meta_id)
+                        now = ShyniBackend._metadata_info_for(db_item, meta_id)
                     except Exception:
                         now = None
                     if now and tuple(now.get(k) for k in keys) != before:

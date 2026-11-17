@@ -31,7 +31,7 @@ class ModelPeriodicItem(ModelBase):
     created_time = db.Column(db.DateTime)
     mode = db.Column(db.String)            # scheduler | manual
     action = db.Column(db.String)          # refresh | scan | refresh_scan
-    status = db.Column(db.String)          # waiting | running | done | failed | cancelled | terminated
+    status = db.Column(db.String)          # waiting | running | done | failed | cancelled | skipped | terminated
     job_name = db.Column(db.String)
     section_key = db.Column(db.String)
     section_title = db.Column(db.String)
@@ -232,6 +232,49 @@ class ModelPeriodicItem(ModelBase):
         return out
 
     @classmethod
+    def latest_done_stats_map(cls, section_keys):
+        """라이브러리별 가장 최근 완료 주기 스캔 이력의 통계.
+
+        {섹션 key(str): {'total': stat_total, 'new': stat_new,
+         'missing': stat_missing, 'at': epoch(float),
+         'finish': finish_time(datetime)}} 로 돌려준다.
+        status='done'이고 stat_total이 NULL이 아닌 가장 최신 행
+        (id 내림차순 첫 행)만 쓴다 — 새로고침만 한 행은 스캔 통계가
+        없어 제외한다. 시각은 완료 시각(finish_time, 없으면 시작 시각)이다.
+        도서는 stat_total이 entries(이번 스캔 처리 수)일 수 있고
+        stat_new이 비어 있을 수 있다 (Relay 꺼짐 시 추가 파일 비교를
+        못 해서 신규를 못 잰다).
+        """
+        keys = [str(k) for k in (section_keys or [])]
+        if not keys:
+            return {}
+        with F.app.app_context():
+            try:
+                rows = (F.db.session.query(cls.section_key, cls.stat_total,
+                                           cls.stat_new, cls.stat_missing,
+                                           cls.finish_time, cls.start_time)
+                        .filter(cls.section_key.in_(keys),
+                                cls.status == 'done',
+                                cls.stat_total.isnot(None))
+                        .order_by(desc(cls.id)).all())
+            except Exception as e:
+                logger.error(f'주기 스캔 통계 조회 실패: {e}')
+                return {}
+        out = {}
+        for sec_key, total, new, missing, finish_time, start_time in rows:
+            k = str(sec_key)
+            if k in out:
+                continue
+            ts = finish_time or start_time
+            try:
+                at = ts.timestamp() if ts is not None else 0
+            except Exception:
+                at = 0
+            out[k] = {'total': total, 'new': new, 'missing': missing,
+                      'at': at, 'finish': finish_time}
+        return out
+
+    @classmethod
     def get_page(cls, page=1, per=30, section_key=None, only_append=False, search=None):
         with F.app.app_context():
             query = F.db.session.query(cls)
@@ -307,9 +350,13 @@ class ModelPeriodicItem(ModelBase):
             out['append_truncated'] = bool(
                 r.append_count is not None and files is not None
                 and len(files) < r.append_count)
-            # 실행 중 목록 문구용 — 목록 저장 게이트(db_ready)와 같은
-            # 판정을 함께 내려준다. 읽기 실패 시에는 '끝나면 표시됩니다'
-            # 쪽을 기본으로 한다(실행 중 상세는 펼칠 때마다 다시 읽는다).
+            # 실행 중 목록 문구용 — 목록 저장 게이트와 같은 판정을 함께
+            # 내려준다. 추가 파일 목록은 Relay(DB 직접 조회)로만 수집할
+            # 수 있어(관리자 API로는 모을 수 없음) 순수 Relay 상태로
+            # 판정한다. 관리자 API가 된다고 참으로 하면 Relay OFF인데도
+            # '끝나면 표시됩니다'가 나가는 오해가 생긴다.
+            # 읽기 실패 시에는 '끝나면 표시됩니다' 쪽을 기본으로 한다
+            # (실행 중 상세는 펼칠 때마다 다시 읽는다).
             try:
                 from . import db_support
                 out['db_ready'] = bool(db_support.db_ready())

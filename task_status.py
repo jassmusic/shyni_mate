@@ -30,6 +30,10 @@ logger = P.logger
 
 STATE_KEY = 'status_db_stats_state'
 CACHE_KEY = 'status_db_stats_cache'
+# 마지막 DB 통계 계산 실패 기록 {'at': 시각, 'error': 메시지} — state의
+# error는 새 요청이 들어오면 지워져서, 실패 상태를 화면에 알리는 용도로
+# 따로 남긴다. 계산이 성공하면 비운다.
+LAST_ERROR_KEY = 'status_db_stats_last_error'
 LIST_STATE_KEY = 'status_list_state'
 LIST_CACHE_KEY = 'status_list_cache'
 WATCH_INTERVAL = 5
@@ -66,6 +70,34 @@ def write_state(**kwargs):
     return state
 
 
+def read_last_error():
+    """마지막 DB 통계 계산 실패 기록 — 없으면 None."""
+    try:
+        raw = P.ModelSetting.get(LAST_ERROR_KEY)
+        if raw:
+            d = json.loads(raw)
+            if isinstance(d, dict) and d.get('error'):
+                return d
+    except Exception:
+        pass
+    return None
+
+
+def write_last_error(err):
+    try:
+        P.ModelSetting.set(LAST_ERROR_KEY, json.dumps(
+            {'at': time.time(), 'error': str(err)}))
+    except Exception as e:
+        logger.warning(f'[Status] 마지막 실패 기록 저장 실패: {e}')
+
+
+def clear_last_error():
+    try:
+        P.ModelSetting.set(LAST_ERROR_KEY, '')
+    except Exception:
+        pass
+
+
 def request_stats(force=False):
     """웹 프로세스가 계산을 요청한다 — 실제 계산은 워커가 수행한다.
 
@@ -74,7 +106,16 @@ def request_stats(force=False):
     마지막 저장 결과를 계속 보여 준다.
     계산 중에도 요청은 남긴다 — 그 요청이 없으면 비우기처럼 계산 도중에
     바뀐 내용이 다음 재계산까지 반영되지 않는다. compute_stats가 끝나면서
-    계산 중에 들어온 요청을 finished_at 뒤에 다시 남겨 워커가 다시 계산한다."""
+    계산 중에 들어온 요청을 finished_at 뒤에 다시 남겨 워커가 다시 계산한다.
+    Relay가 꺼져 있으면 요청을 남기지 않는다 — 스캔 완료 등으로 남긴 요청이
+    Relay OFF 상태에서도 계산을 트리거해 DB 통계 캐시를 다시 만들어버리던
+    문제(2026-11-17 실측)의 수정. 계산 단계(compute_stats)에도 같은 확인이
+    있어, 이미 남겨진 요청도 계산되지 않는다."""
+    try:
+        if not db_support.db_ready():
+            return read_state()
+    except Exception:
+        return read_state()
     state = read_state()
     now = time.time()
     requested_at = state.get('requested_at') or 0
@@ -229,9 +270,25 @@ def write_trash_cache(counts, at=None):
         logger.warning(f'[Status] 휴지통 개수 캐시 저장 실패: {e}')
 
 
+def _trash_counts_via_api():
+    """관리자 API로 라이브러리별 휴지통 개수 읽기. 실패하면 None.
+    라이브러리 목록은 compat API(섹션 목록)에서 얻는다 — Relay와 무관."""
+    try:
+        from .mod_status import ModuleStatus
+        sections, _err = ModuleStatus._sections()
+        if not sections:
+            return None
+        from . import shyni_admin
+        return shyni_admin.api_trash_counts([s['key'] for s in sections])
+    except Exception as e:
+        logger.warning(f'[Status] 휴지통 개수 API 읽기 실패: {e}')
+        return None
+
+
 def trash_counts_for_stats():
     """통계 계산용 휴지통 개수 — 설정 주기 안이면 캐시를 쓰고, 지났으면
-    새로 읽어 캐시에 넣는다. 주기가 0이면 매번 새로 읽는다."""
+    새로 읽어 캐시에 넣는다. 주기가 0이면 매번 새로 읽는다.
+    관리자 API 우선, 실패하면 Relay로 폴백한다 (Step4)."""
     try:
         hours = int(P.ModelSetting.get('base_trash_counts_refresh_hours') or 12)
     except Exception:
@@ -239,7 +296,9 @@ def trash_counts_for_stats():
     cache = read_trash_cache()
     if hours > 0 and cache and (time.time() - (cache.get('at') or 0) <= hours * 3600):
         return {int(k): v for k, v in cache['data'].items()}
-    counts = db_support.trash_counts()
+    counts = _trash_counts_via_api()
+    if counts is None:
+        counts = db_support.trash_counts()
     write_trash_cache(counts)
     return counts
 
@@ -261,7 +320,9 @@ def refresh_trash_counts_async():
         if not _trash_refresh_lock.acquire(False):
             return
         try:
-            counts = db_support.trash_counts()
+            counts = _trash_counts_via_api()
+            if counts is None:
+                counts = db_support.trash_counts()
             write_trash_cache(counts)
             _trash_refresh_last[0] = time.time()
             logger.info('[Status] 휴지통 개수 캐시를 새로 읽었습니다')
@@ -289,6 +350,18 @@ def mark_trash_counts_stale():
 
 def compute_stats():
     """DB 통계 계산 본체 — 워커에서만 실행한다 (기존 웹 스레드 계산을 옮긴 것)."""
+    # Relay가 꺼져 있으면 계산하지 않는다 — 요청을 남기는 쪽(request_stats)
+    # 에도 같은 확인이 있지만, 수정 전에 남겨진 요청이나 다른 경로의 요청이
+    # 계산 단계까지 오는 경우를 막는다. 요청은 소진(finished_at) 처리해
+    # 감시 루프가 5초마다 다시 부르며 기록을 채우지 않게 한다.
+    try:
+        relay_on = db_support.db_ready()
+    except Exception:
+        relay_on = False
+    if not relay_on:
+        logger.info('[Status] Relay가 꺼져 있어 DB 통계 계산을 건너뜁니다')
+        write_state(busy=False, progress=0, finished_at=time.time())
+        return
     t0 = time.time()
     req_at = read_state().get('requested_at') or 0
     write_state(busy=True, progress=5, started_at=t0, error=None)
@@ -316,11 +389,13 @@ def compute_stats():
             write_state(busy=False, progress=0, error=f'통계 저장에 실패했습니다: {e}')
             return
         write_state(busy=False, progress=100, finished_at=time.time())
+        clear_last_error()
         _requeue_if_requested_during(req_at)
         logger.info(f"[Status] DB 통계 계산 완료 (워커): {data['elapsed']}초")
     except Exception as e:
         logger.warning(f'[Status] DB 통계 계산 실패(워커): {e}')
         write_state(busy=False, progress=0, finished_at=time.time(), error=str(e))
+        write_last_error(e)
         _requeue_if_requested_during(req_at)
 
 

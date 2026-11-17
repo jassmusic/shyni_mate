@@ -31,7 +31,7 @@ class ModelTrashItem(ModelBase):
     created_time = db.Column(db.DateTime)
     mode = db.Column(db.String)            # scheduler | manual
     action = db.Column(db.String)          # refresh | scan | empty | refresh_scan | refresh_scan_empty
-    status = db.Column(db.String)          # waiting | running | done | failed | cancelled | terminated
+    status = db.Column(db.String)          # waiting | running | done | failed | cancelled | skipped | terminated
     job_name = db.Column(db.String)
     section_key = db.Column(db.String)
     section_title = db.Column(db.String)
@@ -61,6 +61,8 @@ class ModelTrashItem(ModelBase):
     target_files = db.Column(db.Text)      # JSON 배열(실행 전 휴지통 파일 경로, 최대 1,000개)
     restored_files = db.Column(db.Text)    # JSON 배열(스캔으로 복원된 휴지통 파일 경로, 최대 1,000개)
     vfs_results = db.Column(db.Text)       # JSON 객체(폴더 경로 → {'ok': bool, 'error': str})
+    scan_results = db.Column(db.Text)      # JSON 객체(폴더 경로 → {'ok': bool, 'error': str})
+    file_exists = db.Column(db.Text)       # JSON 객체(파일 전체 경로 → bool, 새로고침 후 존재 확인)
 
     def save(self):
         # SQLite 잠금이면 재시도한다 (스캔 항목과 같은 DB를 쓴다)
@@ -269,6 +271,18 @@ class ModelTrashItem(ModelBase):
                     vfs_map = {}
             except Exception:
                 vfs_map = {}
+            try:
+                scan_map = json.loads(r.scan_results) if r.scan_results else {}
+                if not isinstance(scan_map, dict):
+                    scan_map = {}
+            except Exception:
+                scan_map = {}
+            try:
+                exists_map = json.loads(r.file_exists) if r.file_exists else {}
+                if not isinstance(exists_map, dict):
+                    exists_map = {}
+            except Exception:
+                exists_map = {}
             t_groups = []
             if t_files:
                 try:
@@ -279,6 +293,10 @@ class ModelTrashItem(ModelBase):
                         if isinstance(v, dict):
                             grp['vfs_ok'] = bool(v.get('ok'))
                             grp['vfs_error'] = v.get('error') or ''
+                        s = scan_map.get(grp['folder'])
+                        if isinstance(s, dict):
+                            grp['scan_ok'] = bool(s.get('ok'))
+                            grp['scan_error'] = s.get('error') or ''
                 except Exception:
                     t_groups = []
             # 복원된 파일 목록 — 스캔 전/후 목록 비교로 가려낸 것.
@@ -307,6 +325,7 @@ class ModelTrashItem(ModelBase):
                 r.emptied_count is not None and e_files is not None
                 and len(e_files) < r.emptied_count)
             out['target_groups'] = t_groups
+            out['file_exists'] = exists_map
             out['target_total'] = len(t_files) if t_files is not None else None
             out['target_truncated'] = bool(
                 r.stat_total is not None and t_files is not None
@@ -316,9 +335,13 @@ class ModelTrashItem(ModelBase):
             out['restored_truncated'] = bool(
                 r.stat_restored is not None and r_files is not None
                 and len(r_files) < r.stat_restored)
-            # 실행 중 목록 문구용 — 목록 저장 게이트(db_ready)와 같은
-            # 판정을 함께 내려준다. 읽기 실패 시에는 '끝나면 표시됩니다'
-            # 쪽을 기본으로 한다(실행 중 상세는 펼칠 때마다 다시 읽는다).
+            # 실행 중 목록 문구용 — 목록 저장 게이트와 같은 판정을 함께
+            # 내려준다. 목록은 Relay(DB 직접 조회)로만 수집할 수 있어
+            # (관리자 API로는 모을 수 없음) 순수 Relay 상태로 판정한다.
+            # 관리자 API가 된다고 참으로 하면 Relay OFF인데도
+            # '끝나면 표시됩니다'가 나가는 오해가 생긴다.
+            # 읽기 실패 시에는 '끝나면 표시됩니다' 쪽을 기본으로 한다
+            # (실행 중 상세는 펼칠 때마다 다시 읽는다).
             try:
                 from . import db_support
                 out['db_ready'] = bool(db_support.db_ready())

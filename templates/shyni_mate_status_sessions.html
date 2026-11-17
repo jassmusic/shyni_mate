@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container-fluid">
+  <div class="row show-grid">
+    <span class="col-md-12">
+      <strong>세션</strong>
+      <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
+        <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
+        <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
+          <label style="font-weight:normal; font-size:12.5px; margin:0">주기
+            <input type="number" id="refreshMinInput" min="1" max="120" value="{{ '30' if (arg['status_auto_refresh_min'] or '30') == '0' else arg['status_auto_refresh_min'] }}" style="width:52px; height:26px; display:inline-block; padding:2px 6px; font-size:12.5px" class="form-control"> 분
+          </label>
+        </span>
+        <button type="button" class="btn btn-primary" id="refreshSaveBtn" style="padding:2px 10px; font-size:12.5px">저장</button>
+        <button type="button" class="btn btn-info" id="sessionsRefreshBtn" style="padding:2px 10px; font-size:12.5px">새로고침</button>
+      </span>
+    </span>
+  </div>
+  <div class="row show-grid">
+    <span class="col-md-12" style="font-size:12px; color:#aaa; text-align:right">
+      주기는 1~120분으로 저장할 수 있습니다. 대시보드·건강도와 같은 주기를 씁니다.
+    </span>
+  </div>
+</div>
+
+<div id="sessions_div" style="margin-top:10px; display:none"></div>
+<div id="sessions_msg_div" style="padding:24px 4px; color:#888">세션 목록을 불러오는 중입니다. 잠시만 기다려 주세요.</div>
+
+<script type="text/javascript">
+var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/status/';
+var refreshTimer = null;
+var currentRefreshMin = null;
+
+// 자동 업데이트 주기 — 대시보드·건강도와 같은 설정을 쓴다
+function setupTimer(min) {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  currentRefreshMin = min;
+  if (min > 0) refreshTimer = setInterval(load_sessions, min * 60000);
+}
+
+function applyRefreshUI(min) {
+  if (min == 0) {
+    $('#refreshUseCheck').prop('checked', false);
+    $('#refreshMinWrap').hide();
+  } else {
+    $('#refreshUseCheck').prop('checked', true);
+    $('#refreshMinWrap').show();
+    $('#refreshMinInput').val(min);
+  }
+}
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function fmtTime(iso) {
+  if (!iso) return '-';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return esc(iso);
+  var m = d.getMonth() + 1, day = d.getDate();
+  var h = d.getHours(), min = d.getMinutes();
+  return (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day) + ' ' +
+         (h < 10 ? '0' + h : h) + ':' + (min < 10 ? '0' + min : min);
+}
+
+function load_sessions() {
+  $('#sessions_msg_div').show().text('세션 목록을 불러오는 중입니다. 잠시만 기다려 주세요.');
+  $('#sessions_div').hide();
+  $.ajax({
+    global: false,
+    type: 'POST',
+    url: API_BASE + 'sessions',
+    timeout: 30000,
+    success: function (ret) {
+      if (ret.ret != 'success') {
+        $('#sessions_msg_div').show().text(ret.msg || '세션 목록을 불러오지 못했습니다.');
+        return;
+      }
+      if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
+        applyRefreshUI(ret.refresh_min);
+        setupTimer(ret.refresh_min);
+      }
+      if (ret.relay_off) {
+        $('#sessions_msg_div').hide();
+        $('#sessions_div').html(
+          '<div style="border:1px solid #bee5eb; background:#e8f6f8; border-radius:6px; padding:16px; text-align:center; color:#0c5460">' +
+          '세션 목록은 Relay를 켜면 표시됩니다.<br>' +
+          '<span style="font-size:13px">설정 &gt; Relay에서 켤 수 있습니다.</span>' +
+          '</div>').show();
+        return;
+      }
+      var list = ret.sessions || [];
+      if (!list.length) {
+        $('#sessions_msg_div').show().text('로그인 중인 세션이 없습니다.');
+        return;
+      }
+      $('#sessions_msg_div').hide();
+      var str = '<div style="font-size:12px; color:#888; margin-bottom:8px">로그인 중인 기기 ' + list.length + '개 · 마지막 활동 순</div>';
+      str += '<table class="table table-striped" style="font-size:13px"><thead><tr><th>사용자</th><th>기기</th><th>앱</th><th>마지막 활동</th><th>로그인</th></tr></thead><tbody>';
+      for (var i = 0; i < list.length; i++) {
+        var s = list[i];
+        str += '<tr><td><strong>' + esc(s.user) + '</strong>' +
+               (s.is_admin ? ' <span style="color:#888; font-size:12px">관리자</span>' : '') +
+               (ret.current_id && s.id === ret.current_id ? ' <span style="display:inline-block; font-size:11px; padding:1px 7px; border-radius:10px; background:#e6f4ea; color:#137333">현재</span>' : '') +
+               '</td><td>' + (s.device_name ? esc(s.device_name) : '<span style="color:#888">기기 정보 없음</span>') + '</td>' +
+               '<td>' + esc(s.app_name || '-') + '</td>' +
+               '<td>' + fmtTime(s.last_active_at) + '</td>' +
+               '<td>' + fmtTime(s.created_at) + '</td></tr>';
+      }
+      str += '</tbody></table>';
+      str += '<div style="font-size:12px; color:#888">· \'현재\'는 이 플러그인이 쓰는 세션입니다. · 세션은 shyni에 로그인할 때마다 생기고, 로그아웃할 때 지워집니다.</div>';
+      $('#sessions_div').html(str).show();
+    },
+    error: function () {
+      $('#sessions_msg_div').show().text('세션 목록을 불러오지 못했습니다.');
+    }
+  });
+}
+
+$(document).ready(function() {
+  $('#sessionsRefreshBtn').on('click', load_sessions);
+  $('#refreshUseCheck').on('change', function(){
+    $('#refreshMinWrap').toggle(this.checked);
+  });
+  $('#refreshSaveBtn').on('click', function(){
+    var use = $('#refreshUseCheck').is(':checked');
+    var min = parseInt($('#refreshMinInput').val(), 10);
+    if (use && !(min >= 1 && min <= 120)) { alert('주기는 1~120분으로 입력해 주세요.'); return; }
+    $.ajax({
+      global: false,
+      type: 'POST',
+      url: API_BASE + 'set_refresh',
+      data: {min: use ? min : 0},
+      success: function (ret) {
+        if (window.notify) notify(ret.msg, ret.ret == 'success' ? 'success' : 'error');
+        else alert(ret.msg);
+        if (ret.ret == 'success') {
+          currentRefreshMin = use ? min : 0;
+          applyRefreshUI(currentRefreshMin);
+          setupTimer(currentRefreshMin);
+        }
+      },
+      error: function () { alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.'); }
+    });
+  });
+  var initMin = parseInt("{{ arg['status_auto_refresh_min'] or '30' }}", 10);
+  if (isNaN(initMin)) initMin = 1;
+  currentRefreshMin = initMin;
+  load_sessions();
+  setupTimer(initMin);
+});
+</script>
+{% endblock %}
