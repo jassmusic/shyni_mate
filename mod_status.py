@@ -1569,6 +1569,27 @@ class ModuleStatus(PluginModuleBase):
                 if not db_support.db_ready():
                     return jsonify({'ret': 'fail',
                                     'msg': '메타 새로고침은 Relay에서 연결 테스트를 통과해야 사용할 수 있습니다.'})
+                # 선택 항목 새로고침 (메타 상세 페이지) — ids(쉼표로 이은
+                # 작품 번호)가 있으면 범위 계산 없이 그 항목만 새로고침한다.
+                # 선택 항목은 빠진 값이 제각각이라 채워짐 확인은 건너뛴다.
+                ids_param = (req.form.get('ids') or '').strip()
+                if ids_param:
+                    ids = [int(p) for p in ids_param.split(',') if p.strip().isdigit()]
+                    if not ids:
+                        return jsonify({'ret': 'fail', 'msg': '선택한 항목이 없습니다.'})
+                    _, ml = db_support.library_main_label(key)
+                    state['meta'] = {'status': 'running', 'total': len(ids), 'done': 0, 'fail': 0,
+                                     'cancel': False, 'current': None,
+                                     'started_at': now, 'finished_at': None}
+                    self._set_state(key, state)
+                    run_id = int(time.time())
+                    th = threading.Thread(target=self._run_meta_refresh,
+                                          args=(key, sec['title'], ids, run_id, None), daemon=True)
+                    _meta_refresh_threads[str(key)] = th
+                    th.start()
+                    logger.info(f"[현황] 메타 새로고침 시작: {sec['title']} 선택한 {ml} {len(ids)}개")
+                    return jsonify({'ret': 'success',
+                                    'msg': f"{sec['title']} 선택한 {len(ids)}개의 메타 새로고침을 시작했습니다."})
                 scope = (req.form.get('scope') or 'all').strip()
                 only_no_code = scope == 'nocode'
                 is_folder = bool(only_no_code and db_support.library_is_folder(key))
@@ -1586,7 +1607,7 @@ class ModuleStatus(PluginModuleBase):
                     return jsonify({'ret': 'fail',
                                     'msg': f'메타 없는 {ml}이 없습니다.' if only_no_code else f'이 라이브러리에는 {ml}이 없습니다.'})
                 state['meta'] = {'status': 'running', 'total': len(ids), 'done': 0, 'fail': 0,
-                                 'cancel': False,
+                                 'cancel': False, 'current': None,
                                  'started_at': now, 'finished_at': None}
                 self._set_state(key, state)
                 run_id = int(time.time())
@@ -2027,6 +2048,28 @@ class ModuleStatus(PluginModuleBase):
         self._set_state(key, st)
         logger.warning(f'[현황] 휴지통 비우기 연결 중단: 섹션 {key} — {error}')
 
+    @staticmethod
+    def _meta_refresh_titles(key):
+        """진행 표시용 작품 번호 → 제목 (메타 캐시에서 읽는다, 없으면 빈 값)."""
+        try:
+            from . import task_meta_view
+            cached = task_meta_view.cached_data(key) or {}
+            titles = {}
+            for row in cached.get('data') or []:
+                if not isinstance(row, (list, tuple)) or len(row) < 2:
+                    continue
+                try:
+                    mid = int(row[0])
+                except (TypeError, ValueError):
+                    continue
+                title = ((row[2] + ' — ') if len(row) > 2 and row[2] else '') + (row[1] or '')
+                if len(row) > 3 and row[3]:
+                    title += f" ({row[3]})"
+                titles[mid] = title
+            return titles
+        except Exception:
+            return {}
+
     def _run_meta_refresh(self, key, title, ids, run_id, filled_kind=None):
         """라이브러리 전체 앨범에 메타 새로고침을 하나씩 건다 (백그라운드 스레드)."""
         url, token = ShyniBackend.get_config()
@@ -2034,6 +2077,7 @@ class ModuleStatus(PluginModuleBase):
         fail = 0
         cancelled = False
         finished_at = None
+        titles = self._meta_refresh_titles(key)
         try:
             for mid in ids:
                 st = self._get_state(key)
@@ -2041,6 +2085,12 @@ class ModuleStatus(PluginModuleBase):
                 if meta.get('cancel'):
                     cancelled = True
                     break
+                # 진행 표시용 현재 항목 — 호출 전에 저장한다 (휴지통의
+                # '현재:' 줄과 같은 표시). 캐시에 없는 항목은 표시를 비운다.
+                st = self._get_state(key)
+                if st.get('meta'):
+                    st['meta']['current'] = titles.get(mid)
+                    self._set_state(key, st)
                 try:
                     res = requests.put(f'{url}/library/metadata/{mid}/refresh',
                                        headers={'X-Plex-Token': token, 'Accept': 'application/json',
@@ -2052,12 +2102,11 @@ class ModuleStatus(PluginModuleBase):
                         fail += 1
                 except Exception:
                     fail += 1
-                if (done + fail) % 10 == 0:
-                    st = self._get_state(key)
-                    if st.get('meta'):
-                        st['meta']['done'] = done
-                        st['meta']['fail'] = fail
-                        self._set_state(key, st)
+                st = self._get_state(key)
+                if st.get('meta'):
+                    st['meta']['done'] = done
+                    st['meta']['fail'] = fail
+                    self._set_state(key, st)
                 time.sleep(0.15)
         finally:
             # 스레드 사전부터 비운다 — set_state가 예외를 일으켜도 항목이
@@ -2069,6 +2118,7 @@ class ModuleStatus(PluginModuleBase):
                     finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     st['meta']['done'] = done
                     st['meta']['fail'] = fail
+                    st['meta']['current'] = None
                     st['meta']['status'] = 'cancelled' if cancelled else 'done'
                     st['meta']['finished_at'] = finished_at
                     self._set_state(key, st)

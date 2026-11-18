@@ -73,16 +73,26 @@
       <input type="text" id="meta_search" class="form-control" placeholder="제목 검색" style="flex:1; min-width:0; height:31px; padding:3px 8px; font-size:14px">
       <select id="meta_order" class="form-control" style="flex:0 0 auto; width:auto; height:31px; padding:3px 8px; font-size:14px">
         <option value="default">기본</option>
-        <option value="name">이름순</option>
+        <option value="name">이름</option>
         <option value="no_code">코드</option>
         <option value="no_summary">설명</option>
         <option value="no_year">연도</option>
         <option value="no_thumb">표지</option>
       </select>
     </div>
+    <div style="margin-top:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+      <button type="button" class="btn btn-sm btn-outline-info" id="meta_refresh_selected_btn" style="font-size:13px" disabled>선택 메타 새로고침</button>
+      <button type="button" class="btn btn-sm btn-outline-info" id="meta_refresh_btn" style="font-size:13px">전체 메타 새로고침</button>
+    </div>
+    <div id="meta_refresh_status" style="display:none; font-size:12.5px; color:#555; margin-top:6px"></div>
   </div>
 
   <div id="meta_basis" style="display:none; font-size:12.5px; color:#888; margin-top:10px; text-align:right"></div>
+
+  <div id="meta_check_row" style="display:none; margin-top:8px">
+    <label style="font-size:12.5px; color:#666; font-weight:normal; margin:0"><input type="checkbox" id="meta_check_all"> 현재 페이지 전체 선택</label>
+    <span id="meta_sel_count" style="font-size:12.5px; color:#555; margin-left:8px">선택 0개</span>
+  </div>
 
   <div id="meta_list_div" style="margin-top:10px"></div>
 
@@ -102,12 +112,17 @@
 var LIBS = [];
 var LIBS_STATE = 'loading'; // loading | ok | fail
 var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/meta/';
+var STATUS_API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/status/';
 var PRESELECT = {{ arg['meta_preselect']|default('')|tojson }};
 var metaPage = 1;
 var metaData = null;
 var metaCounts = null; // {라이브러리키: {total, no_meta, ...}} — 현황용
 var metaCountsAt = 0;
 var metaOverviewState = 'loading'; // loading | ok | missing | relay_off | fail
+var metaRefreshPollTimer = null;
+var metaRefreshLib = null; // 메타 새로고침 진행 중인 라이브러리 키
+var metaRefreshCheckedLib = null; // 새로고침 상태를 한 번 확인한 라이브러리 키
+var metaSel = {}; // 선택한 작품 번호 → true (페이지가 바뀌어도 유지)
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -472,6 +487,9 @@ function onMetaLibPicked(key, fromPreselect) {
   renderLibOptions(null);
   hideMetaOverview();
   stopMetaPolling();
+  metaSel = {};
+  clearMetaRefreshStatus();
+  metaRefreshCheckedLib = null;
   $('#meta_summary').text('');
   $('#meta_tools').hide();
   $('#meta_pager').hide();
@@ -489,6 +507,9 @@ function onMetaLibPicked(key, fromPreselect) {
 // 전체 현황으로 돌아간다 — 선택을 비우고 현황을 다시 보여 준다.
 function backToMetaOverview() {
   stopMetaPolling();
+  metaSel = {};
+  clearMetaRefreshStatus();
+  metaRefreshCheckedLib = null;
   $('#meta_lib').val('');
   PRESELECT = '';
   metaData = null;
@@ -564,10 +585,176 @@ function cancelMetaQuery() {
   if (lib) showCacheAfterCancel(lib);
 }
 
+// 메타 새로고침 — 휴지통 상세의 새로고침 버튼과 같은 자리다.
+// 대시보드의 메타 새로고침과 같은 동작(현황 모듈의 meta_refresh,
+// 범위 nocode)을 이 페이지에서 바로 건다. 진행은 현황 상태(states)로
+// 1초마다 확인한다. 취소는 대시보드에서 한다. 진행 표시 형식은
+// 휴지통의 선택 실행과 같다 ('진행 중 · N/M개 완료' + '현재:' 줄).
+function setMetaRefreshStatus(txt, isErr) {
+  var el = $('#meta_refresh_status');
+  if (!txt) { el.hide(); return; }
+  el.html(isErr ? '<span style="color:#c0392b">' + esc(txt) + '</span>' : esc(txt)).show();
+}
+function showMetaRefreshHtml(html) {
+  $('#meta_refresh_status').html(html).show();
+}
+function stopMetaRefreshPoll() {
+  if (metaRefreshPollTimer) { clearInterval(metaRefreshPollTimer); metaRefreshPollTimer = null; }
+  metaRefreshLib = null;
+}
+function clearMetaRefreshStatus() {
+  stopMetaRefreshPoll();
+  setMetaRefreshStatus('');
+  $('#meta_refresh_btn').prop('disabled', false);
+  updateMetaSelUi();
+}
+function metaRefreshTarget() {
+  // 새로고침 대상 수 — 폴더 라이브러리는 표지 없는 작품,
+  // 그 외는 코드 없는 작품이 대상이다 (현황 meta_refresh와 같은 기준).
+  var lib = $('#meta_lib').val();
+  var c = metaCounts ? metaCounts[String(lib)] : null;
+  var s = (metaData && metaData.summary) || {};
+  var isFolder = !!(c && c.is_folder);
+  var n = isFolder ? (s.no_thumb || 0) : (s.no_code || 0);
+  var label = (isFolder ? '표지 없는 ' : '메타 없는 ') + ((c && c.main_label) || '미디어');
+  return {count: n, label: label};
+}
+function pollMetaRefresh() {
+  var lib = metaRefreshLib;
+  if (!lib || String($('#meta_lib').val()) !== String(lib)) { clearMetaRefreshStatus(); return; }
+  $.ajax({
+    global: false, type: 'POST', url: STATUS_API_BASE + 'states',
+    data: {keys: lib}, timeout: 20000,
+    success: function (r) {
+      if (!r || r.ret != 'success' || !r.states || !r.states[String(lib)]) return;
+      var m = (r.states[String(lib)] || {}).meta || null;
+      if (!m) {
+        clearMetaRefreshStatus();
+        setMetaRefreshStatus('메타 새로고침 상태를 확인하지 못했습니다. 대시보드에서 확인해 주세요.', true);
+        return;
+      }
+      if (m.status == 'running') {
+        var t = '메타 새로고침 진행 중 · ' + fmtNum(m.done || 0) + '/' + fmtNum(m.total || 0) + '개 완료';
+        if (m.current) t += '<br><span style="color:#888; word-break:break-all">현재: ' + esc(m.current) + '</span>';
+        showMetaRefreshHtml(t);
+        return;
+      }
+      stopMetaRefreshPoll();
+      $('#meta_refresh_btn').prop('disabled', false);
+      updateMetaSelUi();
+      if (m.status == 'done') {
+        var html = '메타 새로고침이 끝났습니다. ' + fmtNum(m.done || 0) + '/' + fmtNum(m.total || 0) + '개 성공.';
+        if (m.fail) html += '<br><span style="color:#c0392b">실패 ' + fmtNum(m.fail) + '개 — 다시 시도해 주세요.</span>';
+        html += '<br><span style="color:#888">메타 내용이 바뀌었을 수 있습니다. 조회 버튼을 눌러 다시 불러와 주세요.</span>';
+        showMetaRefreshHtml(html);
+      } else if (m.status == 'cancelled') {
+        setMetaRefreshStatus('메타 새로고침이 취소되었습니다.');
+      } else {
+        setMetaRefreshStatus('메타 새로고침이 끝났습니다. 조회 버튼을 눌러 다시 불러와 주세요.');
+      }
+    }
+  });
+}
+function startMetaRefreshPoll(lib) {
+  stopMetaRefreshPoll();
+  metaRefreshLib = lib;
+  $('#meta_refresh_btn').prop('disabled', true);
+  $('#meta_refresh_selected_btn').prop('disabled', true);
+  pollMetaRefresh();
+  metaRefreshPollTimer = setInterval(pollMetaRefresh, 1000);
+}
+function checkMetaRefreshState() {
+  // 상세 보기가 뜰 때 한 번만 확인한다 — 대시보드에서 시작한
+  // 새로고침이 돌고 있으면 진행 표시를 이어받는다.
+  var lib = $('#meta_lib').val();
+  if (!lib || metaRefreshCheckedLib === String(lib)) return;
+  metaRefreshCheckedLib = String(lib);
+  $.ajax({
+    global: false, type: 'POST', url: STATUS_API_BASE + 'states',
+    data: {keys: lib}, timeout: 20000,
+    success: function (r) {
+      if (!r || r.ret != 'success' || !r.states) return;
+      var m = ((r.states[String(lib)] || {}).meta) || null;
+      if (m && m.status == 'running') startMetaRefreshPoll(lib);
+    }
+  });
+}
+function startMetaRefresh() {
+  var lib = $('#meta_lib').val();
+  if (!lib || metaRefreshLib) return;
+  var tgt = metaRefreshTarget();
+  if (!tgt.count) { setMetaRefreshStatus('메타 없는 작품이 없습니다.', true); return; }
+  var l = libByKey(lib);
+  var name = l ? l.title : '';
+  if (!confirm((name ? name + ' ' : '') + tgt.label + ' ' + tgt.count.toLocaleString() + '개에 메타 새로고침을 합니다. 진행하시겠습니까?')) return;
+  setMetaRefreshStatus('메타 새로고침을 시작하고 있습니다…');
+  $.ajax({
+    global: false, type: 'POST', url: STATUS_API_BASE + 'meta_refresh',
+    data: {key: lib, scope: 'nocode'}, timeout: 30000,
+    success: function (ret) {
+      if (!ret || ret.ret != 'success') {
+        setMetaRefreshStatus((ret && ret.msg) || '메타 새로고침을 시작하지 못했습니다.', true);
+        return;
+      }
+      setMetaRefreshStatus(ret.msg || '메타 새로고침을 시작했습니다.');
+      startMetaRefreshPoll(lib);
+    },
+    error: function () {
+      setMetaRefreshStatus('메타 새로고침을 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.', true);
+    }
+  });
+}
+
+// 선택 메타 새로고침 — 휴지통 페이지의 선택 방식과 같다.
+// 체크박스로 고른 작품만 새로고침한다 (진행·취소는 전체와 같은
+// 현황 상태를 쓴다).
+function metaSelCount() { return Object.keys(metaSel).length; }
+
+function updateMetaSelUi() {
+  var n = metaSelCount();
+  var busy = !!metaRefreshLib;
+  $('#meta_sel_count').text('선택 ' + n + '개');
+  $('#meta_refresh_selected_btn').prop('disabled', n === 0 || busy);
+  var boxes = $('.meta-check');
+  var checked = boxes.filter(':checked').length;
+  // 새로고침이 도는 동안에는 체크박스도 잠근다 (휴지통과 같은 방식)
+  boxes.prop('disabled', busy);
+  $('#meta_check_all').prop('checked', boxes.length > 0 && checked === boxes.length);
+  $('#meta_check_all').prop('disabled', busy || boxes.length === 0);
+}
+
+function startMetaRefreshSelected() {
+  var lib = $('#meta_lib').val();
+  if (!lib || metaRefreshLib) return;
+  var ids = Object.keys(metaSel);
+  if (!ids.length) return;
+  var l = libByKey(lib);
+  var name = l ? l.title : '';
+  if (!confirm((name ? name + ' ' : '') + '선택한 ' + ids.length.toLocaleString() + '개의 메타를 새로고침합니다. 진행하시겠습니까?')) return;
+  // 선택은 실행 중에도 그대로 둔다 (휴지통의 새로고침·스캔과 같은 방식)
+  setMetaRefreshStatus('메타 새로고침을 시작하고 있습니다…');
+  $.ajax({
+    global: false, type: 'POST', url: STATUS_API_BASE + 'meta_refresh',
+    data: {key: lib, ids: ids.join(',')}, timeout: 30000,
+    success: function (ret) {
+      if (!ret || ret.ret != 'success') {
+        setMetaRefreshStatus((ret && ret.msg) || '메타 새로고침을 시작하지 못했습니다.', true);
+        return;
+      }
+      setMetaRefreshStatus(ret.msg || '메타 새로고침을 시작했습니다.');
+      startMetaRefreshPoll(lib);
+    },
+    error: function () {
+      setMetaRefreshStatus('메타 새로고침을 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.', true);
+    }
+  });
+}
+
 function clearBasis() {
   metaBasisKind = null;
   metaBasisAt = 0;
   $('#meta_basis').hide();
+  $('#meta_check_row').hide();
   updateQueryBtn();
 }
 
@@ -957,6 +1144,8 @@ function renderMeta() {
   sumHtml += ' · 코드 없음 ' + fmtNum(s.no_code) + '개 · 설명 없음 ' + fmtNum(s.no_summary) + '개 · 연도 없음 ' + fmtNum(s.no_year) + '개 · 표지 없음 ' + fmtNum(s.no_thumb) + '개';
   $('#meta_summary').html(sumHtml);
   $('#meta_tools').show();
+  $('#meta_check_row').show();
+  checkMetaRefreshState();
   paintBasis();
   updateQueryBtn();
   var str = '';
@@ -969,6 +1158,7 @@ function renderMeta() {
     var title = (it.parent_title ? it.parent_title + ' — ' : '') + (it.title || '(제목 없음)') + (it.year ? ' (' + it.year + ')' : '');
     str += '<div style="border:1px solid #e2e8f0; border-radius:8px; padding:10px 8px; margin-top:8px">';
     str += '<div style="display:flex; gap:8px; align-items:flex-start">';
+    str += '<input type="checkbox" class="meta-check" data-id="' + it.id + '"' + (metaSel[it.id] ? ' checked' : '') + ' style="margin-top:3px; flex:0 0 auto">';
     str += '<div style="flex:1; min-width:0"><div><strong>' + esc(title) + '</strong></div>';
     if (it.folder) str += '<div style="font-size:12px; color:#888; margin-top:1px">폴더: ' + esc(it.folder) + '</div>';
     str += '<div style="font-size:12.5px; color:#666; margin-top:2px">';
@@ -987,6 +1177,7 @@ function renderMeta() {
     str += '</div>';
   }
   $('#meta_list_div').html(str);
+  updateMetaSelUi();
   if (d.pages > 1 || d.total_items > 0) {
     $('#meta_pager').show();
     $('#meta_page_info').text(d.page + ' / ' + d.pages + ' 페이지 · 값이 없는 미디어 ' + fmtNum(d.total_items) + '개');
@@ -1019,6 +1210,26 @@ $(document).ready(function () {
     // 목록이 떠 있는 상태의 버튼은 '최신으로 조회' — 캐시가 있어도
     // 다시 계산한다. 목록이 없으면 캐시 먼저 보기 대상이다
     startQuery(!!metaData);
+  });
+  $('#meta_refresh_btn').off('click').on('click', function () { startMetaRefresh(); });
+  $('#meta_refresh_selected_btn').off('click').on('click', function () { startMetaRefreshSelected(); });
+  $(document).off('change', '.meta-check').on('change', '.meta-check', function () {
+    var id = $(this).data('id');
+    if (id == null) return;
+    if ($(this).is(':checked')) metaSel[id] = true;
+    else delete metaSel[id];
+    updateMetaSelUi();
+  });
+  $('#meta_check_all').off('change').on('change', function () {
+    var on = $(this).is(':checked');
+    $('.meta-check').each(function () {
+      var id = $(this).data('id');
+      if (id == null) return;
+      $(this).prop('checked', on);
+      if (on) metaSel[id] = true;
+      else delete metaSel[id];
+    });
+    updateMetaSelUi();
   });
   $('#meta_query_all_btn').off('click').on('click', function () {
     if (metaBulkActive) {

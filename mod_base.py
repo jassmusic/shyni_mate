@@ -42,6 +42,10 @@ class ModuleBase(PluginModuleBase):
             f'{self.name}_trash_counts_refresh_hours' : '12',
             # 메타 — 메타 목록 자동 갱신 주기 (시간). 0이면 열 때마다 새로 조회한다
             f'{self.name}_meta_refresh_hours' : '12',
+            # 라이브러리 동시 스캔 수 (기본 설정 기타 탭) — db_default에 없으면
+            # 새로 설치한 서버에서도 설정 저장이 실패한다 (2026-11-18 쉴드 실측).
+            # 키 이름은 mod_status.py의 LIBRARY_SCAN_LIMIT_KEY와 같은 값이다.
+            'scan_max_library_scan_count' : '2',
         }
         # 매뉴얼 페이지: /shyni_mate/manual_toc — 소개 매뉴얼을 FF 안에서
         # 템플릿으로 보여준다. 정적 라우트라 기본 라우트 /<sub>보다 우선 매칭된다.

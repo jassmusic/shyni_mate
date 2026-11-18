@@ -275,7 +275,7 @@ def page_from_cache(data, page=1, per_page=30, search='', order='default',
     'nocode'(메타 없는 미디어만, 이전 범위). '메타 없는'은 대시보드 팝업과
     같은 기준이다 — 폴더 라이브러리는 표지 없음, 아니면 코드 없음이다.
     order: 'default'(기본, 등록 순) · 'name'(이름순) · 'missing'(메타 없는 순) ·
-    'no_code'/'no_summary'/'no_year'/'no_thumb'(해당 값이 없는 것부터).
+    'no_code'/'no_summary'/'no_year'/'no_thumb'(해당 값이 없는 것만, 이름순).
     """
     rows = list(data.get('items') or [])
     is_folder = bool(data.get('is_folder'))
@@ -298,13 +298,16 @@ def page_from_cache(data, page=1, per_page=30, search='', order='default',
         rows.sort(key=lambda r: (0 if r[4] != db_support.META_FLAG_ALL else 1,
                                  (r[2] or ''), (r[1] or '')))
     elif order in ('no_code', 'no_summary', 'no_year', 'no_thumb'):
-        # 해당 값이 없는 것부터 — 그 안에서는 이름순
+        # 해당 값이 없는 것만 보여 준다 (필터) — 그 안에서는 이름순.
+        # 정렬만으로는 목록이 안 바뀌어 보여 필터가 안 된다고 느껴진다
+        # (2026-11-18 사용자 지적). 드롭다운 이름이 '코드'·'표지'처럼
+        # 필터처럼 읽히기도 해서, 아예 필터로 동작하게 바꾼다.
         bit = {'no_code': db_support.META_FLAG_CODE,
                'no_summary': db_support.META_FLAG_SUMMARY,
                'no_year': db_support.META_FLAG_YEAR,
                'no_thumb': db_support.META_FLAG_THUMB}[order]
-        rows.sort(key=lambda r: (0 if not (r[4] & bit) else 1,
-                                 (r[2] or ''), (r[1] or '')))
+        rows = [r for r in rows if not (r[4] & bit)]
+        rows.sort(key=lambda r: ((r[2] or ''), (r[1] or '')))
     filtered = len(rows)
     pages = max(1, (filtered + per_page - 1) // per_page)
     page = max(1, min(page, pages))

@@ -44,7 +44,7 @@
         <select id="trashLibSort" style="display:inline-block; width:auto; height:31px; padding:2px 6px; font-size:12px; vertical-align:middle">
           <option value="default">기본</option>
           <option value="name">이름</option>
-          <option value="trash_desc">휴지통 수 내림차순</option>
+          <option value="trash_desc">휴지통</option>
         </select>
       </label>
     </div>
@@ -280,7 +280,7 @@ function renderTrashOverview() {
     + ' <span style="font-weight:normal; color:#888; font-size:12px">' + (trashCountsAt ? fmtBasisTime(trashCountsAt) + ' 기준' : '') + '</span></div>'
     + '<label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 '
     + '<select id="trashOverviewSort" onchange="setTrashOverviewSort(this.value)" style="display:inline-block; width:auto; height:31px; padding:2px 6px; font-size:12px; vertical-align:middle">'
-    + '<option value="trash_desc"' + (trashOverviewSort == 'trash_desc' ? ' selected' : '') + '>휴지통 수 내림차순</option>'
+    + '<option value="trash_desc"' + (trashOverviewSort == 'trash_desc' ? ' selected' : '') + '>휴지통</option>'
     + '<option value="name"' + (trashOverviewSort == 'name' ? ' selected' : '') + '>이름</option>'
     + '<option value="default"' + (trashOverviewSort == 'default' ? ' selected' : '') + '>기본</option>'
     + '</select></label></div>';
