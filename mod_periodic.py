@@ -33,7 +33,11 @@ class ModulePeriodic(PluginModuleBase):
             # 진행 중 표시 정리 시간(분) — 진행 상태를 확인할 방법이 없을 때
             # 이 시간이 지나면 '중단됨'으로 정리한다. 0이면 끈다 (기본값 30)
             f'{self.name}_stuck_timeout_min': '30',
-            # 최대 대기 시간(분) — 앞선 작업이 돌고 있을 때 이 시간까지
+            # VFS 새로고침 제한 시간(분) — 라이브러리 새로고침이 끝나기를
+            # 이 시간까지 기다린다. 넘기면 그 라이브러리는 실패로 끝나고
+            # 스캔은 보내지 않는다. 0 이하면 기본값으로 동작한다 (기본값 360)
+            f'{self.name}_vfs_timeout_min': '360',
+            # 작업 대기 시간(분) — 앞선 작업이 돌고 있을 때 이 시간까지
             # 기다렸다가 끝나면 이어서 실행한다. 0이면 기다리지 않는다 (기본값 360)
             f'{self.name}_max_wait_min': '360',
         }
@@ -285,11 +289,16 @@ class ModulePeriodic(PluginModuleBase):
             else:
                 ret['msg'] = '실행을 시작했습니다. 잠시 뒤 워커가 작업을 시작합니다.'
         elif command == 'cancel_current':
-            if get_current() is None:
+            cur = get_current()
+            if cur is None:
                 return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 주기적 스캔이 없습니다.'})
             request_cancel()
             logger.info('[Periodic] 취소 요청')
-            ret['msg'] = '취소를 요청했습니다. 진행 중인 단계가 정리되면 멈춥니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'
+            # Step5-1 — shyni 스캔까지 함께 취소하므로 "웹에서 취소" 안내는 없앴다.
+            if (cur.get('stage') or '') == 'scan':
+                ret['msg'] = '취소를 요청했습니다. shyni 스캔 취소가 확인되면 멈춥니다.'
+            else:
+                ret['msg'] = '취소를 요청했습니다. 새로고침이 정리되면 멈춥니다.'
         return jsonify(ret)
 
     # ---------- 화면 AJAX ----------

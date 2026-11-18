@@ -65,11 +65,11 @@
   <div id="btn_guide_toggle" style="font-weight:bold; color:#666; cursor:pointer">버튼 안내 <span id="btn_guide_arrow" style="font-weight:normal; font-size:12px; color:#999">▸ 펼치기</span></div>
   <div id="btn_guide_body" style="display:none">
   <div>- <strong style="color:#666">새로고침</strong> — rclone VFS 새로고침만 합니다. 드라이브 폴더를 다시 읽어 새 파일이 마운트에 보이게 합니다. 스캔 설정의 VFS 새로고침 규칙에 이 라이브러리 경로가 맞아야 동작합니다.</div>
-  <div>- <strong style="color:#666">스캔</strong> — shyni에 이 라이브러리 전체 스캔을 전송합니다. 취소는 shyni 웹 화면에서 합니다.</div>
-  <div>- <strong style="color:#666">새로고침 후 스캔</strong> — 새로고침이 끝나면 스캔이 자동으로 시작됩니다. 새로고침은 취소가 가능하나, 스캔으로 넘어간 뒤 취소는 shyni 웹 화면에서 해야 합니다.</div>
+  <div>- <strong style="color:#666">스캔</strong> — shyni에 이 라이브러리 전체 스캔을 전송합니다. 진행 중이면 취소 버튼으로 shyni 스캔까지 함께 취소할 수 있습니다.</div>
+  <div>- <strong style="color:#666">새로고침 후 스캔</strong> — 새로고침이 끝나면 스캔이 자동으로 시작됩니다. 새로고침과 스캔 모두 취소 버튼으로 취소할 수 있습니다.</div>
   <div>- <strong style="color:#666">메타 새로고침</strong> — 미디어 메타데이터를 순서대로 새로고침합니다. 전체 또는 메타 없는 것만 고를 수 있고, Relay의 데이터베이스 연결이 필요합니다.</div>
   <div>- <strong style="color:#666">휴지통</strong> — 비우기 동작(새로고침·스캔·비우기와 그 조합)을 골라 실행하거나, 휴지통 상세에서 내용을 확인한 뒤 비울 수 있습니다. 비운 파일은 되돌릴 수 없습니다.</div>
-  <div>- <strong style="color:#666">취소</strong> — 진행 중인 새로고침과 메타 새로고침을 멈춥니다. 스캔 취소는 shyni 웹 화면에서 해야 합니다.</div>
+  <div>- <strong style="color:#666">취소</strong> — 진행 중인 작업을 멈춥니다. 스캔 중이면 shyni 스캔까지 함께 취소합니다. 비우기 중에는 취소할 수 없습니다.</div>
   <div style="margin-top:6px">참고로 이 버튼들은 스캔 설정의 'rclone vfs/refresh 사용'과 'Shyni 연동 사용' 설정과 무관하게 동작합니다. 그 설정들은 스캔 목록의 자동 처리 전용입니다.</div>
   </div>
 </div>
@@ -81,8 +81,11 @@
     <div style="font-size:15px; font-weight:bold; margin-bottom:6px">메타 새로고침</div>
     <div style="font-size:13px; color:#666; margin-bottom:14px">어느 범위로 진행할까요? 미디어가 많으면 오래 걸릴 수 있습니다.</div>
     <div style="display:flex; flex-direction:column; gap:8px">
-      <button type="button" class="btn btn-outline-info" id="meta_all_btn" style="padding:6px 10px; font-size:13px"><span id="meta_all_label">전체 미디어</span></button>
-      <button type="button" class="btn btn-outline-primary" id="meta_nocode_btn" style="padding:6px 10px; font-size:13px"><span id="meta_nocode_label">메타 없는 미디어만</span></button>
+      <button type="button" class="btn btn-outline-success" id="meta_detail_btn" style="padding:6px 10px; font-size:13px">메타 상세</button>
+      <div style="display:flex; gap:8px">
+        <button type="button" class="btn btn-outline-info" id="meta_all_btn" style="flex:1; padding:6px 10px; font-size:12px"><span id="meta_all_label">전체 미디어</span></button>
+        <button type="button" class="btn btn-outline-primary" id="meta_nocode_btn" style="flex:1; padding:6px 10px; font-size:12px"><span id="meta_nocode_label">메타 없는 미디어만</span></button>
+      </div>
       <button type="button" class="btn btn-outline-secondary" id="meta_cancel_btn" style="padding:6px 10px; font-size:13px">취소</button>
     </div>
   </div>
@@ -90,7 +93,7 @@
 <div id="scan_confirm_modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:1050">
   <div style="background:#fff; border-radius:6px; max-width:420px; margin:120px auto 0; padding:18px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.25)">
     <div id="scan_confirm_title" style="font-size:15px; font-weight:bold; margin-bottom:6px">스캔</div>
-    <div id="scan_confirm_body" style="font-size:13px; color:#666; margin-bottom:14px">취소는 웹에서 해야 합니다.</div>
+    <div id="scan_confirm_body" style="font-size:13px; color:#666; margin-bottom:14px">스캔이 시작되면 취소 버튼으로 shyni 스캔까지 함께 취소할 수 있습니다.</div>
     <div style="display:flex; flex-direction:column; gap:8px">
       <button type="button" class="btn btn-outline-success" id="scan_start_btn" style="padding:6px 10px; font-size:13px">시작</button>
       <button type="button" class="btn btn-outline-secondary" id="scan_back_btn" style="padding:6px 10px; font-size:13px">취소</button>
@@ -594,6 +597,15 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
     var hl = periodicCurrent && String(periodicCurrent.section_key) === String(s.key);
     var hlTrash = trashCurrent && String(trashCurrent.section_key) === String(s.key);
     var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || (st.trash && st.trash.status == 'running') || hl || hlTrash;
+    // 취소 대상 — 서버(sub='cancel')와 같은 우선순위 (주기적 → 휴지통 → 메타 → 새로고침 → 스캔 → 비우기).
+    // 'empty'는 비우기 중이라 취소 불가 — 버튼을 비활성화한다.
+    var cancelKind = null;
+    if (hl) cancelKind = 'periodic';
+    else if (hlTrash) cancelKind = (trashCurrent.stage == 'empty') ? 'empty' : 'trash';
+    else if (st.meta && st.meta.status == 'running') cancelKind = 'meta';
+    else if (st.vfs && st.vfs.status == 'running') cancelKind = 'vfs';
+    else if (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) cancelKind = 'scan';
+    else if (st.trash && st.trash.status == 'running') cancelKind = 'empty';
     var ls = s.last_scan;
 
     str += '<div style="border:' + (running ? '2px solid #2b6cb0' : '1px solid #ddd') + '; border-radius:6px; padding:10px 14px; margin-bottom:10px; background:' + (running ? '#ebf4ff' : '#fff') + '; display:flex; flex-wrap:wrap; gap:10px 14px">';
@@ -604,11 +616,11 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
     str += '<div>' + (CARD_TYPE_ICONS[s.type] ? smIcon(CARD_TYPE_ICONS[s.type], null, 18) : '') + (CARD_TYPE_LABELS[s.type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + CARD_TYPE_LABELS[s.type] + '</span>' : '') + '<strong style="font-size:16px">' + s.title + '</strong>';
     if (hl) {
       var stageTxt = periodicCurrent.stage == 'vfs' ? '새로고침 중' : '스캔 중';
-      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">주기적 스캔 진행 중 · ' + stageTxt + '</span>';
+      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">주기적 스캔 · ' + stageTxt + '</span>';
     }
     if (hlTrash) {
       var trashStageTxt = {'refresh': '새로고침 중', 'scan': '스캔 중', 'empty': '비우는 중'}[trashCurrent.stage] || '진행 중';
-      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">휴지통 스캔 진행 중 · ' + trashStageTxt + '</span>';
+      str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">휴지통 스캔 · ' + trashStageTxt + '</span>';
     }
     str += '</div>';
     var stateHtml0 = stateLineHtml(st);
@@ -654,11 +666,13 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
     str += '<div style="display:grid; grid-template-columns:minmax(0,1fr) 46px 46px; gap:6px; align-items:stretch; align-self:center; flex:1 1 340px; min-width:0; max-width:100%">';
     str += '<div style="display:grid; grid-template-columns:1fr 1.2fr; gap:6px">';
     str += '<button type="button" class="btn btn-outline-primary status-act" data-key="' + s.key + '" data-act="vfs_refresh"' + (running ? ' disabled' : '') + '>새로고침</button>';
-    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? (s.db_stats.main_count != null ? s.db_stats.main_count : s.db_stats.albums) : '') + '" data-mainlabel="' + (s.db_stats ? (s.db_stats.main_label || '') : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : s.db_stats.no_code) : '') + '" data-folder="' + (s.db_stats && s.db_stats.is_folder ? '1' : '') + '"' + (running ? ' disabled' : '') + '>메타 새로고침</button>';
+    str += '<button type="button" class="btn btn-outline-info status-act" data-key="' + s.key + '" data-act="meta_refresh" data-albums="' + (s.db_stats ? (s.db_stats.main_count != null ? s.db_stats.main_count : (s.db_stats.albums != null ? s.db_stats.albums : '')) : '') + '" data-mainlabel="' + (s.db_stats ? (s.db_stats.main_label || '') : '') + '" data-nocode="' + (s.db_stats ? (s.db_stats.no_meta != null ? s.db_stats.no_meta : (s.db_stats.no_code != null ? s.db_stats.no_code : '')) : '') + '" data-folder="' + (s.db_stats && s.db_stats.is_folder ? '1' : '') + '"' + ((running || window.__dbRelayOff) ? ' disabled' : '') + (window.__dbRelayOff ? ' title="Relay의 데이터베이스 연결이 필요합니다"' : '') + '>메타 새로고침</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="scan"' + (running ? ' disabled' : '') + '>스캔</button>';
     str += '<button type="button" class="btn btn-outline-success status-act" data-key="' + s.key + '" data-act="vfs_scan" style="white-space:nowrap"' + (running ? ' disabled' : '') + '>새로고침 후 스캔</button>';
     str += '</div>';
-    str += '<button type="button" class="btn btn-outline-danger status-act status-side" data-key="' + s.key + '" data-act="cancel" style="display:flex; align-items:center; justify-content:center"' + (running ? '' : ' disabled') + '>취소</button>';
+    var cancelPendingThis = cancelPending && String(cancelPending.key) === String(s.key);
+    var cancelDisabled = !running || cancelKind === 'empty' || !!cancelPendingThis;
+    str += '<button type="button" class="btn btn-outline-danger status-act status-side" data-key="' + s.key + '" data-act="cancel" data-kind="' + (cancelKind || '') + '" data-title="' + s.title + '" style="display:flex; align-items:center; justify-content:center"' + (cancelDisabled ? ' disabled' : '') + (cancelKind === 'empty' ? ' title="비우기 중에는 취소할 수 없습니다."' : '') + '>' + (cancelPendingThis ? '취소중' : '취소') + '</button>';
     str += '<button type="button" class="btn btn-outline-danger status-act status-side" data-key="' + s.key + '" data-act="trash_empty" data-title="' + s.title + '" data-trash="' + (s.db_stats ? (s.db_stats.trash || 0) : 0) + '" style="display:flex; align-items:center; justify-content:center; text-align:center; line-height:1.35"' + ((running || !(s.db_stats && s.db_stats.trash > 0)) ? ' disabled' : '') + '>휴지통</button>';
     str += '</div>';
     str += '</div>';
@@ -710,7 +724,7 @@ var listLoadingActive = false;
 function statusStepText(p) {
   if (p < 15) return '휴지통 개수 읽는 중';
   if (p < 80) return '라이브러리 정보 읽는 중';
-  if (p < 90) return '전체 통계 묶는 중';
+  if (p < 90) return '전체 통계 모으는 중';
   return '결과 저장 중';
 }
 function paintProgress() {
@@ -843,8 +857,10 @@ function openMetaChoice(btn) {
   var nocode = btn.attr('data-nocode');
   var ml = btn.attr('data-mainlabel') || '미디어';
   var nocodeName = (btn.attr('data-folder') ? '표지 없는 ' : '메타 없는 ') + ml + '만';
-  $('#meta_all_label').text(total ? '전체 ' + ml + ' ' + Number(total).toLocaleString() + '개' : '전체 ' + ml);
-  $('#meta_nocode_label').text(nocode ? nocodeName + ' ' + Number(nocode).toLocaleString() + '개' : nocodeName);
+  var totalNum = Number(total);
+  var nocodeNum = Number(nocode);
+  $('#meta_all_label').text(total && !isNaN(totalNum) ? '전체 ' + ml + ' ' + totalNum.toLocaleString() + '개' : '전체 ' + ml);
+  $('#meta_nocode_label').text(nocode && !isNaN(nocodeNum) ? nocodeName + ' ' + nocodeNum.toLocaleString() + '개' : nocodeName);
   $('#meta_nocode_btn').prop('disabled', nocode === '0');
   $('#meta_choice_modal').show();
 }
@@ -859,8 +875,8 @@ function openScanConfirm(btn) {
   scanConfirmAct = btn.data('act');
   $('#scan_confirm_title').text(btn.text());
   $('#scan_confirm_body').text(scanConfirmAct == 'vfs_scan'
-    ? '새로고침 후 스캔을 누르면, 새로고침은 취소가 가능하나 스캔으로 넘어가면 취소는 웹에서 해야합니다.'
-    : '취소는 웹에서 해야 합니다.');
+    ? '새로고침이 끝나면 스캔이 자동으로 시작됩니다. 새로고침과 스캔 모두 취소 버튼으로 취소할 수 있습니다.'
+    : '스캔이 시작되면 취소 버튼으로 shyni 스캔까지 함께 취소할 수 있습니다.');
   $('#scan_confirm_modal').show();
 }
 function closeScanConfirm() {
@@ -956,6 +972,75 @@ function runMetaChoice(scope) {
   });
 }
 
+// 대시보드 취소 (Step5-1) — 확인 문구 "XXX 작업이 취소됩니다.",
+// 버튼 전이 취소 → 취소중(비활성화) → "작업이 취소되었습니다" → 취소(활성화)
+var CANCEL_KIND_LABELS = {'periodic': '주기적 스캔', 'trash': '휴지통 스캔', 'scan': '스캔', 'vfs': '새로고침', 'meta': '메타 새로고침'};
+var cancelPending = null;
+var cancelPollTimer = null;
+function requestDashboardCancel(btn) {
+  var key = btn.data('key');
+  var kind = btn.data('kind') || '';
+  var label = CANCEL_KIND_LABELS[kind] || '작업';
+  var title = btn.data('title') || '';
+  if (!confirm((title ? title + ' ' : '') + label + ' 작업이 취소됩니다.')) return;
+  btn.text('취소중').prop('disabled', true);
+  cancelPending = {key: key, at: Date.now()};
+  $.ajax({
+    global: false,
+    type: 'POST',
+    url: API_BASE + 'cancel',
+    data: {key: key},
+    success: function (ret) {
+      if (ret.ret == 'success' && ret.cancelled) {
+        cancelPending = null;
+        showMsg({ret: 'success', msg: '작업이 취소되었습니다.'});
+      } else if (ret.ret == 'success') {
+        // 아직 확인 중 — 목록 폴링(checkCancelPending)이 확인되면 알린다
+        showMsg(ret);
+      } else {
+        cancelPending = null;
+        showMsg(ret);
+      }
+      load_list(false, true);
+    },
+    error: function () {
+      cancelPending = null;
+      showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'});
+      load_list(false, true);
+    }
+  });
+}
+function checkCancelPending(data, periodicCurrent, trashCurrent) {
+  if (!cancelPending) return;
+  if (cancelPollTimer) { clearTimeout(cancelPollTimer); cancelPollTimer = null; }
+  if (Date.now() - cancelPending.at > 180000) {
+    // 3분이 지나도 확인이 안 되면 대기만 푼다 (작업 자체는 서버에서 진행 중일 수 있다)
+    cancelPending = null;
+    load_list(false, true);
+    return;
+  }
+  var key = String(cancelPending.key);
+  var stillRunning = false;
+  (data || []).forEach(function (s) {
+    if (String(s.key) !== key) return;
+    var st = s.state || {};
+    if ((st.vfs && st.vfs.status == 'running') ||
+        (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) ||
+        (st.meta && st.meta.status == 'running') ||
+        (st.trash && st.trash.status == 'running')) stillRunning = true;
+  });
+  if (periodicCurrent && String(periodicCurrent.section_key) === key) stillRunning = true;
+  if (trashCurrent && String(trashCurrent.section_key) === key) stillRunning = true;
+  if (!stillRunning) {
+    cancelPending = null;
+    showMsg({ret: 'success', msg: '작업이 취소되었습니다.'});
+    load_list(false, true);
+  } else {
+    // 하이라이트만 있는 경우(주기적·휴지통)는 상태 폴링이 안 돌므로 여기서 20초마다 다시 확인한다
+    cancelPollTimer = setTimeout(function () { load_list(false, true); }, 20000);
+  }
+}
+
 var statePollTimer = null;
 function scheduleStatePoll(data) {
   // 진행 중인 작업이 있으면 20초마다 조용히 상태를 다시 확인한다 (끝나면 자동으로 멈춘다)
@@ -1021,6 +1106,7 @@ function load_list(force, quiet) {
         $('#server_head_div, #lib_head_div, #status_foot_comment, #status_btn_guide').show();
         window.__dbLoading = !!ret.db_loading;
         window.__dbFailed = !!ret.db_stats_failed;
+        window.__dbRelayOff = !!ret.db_relay_off;
         if (ret.db_stats_on) {
           setStatusFoot(footTextForDb(ret.db_relay_off, ret.db_stats_failed, ret.db_stats_at), !!ret.db_stats_failed);
         } else if (ret.db_stats_failed) {
@@ -1034,6 +1120,7 @@ function load_list(force, quiet) {
         render(ret.data, ret.log_files, ret.periodic_current, ret.trash_current);
         markInfoUpdated();
         scheduleStatePoll(ret.data);
+        checkCancelPending(ret.data, ret.periodic_current, ret.trash_current);
         if (quiet) {
           // 상태 확인용 조용한 폴링: 진척 바는 건드리지 않는다.
           // 단, 목록 재구축 폴링 중이면 끝났는지 보고 끝났으면 멈춘다.
@@ -1126,6 +1213,10 @@ $(document).ready(function () {
       openTrashConfirm(btn);
       return;
     }
+    if (btn.data('act') == 'cancel') {
+      requestDashboardCancel(btn);
+      return;
+    }
     btn.prop('disabled', true);
     $.ajax({
       global: false,
@@ -1135,6 +1226,13 @@ $(document).ready(function () {
       success: function (ret) { showMsg(ret); load_list(false, true); },
       error: function () { showMsg({ret: 'fail', msg: '요청에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); load_list(false, true); }
     });
+  });
+  $('#meta_detail_btn').on('click', function () {
+    // Step5-2 메타 메뉴로 이동 (최상위 메타 메뉴, 첫 화면 list)
+    var key = metaChoiceKey;
+    closeMetaChoice();
+    if (key === null || key === undefined) return;
+    location.href = '/' + location.pathname.split('/')[1] + '/meta/list?key=' + key;
   });
   $('#meta_all_btn').on('click', function () { runMetaChoice('all'); });
   $('#meta_nocode_btn').on('click', function () { runMetaChoice('nocode'); });

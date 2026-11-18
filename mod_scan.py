@@ -405,3 +405,15 @@ class ModuleScan(PluginModuleBase):
         super().setting_save_after(changes)
         for page in self.page_list:
             page.setting_save_after(changes)
+        # Step5-1 — Shyni 연동 사용을 끄면 준비중 항목을 바로 보류로 만든다.
+        # 파일체크 주기가 돌아 보류로 확정하기 전에도, 끄는 즉시 목록이
+        # 보류로 정리되게 하기 위해서다. 다시 켜도 자동 처리되지 않고
+        # 스캔 목록에서 보류를 해제해야 처리가 시작된다.
+        if 'scan_shyni_use' in (changes or []):
+            try:
+                if not P.ModelSetting.get_bool('scan_shyni_use'):
+                    held = ModelScanItem.hold_all_ready()
+                    if held:
+                        logger.info(f'[Scan] Shyni 연동 꺼짐 — 준비중 {held}개를 보류로 만들었습니다.')
+            except Exception as e:
+                logger.warning(f'[Scan] 연동 꺼짐 보류 전환 실패: {e}')

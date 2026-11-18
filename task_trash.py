@@ -7,7 +7,8 @@ import requests
 
 from .setup import *
 from .shyni_backend import ShyniBackend
-from .task_periodic import (WAIT_TIMEOUT_SEC, _extract_job_id,
+from .task_periodic import (CANCEL_RESULT_MESSAGE, WAIT_TIMEOUT_SEC,
+                            _cancel_shyni_scan, _extract_job_id,
                             _record_scan_progress, _scan_poll_outcome,
                             _stat_int, _write_status,
                             apply_scan_result, scan_summary_text)
@@ -23,8 +24,12 @@ TRASH_CANCEL_KEY = 'trash_cancel'
 TRASH_MAX_WAIT_KEY = 'trash_max_wait_min'
 # 대기 확인 간격(초) — 앞선 작업이 끝났는지 확인하는 주기.
 WAIT_POLL_SEC = 10
-# 기본 최대 대기 시간(분) — 설정이 없거나 읽지 못하면 이 값을 쓴다.
+# 기본 작업 대기 시간(분) — 설정이 없거나 읽지 못하면 이 값을 쓴다.
 DEFAULT_MAX_WAIT_MIN = 360
+# VFS 새로고침 제한 시간 설정 키(분) — 폴더 새로고침이 끝나기를
+# 이 시간까지 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
+TRASH_VFS_TIMEOUT_KEY = 'trash_vfs_timeout_min'
+DEFAULT_VFS_TIMEOUT_MIN = 360
 # 가장 최근 시작 실패 — 작업 관리 배너가 읽는다 (주기적 스캔과 같은 구조).
 TRASH_START_ERROR_KEY = 'trash_last_start_error'
 # 시작 실패 기록 보관 기한(초) — 이보다 오래된 오류는 배너에 띄우지 않는다.
@@ -203,7 +208,7 @@ def update_trash_current_job_idx(new_idx):
 
 
 def _max_wait_min():
-    """최대 대기 시간(분) — 설정값, 없거나 숫자가 아니면 기본 360분.
+    """작업 대기 시간(분) — 설정값, 없거나 숫자가 아니면 기본 360분.
     음수는 기본값으로 취급한다. 0이면 기다리지 않는다."""
     try:
         val = P.ModelSetting.get_int(TRASH_MAX_WAIT_KEY)
@@ -212,6 +217,18 @@ def _max_wait_min():
     if val is None or val < 0:
         return DEFAULT_MAX_WAIT_MIN
     return val
+
+
+def _vfs_timeout_sec():
+    """VFS 새로고침 제한 시간(초) — 설정값(분)을 초로 바꾼다.
+    없거나 숫자가 아니거나 0 이하면 기본 360분으로 동작한다."""
+    try:
+        val = P.ModelSetting.get_int(TRASH_VFS_TIMEOUT_KEY)
+    except Exception:
+        val = None
+    if val is None or val <= 0:
+        return DEFAULT_VFS_TIMEOUT_MIN * 60
+    return val * 60
 
 
 def _fmt_wait(sec):
@@ -287,7 +304,7 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
     (대기 행 id 또는 None, 기다린 초 또는 None)을 돌려준다.
     바로 시작하면 (None, 0), 기다렸다 시작하면 (행 id, 기다린 초),
     기다리다 시간 초과하면 (None, None) — 이 때는 실패 행을 남긴다.
-    최대 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
+    작업 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
     그 이름, 여러 개면 '전체'."""
     from .model_trash import ModelTrashItem
@@ -330,8 +347,8 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
                 logger.warning(f'[휴지통 스캔] 대기 행 시작 기록 실패: {e}')
             return (row_id, waited)
     _finish_job_row(row_id, 'failed',
-                    f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (최대 대기 {_fmt_wait(max_min * 60)})')
-    logger.warning(f'[휴지통 스캔] {name}: 최대 대기 시간 초과로 시작하지 않습니다.')
+                    f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (작업 대기 {_fmt_wait(max_min * 60)})')
+    logger.warning(f'[휴지통 스캔] {name}: 작업 대기 시간 초과로 시작하지 않습니다.')
     return (None, None)
 
 
@@ -404,10 +421,13 @@ def _now_text():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def _wait_vfs(addr, jobid, timeout=WAIT_TIMEOUT_SEC):
+def _wait_vfs(addr, jobid, timeout=None):
     """rclone VFS 새로고침 job 완료를 기다린다.
     {'result': done|failed|cancelled, 'duration': 초}를 돌려준다.
-    기한은 다른 대기(6시간)와 맞췄다 (R18)."""
+    기한은 설정(휴지통 VFS 새로고침 제한 시간, 기본 360분)에서 읽는다.
+    timeout을 직접 주면 그 값(초)을 쓴다."""
+    if timeout is None:
+        timeout = _vfs_timeout_sec()
     t0 = time.time()
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -437,18 +457,37 @@ def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_S
               section_key=None):
     """shyni job 완료를 기다린다 (스캔·비우기 공통).
     {'result': done|failed|cancelled|not_found, 'job': job 응답 또는 None,
-     'duration': 초}를 돌려준다. job 조회에서 404를 받으면 즉시 실패로
-    끝낸다 (W3). 폴링 중 일시적 오류는 재시도하고 연속 3회 실패 시에만
-    실패로 확정한다. section_key가 있으면 60초마다 스캔 진행률을 현황에
-    기록한다 (스캔 job만 — 비우기 job은 section_key를 넘기지 않는다)."""
+     'duration': 초, 'cancel_message': 취소 시 이력 문구(있을 때만)}를
+    돌려준다. job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3). 폴링 중
+    일시적 오류는 재시도하고 연속 3회 실패 시에만 실패로 확정한다.
+    section_key가 있으면 60초마다 스캔 진행률을 현황에 기록한다 (스캔
+    job만 — 비우기 job은 section_key를 넘기지 않는다). 스캔 job은 취소
+    요청이 오면 shyni 스캔도 함께 취소하고 확인한다 (Step5-1). 비우기
+    job은 취소할 수 없어 플래그가 있어도 끝까지 기다린다 — 플래그는
+    남아 있어 비우기가 끝난 뒤 다음 라이브러리는 멈춘다."""
     t0 = time.time()
     deadline = time.time() + timeout
     fail_count = 0
     poll_count = 0
     while time.time() < deadline:
-        if _trash_cancel_requested():
+        if section_key is not None and _trash_cancel_requested():
+            # 스캔 job — shyni 스캔도 함께 취소하고 확인한다 (Step5-1).
+            cres = _cancel_shyni_scan(url, token, job_id, section_key)
+            cjob = cres.get('job') or {}
+            if cres['reason'] == 'already_done' or (
+                    cres['reason'] == 'finished_first'
+                    and cjob.get('status') == 'completed'):
+                return {'result': 'done', 'job': cjob,
+                        'duration': int(time.time() - t0)}
+            if cres['reason'] == 'already_failed' or (
+                    cres['reason'] == 'finished_first'
+                    and cjob.get('status') == 'failed'):
+                return {'result': 'failed', 'job': cjob,
+                        'duration': int(time.time() - t0)}
             return {'result': 'cancelled', 'job': None,
-                    'duration': int(time.time() - t0)}
+                    'duration': int(time.time() - t0),
+                    'cancel_message': CANCEL_RESULT_MESSAGE.get(
+                        cres['reason'], '취소 요청으로 중단했습니다.')}
         try:
             res = requests.get(f'{url}/compat/jobs/{job_id}',
                                headers={'X-Plex-Token': token,
@@ -477,6 +516,10 @@ def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_S
         if outcome == 'failed':
             return {'result': 'failed', 'job': job,
                     'duration': int(time.time() - t0)}
+        if outcome == 'cancelled':
+            return {'result': 'cancelled', 'job': job,
+                    'duration': int(time.time() - t0),
+                    'cancel_message': '스캔이 취소됐습니다.'}
         if res.status_code != 200:
             fail_count += 1
             if fail_count >= POLL_FAIL_MAX:
@@ -952,7 +995,8 @@ class TaskTrash:
                                     scan_entry['summary'] = summary
                                 _write_status(key, 'scan', scan_entry, label='휴지통 스캔')
                                 if w['result'] == 'cancelled':
-                                    status, message = 'cancelled', '취소 요청으로 중단했습니다.'
+                                    status, message = 'cancelled', w.get(
+                                        'cancel_message') or '취소 요청으로 중단했습니다.'
                                     break
                                 if w['result'] != 'done':
                                     scan_failed_folders += 1

@@ -341,6 +341,26 @@ class ModelScanItem(ModelBase):
             return len(rows)
 
     @classmethod
+    def hold_all_ready(cls):
+        """준비 중인 항목을 전부 보류로 만들고 개수를 돌려준다 (Step5-1).
+
+        Shyni 연동 사용을 끌 때 쓴다 — 파일체크 주기가 돌아 보류로
+        확정하기 전에, 이미 올라온 준비중 항목을 바로 보류로 만든다.
+        이미 shyni로 보낸 항목(shyni_status 있음)과 리셋한 항목은
+        건드리지 않는다 (파일체크의 보류 확정과 같은 기준).
+        """
+        with F.app.app_context():
+            rows = db.session.query(cls).filter(
+                cls.status == 'READY',
+                or_(cls.held.is_(None), cls.held.is_(False)),
+                or_(cls.reset_done.is_(None), cls.reset_done.is_(False)),
+                cls.shyni_status.is_(None)).all()
+            for item in rows:
+                item.held = True
+                item.save()
+            return len(rows)
+
+    @classmethod
     def summary_counts(cls):
         """스캔 진행현황 한 줄용 집계 — 목록 필터(표시 상태)와 같은 기준으로 센다.
 

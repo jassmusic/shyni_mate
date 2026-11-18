@@ -21,6 +21,12 @@ logger = P.logger
 # 라이브러리 선택 목록 정렬 — 주기적 스캔·휴지통 스캔이 같은 설정을 쓴다.
 PICK_SORTS = ('default_asc', 'default_desc', 'name_asc', 'name_desc')
 PICK_SORT_KEY = 'jobs_lib_pick_sort'
+# 휴지통 조회 페이지 라이브러리 선택 팝업 정렬 (jobs 페이지와 별개)
+TRASH_PICK_SORTS = ('default', 'name', 'trash_desc')
+TRASH_PICK_SORT_KEY = 'trash_lib_pick_sort'
+# 휴지통 조회 페이지 전체 현황 정렬 (선택 팝업과 별개, 기본은 휴지통 수 내림차순)
+TRASH_OVERVIEW_SORTS = ('default', 'name', 'trash_desc')
+TRASH_OVERVIEW_SORT_KEY = 'trash_overview_sort'
 
 
 def _parse_empty_stats(data):
@@ -74,9 +80,18 @@ class ModuleTrash(PluginModuleBase):
             # 진행 중 표시 정리 시간(분) — 진행 상태를 확인할 방법이 없을 때
             # 이 시간이 지나면 '중단됨'으로 정리한다. 0이면 끈다 (기본값 30)
             f'{self.name}_stuck_timeout_min': '30',
-            # 최대 대기 시간(분) — 앞선 작업이 돌고 있을 때 이 시간까지
+            # VFS 새로고침 제한 시간(분) — 폴더 새로고침이 끝나기를
+            # 이 시간까지 기다린다. 넘기면 그 폴더는 실패로 끝나고
+            # 스캔·비우기에서 빠진다. 0 이하면 기본값으로 동작한다 (기본값 360)
+            f'{self.name}_vfs_timeout_min': '360',
+            # 작업 대기 시간(분) — 앞선 작업이 돌고 있을 때 이 시간까지
             # 기다렸다가 끝나면 이어서 실행한다. 0이면 기다리지 않는다 (기본값 360)
             f'{self.name}_max_wait_min': '360',
+            # 휴지통 조회 페이지 라이브러리 선택 팝업 정렬
+            # (jobs 페이지의 jobs_lib_pick_sort와 별개 키다)
+            f'{self.name}_lib_pick_sort': 'default',
+            # 휴지통 조회 페이지 전체 현황 정렬 (기본은 휴지통 수 내림차순)
+            f'{self.name}_overview_sort': 'trash_desc',
         }
         self.web_list_model = ModelTrashItem
 
@@ -247,8 +262,16 @@ class ModuleTrash(PluginModuleBase):
                     from .task_status import read_trash_cache
                     counts_cache = read_trash_cache() or {}
                     arg['trash_counts_init'] = counts_cache.get('data') or {}
+                    arg['trash_counts_at'] = counts_cache.get('at') or 0
                 except Exception:
                     arg['trash_counts_init'] = {}
+                    arg['trash_counts_at'] = 0
+                # 휴지통 조회 페이지 선택 팝업 정렬 (기본/이름/휴지통 수 내림차순)
+                sort = P.ModelSetting.get('trash_lib_pick_sort') or 'default'
+                arg['trash_lib_pick_sort'] = sort if sort in TRASH_PICK_SORTS else 'default'
+                # 전체 현황 정렬 (기본/이름/휴지통 수 내림차순 — 기본은 휴지통 수 내림차순)
+                sort = P.ModelSetting.get('trash_overview_sort') or 'trash_desc'
+                arg['trash_overview_sort'] = sort if sort in TRASH_OVERVIEW_SORTS else 'trash_desc'
             return render_template(f'{P.package_name}_{self.name}_{sub}.html', arg=arg)
         except Exception as e:
             logger.error(f'Exception:{str(e)}')
@@ -346,11 +369,21 @@ class ModuleTrash(PluginModuleBase):
             else:
                 ret['msg'] = '실행을 시작했습니다. 잠시 뒤 워커가 작업을 시작합니다.'
         elif command == 'cancel_current':
-            if get_trash_current() is None:
+            cur = get_trash_current()
+            if cur is None:
                 return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 휴지통 스캔이 없습니다.'})
             request_trash_cancel()
             logger.info('[Trash] 취소 요청')
-            ret['msg'] = '취소를 요청했습니다. 진행 중인 단계가 정리되면 멈춥니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'
+            # Step5-1 — shyni 스캔까지 함께 취소하므로 "웹에서 취소" 안내는 없앴다.
+            # 비우기 중에는 버튼이 막혀 있지만, 들어온 요청은 비우기를
+            # 끝까지 진행하고 남은 라이브러리를 멈추는 것으로 처리한다.
+            stage = (cur.get('stage') or '')
+            if stage == 'scan':
+                ret['msg'] = '취소를 요청했습니다. shyni 스캔 취소가 확인되면 멈춥니다.'
+            elif stage == 'empty':
+                ret['msg'] = '비우기는 끝까지 진행되고, 남은 라이브러리는 멈춥니다.'
+            else:
+                ret['msg'] = '취소를 요청했습니다. 새로고침이 정리되면 멈춥니다.'
         elif command == 'trash_counts':
             from . import shyni_admin, db_support
             if not shyni_admin.admin_available() and not db_support.db_ready():
@@ -358,8 +391,10 @@ class ModuleTrash(PluginModuleBase):
             try:
                 # 현황·건강도와 같은 개수 캐시를 쓴다 — 라이브러리 선택
                 # 팝업을 열 때마다 무거운 전체 읽기를 돌리지 않기 위해서다
-                from .task_status import trash_counts_for_stats
+                from .task_status import trash_counts_for_stats, read_trash_cache
                 ret['data'] = trash_counts_for_stats()
+                # 현황의 '기준' 시각 표시용 — 개수 캐시의 저장 시각
+                ret['at'] = (read_trash_cache() or {}).get('at') or 0
             except Exception as e:
                 return jsonify({'ret': 'fail', 'msg': f'휴지통 수를 읽지 못했습니다: {e}'})
         elif command == 'trash_refresh_hours':
@@ -724,6 +759,20 @@ class ModuleTrash(PluginModuleBase):
             if sort not in PICK_SORTS:
                 return jsonify({'ret': 'fail', 'msg': '정렬 조건이 올바르지 않습니다.'})
             P.ModelSetting.set(PICK_SORT_KEY, sort)
+            return jsonify({'ret': 'success'})
+        if sub == 'lib_pick_sort':
+            # 휴지통 조회 페이지 선택 팝업 정렬 — jobs 페이지의 pick_sort와 별개 키
+            sort = (req.form.get('sort') or '').strip()
+            if sort not in TRASH_PICK_SORTS:
+                return jsonify({'ret': 'fail', 'msg': '정렬 조건이 올바르지 않습니다.'})
+            P.ModelSetting.set(TRASH_PICK_SORT_KEY, sort)
+            return jsonify({'ret': 'success'})
+        if sub == 'overview_sort':
+            # 전체 현황 정렬 — 선택 팝업의 lib_pick_sort와 별개 키
+            sort = (req.form.get('sort') or '').strip()
+            if sort not in TRASH_OVERVIEW_SORTS:
+                return jsonify({'ret': 'fail', 'msg': '정렬 조건이 올바르지 않습니다.'})
+            P.ModelSetting.set(TRASH_OVERVIEW_SORT_KEY, sort)
             return jsonify({'ret': 'success'})
         if sub == 'history':
             try:

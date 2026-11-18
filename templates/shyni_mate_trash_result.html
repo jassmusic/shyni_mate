@@ -19,10 +19,10 @@
 </div>
 
 <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:10px 0">
-  <select id="histLibSel" class="form-control input-sm" style="flex:1 1 130px">
+  <select id="histLibSel" class="form-control input-sm" style="flex:1 1 130px; height:31px; padding:3px 8px; font-size:14px">
     <option value="">전체 라이브러리</option>
   </select>
-  <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·동작·파일 경로 검색" style="flex:1 1 160px">
+  <input type="text" id="histSearch" class="form-control input-sm" placeholder="작업명·라이브러리·동작·파일 경로 검색" style="flex:1 1 160px; height:31px; padding:3px 8px; font-size:14px">
   <button type="button" class="btn btn-sm btn-outline-primary" id="histSearchBtn">검색</button>
   <button type="button" class="btn btn-sm btn-outline-primary" id="histResetBtn">초기화</button>
   <span style="margin-left:auto">
@@ -146,7 +146,7 @@ function currentSignature(cur) {
 
 function renderCurrent(cur) {
   if (!cur) {
-    $('#trash_current_div').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 휴지통 스캔이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
+    $('#trash_current_div').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 휴지통 스캔이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
     return;
   }
   var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">';
@@ -219,9 +219,9 @@ function renderHistory(data) {
   str += '</tbody></table>';
   str += '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px">';
   str += '<span style="color:#888">전체 ' + data.count + '개</span>';
-  str += '<span><button type="button" class="btn btn-xs btn-outline-primary" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
+  str += '<span><button type="button" class="btn btn-sm btn-outline-primary" id="histPrevBtn"' + (data.page <= 1 ? ' disabled' : '') + '>이전</button> ';
   str += data.page + ' / ' + data.pages + ' 페이지 ';
-  str += '<button type="button" class="btn btn-xs btn-outline-primary" id="histNextBtn"' + (data.page >= data.pages ? ' disabled' : '') + '>다음</button></span></div>';
+  str += '<button type="button" class="btn btn-sm btn-outline-primary" id="histNextBtn"' + (data.page >= data.pages ? ' disabled' : '') + '>다음</button></span></div>';
   $('#trash_history_div').html(str);
   $('#histPrevBtn').click(function () { loadHistory(histPage - 1); });
   $('#histNextBtn').click(function () { loadHistory(histPage + 1); });

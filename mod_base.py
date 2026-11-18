@@ -40,6 +40,8 @@ class ModuleBase(PluginModuleBase):
             # 함정이 된다.
             # 현황·건강도 — 휴지통 개수 자동 갱신 주기 (시간). 0이면 통계 때마다 읽는다
             f'{self.name}_trash_counts_refresh_hours' : '12',
+            # 메타 — 메타 목록 자동 갱신 주기 (시간). 0이면 열 때마다 새로 조회한다
+            f'{self.name}_meta_refresh_hours' : '12',
         }
         # 매뉴얼 페이지: /shyni_mate/manual_toc — 소개 매뉴얼을 FF 안에서
         # 템플릿으로 보여준다. 정적 라우트라 기본 라우트 /<sub>보다 우선 매칭된다.
@@ -95,6 +97,14 @@ class ModuleBase(PluginModuleBase):
                 arg['db_ok'] = db_ready()
             except Exception:
                 arg['db_ok'] = False
+        if sub == 'webhook':
+            # 웹훅 설정은 최상위 메뉴에서 설정 메뉴 안으로 이동했다.
+            # 수신 주소는 mod_webhook의 receive_url()을 그대로 재사용한다.
+            try:
+                from .mod_webhook import receive_url
+                arg['api_webhook'] = receive_url()
+            except Exception:
+                arg['api_webhook'] = ''
         try:
             return render_template(f'{P.package_name}_{self.name}_{sub}.html', arg=arg)
         except Exception as e:

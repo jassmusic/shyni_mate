@@ -6,6 +6,8 @@
 DB 조회 기능만 사용할 수 없는 상태가 된다.
 """
 import hashlib
+import os
+import re
 import subprocess
 import sys
 import threading
@@ -415,6 +417,208 @@ def count_filled(ids, kind):
                         f"WHERE id IN ({','.join(['%s'] * len(part))}) AND {cond}", part)
             total += cur.fetchone()[0]
         return total
+    finally:
+        conn.close()
+
+
+# 메타 상세 목록 행의 메타 유무 비트 — 행은 [id, title, parent_title, year, flags]
+# 형태의 배열로 저장한다 (작품 수가 8만 개를 넘는 라이브러리도 있어
+# 키 이름이 긴 dict보다 배열이 캐시를 훨씬 작게 만든다).
+META_FLAG_CODE = 1     # 코드(매칭 확정) 있음
+META_FLAG_SUMMARY = 2  # 소개 있음
+META_FLAG_YEAR = 4     # 연도 있음
+META_FLAG_THUMB = 8    # 표지 있음
+META_FLAG_ALL = 15
+
+# 디스크 폴더 표기(CD1·DISC 2 등) — shyni local_metadata의 _CD_DISC_DIR_RE와
+# 같은 규칙이다. 폴더명 전체가 디스크 표기일 때만 디스크 폴더로 본다.
+_CD_DISC_DIR_RE = re.compile(r'(?:CD|DISC)\s?(?P<disc>\d+)', re.IGNORECASE)
+
+
+def album_folder_from_track(track_path):
+    """트랙 경로 → 앨범 폴더 — shyni local_metadata.album_folder_from_track과
+    같은 규칙. 멀티디스크면 트랙은 <앨범>/CD1/... 에 있고 album.yaml은 그
+    상위 <앨범>/에 있으므로 CD/DISC 폴더면 한 단계 위로 올린다."""
+    if not track_path:
+        return None
+    d = os.path.dirname(track_path)
+    if _CD_DISC_DIR_RE.fullmatch((os.path.basename(d) or '').strip()):
+        d = os.path.dirname(d)
+    return d
+
+
+# 메타 상세 캐시 행 형식 버전 — 행에 폴더명이 추가되면서 2가 됐다.
+# 이전 형식(폴더명 없음) 캐시는 task_meta_view가 오래된 것으로 보고
+# 다시 계산한다.
+META_VIEW_FORMAT = 2
+
+
+def meta_compute(library_id, progress_cb=None):
+    """메타 상세 목록 계산 — 작품(main) 단위 전체 + 4가지 메타 유무.
+
+    워커에서 실행해 결과를 캐시에 저장한다 (휴지통 조회와 같은 방식).
+    건강도·메타 새로고침 팝업의 개수와 같은 기준이다: 작품 단위 전체를
+    세고 삭제 여부로는 걸러내지 않으며, 4가지 유무 판정도 library_stats와
+    같은 NULL 기준이다 (빈 문자열 코드는 있음으로 본다).
+
+    반환: {'v', 'lib_type', 'main_label', 'is_folder',
+           'summary': {total, missing_any, no_code, no_summary,
+                       no_year, no_thumb, no_meta},
+           'items': [[id, title, parent_title, year, flags, folder], ...]}
+    no_meta는 팝업의 '메타 없는 미디어'와 같은 값이다 — 폴더 라이브러리는
+    표지 없음 수, 아니면 코드 없음 수이다.
+    folder는 작품이 담긴 폴더 이름이다. metadata_items에 folder_path가
+    있는 작품(쇼·도서·영화)은 그 값을 쓰고, 없는 작품(음악)은
+    media_parts의 파일 경로에서 뽑는다 — 음악은 트랙→앨범으로 거슬러
+    올라가고, 멀티디스크(CD1 등)면 shyni와 같은 규칙으로 한 단계 위
+    폴더를 쓴다. 도서·쇼도 folder_path가 비어 있으면 parts에서 거슬러
+    올라가 구한다.
+    """
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT type, scanner_variant, ff_module_name '
+                    'FROM libraries WHERE id = %s', (int(library_id),))
+        row = cur.fetchone()
+        if not row:
+            raise Exception('라이브러리를 찾지 못했습니다.')
+        lib_type = row[0] or 'music'
+        agent = (row[2] or '').strip() or (row[1] or '')
+        is_folder = 'folder' in agent.lower()
+        info = TYPE_INFO.get(lib_type) or TYPE_INFO['music']
+        main_type = info['main']
+        if progress_cb:
+            progress_cb(10)
+        cur.execute("""
+            SELECT id, title, year, parent_id,
+                   metadata_code, yaml_code, summary, thumb_url, folder_path
+            FROM metadata_items
+            WHERE library_id = %s AND metadata_type = %s
+            ORDER BY id
+        """, (int(library_id), main_type))
+        rows = cur.fetchall()
+        if progress_cb:
+            progress_cb(45)
+        # 부모 제목(앨범의 아티스트 등) — 한 번에 모아서 읽는다
+        parent_ids = {int(r[3]) for r in rows if r[3]}
+        parents = {}
+        ids = list(parent_ids)
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            cur.execute('SELECT id, title FROM metadata_items '
+                        'WHERE id = ANY(%s)', (part,))
+            for pid, ptitle in cur.fetchall():
+                parents[int(pid)] = ptitle or ''
+        if progress_cb:
+            progress_cb(60)
+        # 작품별 폴더 이름 — folder_path가 있는 작품(쇼·도서)은 그 값을
+        # 쓰고, 없는 작품(음악·영화)은 media_parts에서 뽑는다.
+        folders = {}
+        if lib_type == 'music':
+            # 트랙(10)의 파일 경로에서 앨범(9) 폴더를 구한다
+            cur.execute("""
+                SELECT t.parent_id, MIN(mp.file_path)
+                FROM media_parts mp
+                JOIN metadata_items t ON t.id = mp.metadata_item_id
+                WHERE mp.library_id = %s AND t.metadata_type = 10
+                  AND t.parent_id IS NOT NULL AND mp.status = 'available'
+                GROUP BY t.parent_id
+            """, (int(library_id),))
+            for album_id, path in cur.fetchall():
+                f = album_folder_from_track(path)
+                if f:
+                    folders[int(album_id)] = os.path.basename(f) or f
+        elif lib_type == 'movie':
+            # 영화는 파일이 작품에 직접 달린다
+            cur.execute("""
+                SELECT mp.metadata_item_id, MIN(mp.file_path)
+                FROM media_parts mp
+                WHERE mp.library_id = %s AND mp.status = 'available'
+                GROUP BY mp.metadata_item_id
+            """, (int(library_id),))
+            for item_id, path in cur.fetchall():
+                d = os.path.dirname(path or '')
+                if d:
+                    folders[int(item_id)] = os.path.basename(d) or d
+        elif lib_type in ('tv', 'show'):
+            # 에피소드(4) → 시즌(3) → 쇼(2)로 두 단계 거슬러 올라간다
+            cur.execute("""
+                SELECT s.parent_id, MIN(mp.file_path)
+                FROM media_parts mp
+                JOIN metadata_items e ON e.id = mp.metadata_item_id
+                JOIN metadata_items s ON s.id = e.parent_id
+                WHERE mp.library_id = %s AND e.metadata_type = 4
+                  AND s.parent_id IS NOT NULL AND mp.status = 'available'
+                GROUP BY s.parent_id
+            """, (int(library_id),))
+            for show_id, path in cur.fetchall():
+                d = os.path.dirname(path or '')
+                if d:
+                    folders[int(show_id)] = os.path.basename(d) or d
+        elif lib_type == 'book':
+            # 책(102) → 시리즈(100)로 거슬러 올라간다. folder_path가
+            # 있는 시리즈는 컬럼 값을 먼저 쓴다.
+            cur.execute("""
+                SELECT b.parent_id, MIN(mp.file_path)
+                FROM media_parts mp
+                JOIN metadata_items b ON b.id = mp.metadata_item_id
+                WHERE mp.library_id = %s AND b.metadata_type = 102
+                  AND b.parent_id IS NOT NULL AND mp.status = 'available'
+                GROUP BY b.parent_id
+            """, (int(library_id),))
+            for series_id, path in cur.fetchall():
+                d = os.path.dirname(path or '')
+                if d:
+                    folders[int(series_id)] = os.path.basename(d) or d
+        if progress_cb:
+            progress_cb(70)
+        items = []
+        n_no_code = n_no_summary = n_no_year = n_no_thumb = n_missing = 0
+        total = len(rows)
+        for idx, r in enumerate(rows):
+            if progress_cb and idx % 5000 == 0:
+                progress_cb(70 + int(25 * idx / max(1, total)))
+            item_id = int(r[0])
+            # library_stats와 같은 NULL 기준 — 빈 문자열은 있음으로 본다
+            has_code = r[4] is not None or r[5] is not None
+            has_summary = r[6] is not None and r[6] != ''
+            has_year = r[2] is not None
+            has_thumb = r[7] is not None and r[7] != ''
+            flags = ((META_FLAG_CODE if has_code else 0)
+                     | (META_FLAG_SUMMARY if has_summary else 0)
+                     | (META_FLAG_YEAR if has_year else 0)
+                     | (META_FLAG_THUMB if has_thumb else 0))
+            if not has_code:
+                n_no_code += 1
+            if not has_summary:
+                n_no_summary += 1
+            if not has_year:
+                n_no_year += 1
+            if not has_thumb:
+                n_no_thumb += 1
+            if flags != META_FLAG_ALL:
+                n_missing += 1
+            parent_id = r[3]
+            # 폴더 이름 — 스캐너가 저장한 folder_path가 있으면 그 마지막
+            # 부분, 없으면 parts에서 뽑은 폴더 이름을 쓴다
+            stored = (r[8] or '').strip().rstrip('/')
+            folder = (os.path.basename(stored) if stored
+                      else folders.get(item_id, ''))
+            items.append([item_id, r[1] or '',
+                          parents.get(int(parent_id), '') if parent_id else '',
+                          r[2], flags, folder])
+        if progress_cb:
+            progress_cb(98)
+        return {
+            'v': META_VIEW_FORMAT,
+            'lib_type': lib_type,
+            'main_label': info['main_label'],
+            'is_folder': is_folder,
+            'summary': {'total': total, 'missing_any': n_missing,
+                        'no_code': n_no_code, 'no_summary': n_no_summary,
+                        'no_year': n_no_year, 'no_thumb': n_no_thumb,
+                        'no_meta': n_no_thumb if is_folder else n_no_code},
+            'items': items}
     finally:
         conn.close()
 

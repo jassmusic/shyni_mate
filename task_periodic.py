@@ -19,8 +19,12 @@ JOBS_KEY = 'periodic_jobs'
 MAX_WAIT_KEY = 'periodic_max_wait_min'
 # 대기 확인 간격(초) — 앞선 작업이 끝났는지 확인하는 주기.
 WAIT_POLL_SEC = 10
-# 기본 최대 대기 시간(분) — 설정이 없거나 읽지 못하면 이 값을 쓴다.
+# 기본 작업 대기 시간(분) — 설정이 없거나 읽지 못하면 이 값을 쓴다.
 DEFAULT_MAX_WAIT_MIN = 360
+# VFS 새로고침 제한 시간 설정 키(분) — 라이브러리 새로고침이 끝나기를
+# 이 시간까지 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
+VFS_TIMEOUT_KEY = 'periodic_vfs_timeout_min'
+DEFAULT_VFS_TIMEOUT_MIN = 360
 # 가장 최근 시작 실패 — 작업 관리 배너가 읽는다. '지금 실행'을 눌렀는데
 # 아무것도 시작되지 않은 경우(진행 중·목록 조회 실패 등)는 이력 행이
 # 생기기 전에 끝나므로, 로그에만 남던 사유를 여기에 남긴다.
@@ -30,9 +34,10 @@ START_ERROR_MAX_AGE_SEC = 3600
 
 STAGE_LABEL = {'vfs': 'VFS 새로고침', 'scan': '스캔'}
 
-# 대기 기한·폴링 실패 기준 (W7): 대시보드·휴지통과 같은 6시간 기한을 두고,
-# 폴링 중 일시적 오류(연결 끊김 등)는 재시도하며, 연속 3회 실패 시에만
-# 섹션을 실패로 확정한다.
+# 스캔 대기 기한·폴링 실패 기준 (W7): 스캔 완료를 기다리는 기한은
+# 6시간으로 두고, 폴링 중 일시적 오류(연결 끊김 등)는 재시도하며,
+# 연속 3회 실패 시에만 섹션을 실패로 확정한다.
+# (VFS 새로고침 기한은 설정 periodic_vfs_timeout_min에서 읽는다.)
 WAIT_TIMEOUT_SEC = 6 * 3600
 POLL_FAIL_MAX = 3
 VFS_POLL_SEC = 5
@@ -160,8 +165,10 @@ def _extract_job_id(res):
 
 def _scan_poll_outcome(status_code, job):
     """job 조회 1회 결과 판정 — 순수 함수(하니스 검증용).
-    ('done'|'failed'|'not_found'|'wait', 메시지)를 돌려준다.
-    404는 기록이 사라진 job이라 기다려 봤자 소용이 없어 즉시 실패다 (W3)."""
+    ('done'|'failed'|'cancelled'|'not_found'|'wait', 메시지)를 돌려준다.
+    404는 기록이 사라진 job이라 기다려 봤자 소용이 없어 즉시 실패다 (W3).
+    'cancelled'는 shyni에서 취소된 job이다 (Step5-1 관리자 API 취소·
+    shyni 웹 취소 둘 다 이 상태로 끝난다)."""
     if status_code == 404:
         return 'not_found', '스캔 작업 기록을 찾을 수 없습니다.'
     if status_code != 200:
@@ -171,7 +178,96 @@ def _scan_poll_outcome(status_code, job):
         return 'done', '스캔이 완료됐습니다.'
     if status == 'failed':
         return 'failed', f"스캔 실패: {(job or {}).get('error') or ''}"
+    if status == 'cancelled':
+        return 'cancelled', '스캔이 취소됐습니다.'
     return 'wait', ''
+
+
+# 스캔 취소 확인 기한(초) — DELETE 뒤 compat job이 'cancelled'가 될
+# 때까지 기다리는 시간. 분석 중 파일은 끝까지 기다리므로 수 초~수십 초
+# 걸릴 수 있다 (기준 문서 4절).
+CANCEL_CONFIRM_TIMEOUT_SEC = 120
+CANCEL_CONFIRM_POLL_SEC = 5
+
+# 취소 결과별 이력 메시지 (Step5-1). shyni 스캔까지 취소했는지,
+# 못 했으면 왜 못 했는지를 알려 준다.
+CANCEL_RESULT_MESSAGE = {
+    'confirmed': '취소했습니다. shyni 스캔도 함께 취소됐습니다.',
+    'already_cancelled': '스캔이 이미 취소됐습니다.',
+    'already_done': '스캔이 이미 완료됐습니다.',
+    'already_failed': '스캔이 이미 실패로 끝났습니다.',
+    'no_admin': '취소 요청으로 대기를 중단했습니다. 관리자 API가 설정돼 있지 않아 shyni 스캔은 취소하지 못했습니다. shyni 웹 화면에서 취소해 주세요.',
+    'api_failed': '취소 요청으로 대기를 중단했습니다. shyni 스캔 취소 요청에 실패했으니, shyni 웹 화면에서 취소됐는지 확인해 주세요.',
+    'finished_first': '취소 요청 뒤 스캔이 먼저 끝났습니다.',
+    'job_gone': '취소 요청으로 대기를 중단했습니다. 스캔 작업 기록을 찾을 수 없습니다.',
+    'timeout': '취소 요청으로 대기를 중단했습니다. shyni 스캔 취소가 기한 안에 확인되지 않았습니다. shyni 웹 화면에서 취소됐는지 확인해 주세요.',
+}
+
+
+def _fetch_compat_job(url, token, job_id):
+    """compat job 1회 조회. job dict / 'not_found' / None(조회 실패)."""
+    if not job_id:
+        return None
+    try:
+        res = requests.get(f'{url}/compat/jobs/{job_id}',
+                           headers={'X-Plex-Token': token, 'Accept': 'application/json'},
+                           timeout=15)
+    except Exception:
+        return None
+    if res.status_code == 404:
+        return 'not_found'
+    if res.status_code != 200:
+        return None
+    try:
+        return res.json()
+    except Exception:
+        return None
+
+
+def _cancel_shyni_scan(url, token, job_id, section_key):
+    """shyni 스캔 취소 요청 + compat job 'cancelled' 확인 (Step5-1).
+
+    DELETE /libraries/{id}/scan(관리자 API)으로 취소하고, compat job이
+    'cancelled'가 될 때까지 폴링한다. job이 이미 끝났으면 그 결과를
+    돌려주고, 관리자 API를 쓸 수 없으면 취소하지 못했음을 돌려준다.
+    휴지통 스캔(task_trash)도 같은 헬퍼를 쓴다.
+    {'cancelled': True|False, 'reason': 사유 코드, 'job': 마지막 job dict
+    또는 None}을 돌려준다. reason 코드는 CANCEL_RESULT_MESSAGE의 키다.
+    """
+    from . import shyni_admin
+    if not section_key or not shyni_admin.admin_available():
+        return {'cancelled': False, 'reason': 'no_admin', 'job': None}
+    # job이 이미 끝났는지 먼저 본다 — 끝난 스캔에 DELETE를 보내면
+    # 플래그만 남고 다음 스캔 시작 때 지워져 소실된다 (기준 문서 4절).
+    job = _fetch_compat_job(url, token, job_id)
+    if isinstance(job, dict):
+        st = job.get('status')
+        if st == 'cancelled':
+            return {'cancelled': True, 'reason': 'already_cancelled', 'job': job}
+        if st == 'completed':
+            return {'cancelled': False, 'reason': 'already_done', 'job': job}
+        if st == 'failed':
+            return {'cancelled': False, 'reason': 'already_failed', 'job': job}
+    res = shyni_admin.api_cancel_scan(section_key)
+    if res is None:
+        return {'cancelled': False, 'reason': 'api_failed', 'job': None}
+    if res.status_code != 404 and res.status_code >= 300:
+        logger.warning(f'[취소] shyni 스캔 취소 요청 실패: 응답 코드 {res.status_code}')
+        return {'cancelled': False, 'reason': 'api_failed', 'job': None}
+    # 404는 돌고 있는 스캔이 없다는 뜻 — job도 곧 끝날 것이니 확인만 한다.
+    deadline = time.time() + CANCEL_CONFIRM_TIMEOUT_SEC
+    while time.time() < deadline:
+        job = _fetch_compat_job(url, token, job_id)
+        if isinstance(job, dict):
+            st = job.get('status')
+            if st == 'cancelled':
+                return {'cancelled': True, 'reason': 'confirmed', 'job': job}
+            if st in ('completed', 'failed'):
+                return {'cancelled': False, 'reason': 'finished_first', 'job': job}
+        elif job == 'not_found':
+            return {'cancelled': False, 'reason': 'job_gone', 'job': None}
+        time.sleep(CANCEL_CONFIRM_POLL_SEC)
+    return {'cancelled': False, 'reason': 'timeout', 'job': None}
 
 
 def _periodic_skip_decision(trash_parse_ok, trash_section_key, status_busy, key):
@@ -374,7 +470,7 @@ def update_current_job_idx(new_idx):
 
 
 def _max_wait_min():
-    """최대 대기 시간(분) — 설정값, 없거나 숫자가 아니면 기본 360분.
+    """작업 대기 시간(분) — 설정값, 없거나 숫자가 아니면 기본 360분.
     음수는 기본값으로 취급한다. 0이면 기다리지 않는다."""
     try:
         val = P.ModelSetting.get_int(MAX_WAIT_KEY)
@@ -383,6 +479,18 @@ def _max_wait_min():
     if val is None or val < 0:
         return DEFAULT_MAX_WAIT_MIN
     return val
+
+
+def _vfs_timeout_sec():
+    """VFS 새로고침 제한 시간(초) — 설정값(분)을 초로 바꾼다.
+    없거나 숫자가 아니거나 0 이하면 기본 360분으로 동작한다."""
+    try:
+        val = P.ModelSetting.get_int(VFS_TIMEOUT_KEY)
+    except Exception:
+        val = None
+    if val is None or val <= 0:
+        return DEFAULT_VFS_TIMEOUT_MIN * 60
+    return val * 60
 
 
 def _fmt_wait(sec):
@@ -455,7 +563,7 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
     (대기 행 id 또는 None, 기다린 초 또는 None)을 돌려준다.
     바로 시작하면 (None, 0), 기다렸다 시작하면 (행 id, 기다린 초),
     기다리다 시간 초과하면 (None, None) — 이 때는 실패 행을 남긴다.
-    최대 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
+    작업 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
     그 이름, 여러 개면 '전체'."""
     if get_current() is None and _try_claim(idx, name, mode, job_started, None, section_label, action):
@@ -497,8 +605,8 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
                 logger.warning(f'[주기적 스캔] 대기 행 시작 기록 실패: {e}')
             return (row_id, waited)
     _finish_job_row(row_id, 'failed',
-                    f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (최대 대기 {_fmt_wait(max_min * 60)})')
-    logger.warning(f'[주기적 스캔] {name}: 최대 대기 시간 초과로 시작하지 않습니다.')
+                    f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (작업 대기 {_fmt_wait(max_min * 60)})')
+    logger.warning(f'[주기적 스캔] {name}: 작업 대기 시간 초과로 시작하지 않습니다.')
     return (None, None)
 
 
@@ -908,8 +1016,9 @@ class TaskPeriodic:
     def _do_vfs(sec, cur, on_job_id=None):
         """VFS 새로고침을 걸고 완료까지 기다린다.
         {'status': done|failed|cancelled, 'message', 'duration': 초,
-         'jobid': rclone job id}를 돌려준다. 6시간 기한이 있고, 폴링 중
-        일시적 오류는 재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7)."""
+         'jobid': rclone job id}를 돌려준다. 기한은 설정(VFS 새로고침
+        제한 시간, 기본 360분)에서 읽고, 폴링 중 일시적 오류는 재시도하며
+        연속 3회 실패 시에만 실패로 확정한다 (W7)."""
         t0 = time.time()
         addr, remote = ModuleStatus._rc_target(sec.get('path', ''))
         if not addr:
@@ -924,7 +1033,7 @@ class TaskPeriodic:
                 on_job_id(jobid)
             except Exception:
                 pass
-        deadline = time.time() + WAIT_TIMEOUT_SEC
+        deadline = time.time() + _vfs_timeout_sec()
         fail_count = 0
         while time.time() < deadline:
             if _cancel_requested():
@@ -1019,8 +1128,26 @@ class TaskPeriodic:
         poll_count = 0
         while time.time() < deadline:
             if _cancel_requested():
+                # Step5-1 — shyni 스캔도 함께 취소하고 확인한다.
+                # job이 이미 끝났으면 그 결과를 그대로 쓴다.
+                cres = _cancel_shyni_scan(url, token, job_id, section_key)
+                cjob = cres.get('job') or {}
+                if cres['reason'] == 'already_done' or (
+                        cres['reason'] == 'finished_first'
+                        and cjob.get('status') == 'completed'):
+                    return {'status': 'done', 'message': '스캔이 완료됐습니다.',
+                            'job_id': job_id, 'stats': cjob.get('stats') or {},
+                            'duration': int(time.time() - t0)}
+                if cres['reason'] == 'already_failed' or (
+                        cres['reason'] == 'finished_first'
+                        and cjob.get('status') == 'failed'):
+                    return {'status': 'failed',
+                            'message': f"스캔 실패: {cjob.get('error') or ''}",
+                            'job_id': job_id, 'stats': cjob.get('stats') or {},
+                            'duration': int(time.time() - t0)}
                 return {'status': 'cancelled',
-                        'message': '취소 요청으로 대기를 중단했습니다. shyni에서 실행 중인 스캔은 계속될 수 있습니다.',
+                        'message': CANCEL_RESULT_MESSAGE.get(
+                            cres['reason'], '취소 요청으로 중단했습니다.'),
                         'job_id': job_id, 'stats': None,
                         'duration': int(time.time() - t0)}
             try:
@@ -1055,6 +1182,11 @@ class TaskPeriodic:
                         'duration': int(time.time() - t0)}
             if outcome == 'failed':
                 return {'status': 'failed', 'message': msg,
+                        'job_id': job_id,
+                        'stats': (job or {}).get('stats') or {},
+                        'duration': int(time.time() - t0)}
+            if outcome == 'cancelled':
+                return {'status': 'cancelled', 'message': msg,
                         'job_id': job_id,
                         'stats': (job or {}).get('stats') or {},
                         'duration': int(time.time() - t0)}

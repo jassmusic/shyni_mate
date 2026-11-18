@@ -425,6 +425,26 @@ def api_scan_status(library_id):
     return admin_get(f'/libraries/{lib_id}/scan/status')
 
 
+def api_cancel_scan(library_id):
+    """DELETE /libraries/{id}/scan — 스캔 취소 (관리자 세션, Step5-1).
+
+    shyni services/scanner.py cancel_scan 실측 (2026-11-18): _scan_cancel
+    플래그 설정 + 상태 'cancelled' 병합 + 등록된 asyncio 작업 직접 취소.
+    compat 스캔도 같은 scanner로 돌아 취소가 적용되고, 취소된 compat
+    job은 status 'cancelled'로 끝난다 (failed 아님).
+    requests Response를 돌려준다 (요청 자체 실패면 None) — 호출하는
+    쪽이 상태 코드를 보고 판단한다. 2xx면 취소 요청이 받아들여진 것이고,
+    404면 돌고 있는 스캔이 없다는 뜻이라 취소할 게 없다. 취소가 실제로
+    반영됐는지는 compat job 'cancelled'나 scan/status 'cancelled'로
+    따로 확인해야 한다 (즉시 반영 아님).
+    """
+    try:
+        lib_id = int(library_id)
+    except Exception:
+        return None
+    return admin_request('DELETE', f'/libraries/{lib_id}/scan', timeout=15)
+
+
 def api_current_session_id():
     """관리자 API로 현재 세션 id를 확인한다. 실패하면 None.
     GET /auth/sessions는 본인 세션만 돌려주며, current=true인 항목이

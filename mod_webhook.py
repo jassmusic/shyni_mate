@@ -89,6 +89,10 @@ class ModuleWebhook(PluginModuleBase):
         thread.start()
 
     def process_menu(self, sub, req):
+        # 설정 페이지는 설정 메뉴 안 '웹훅' 탭(base/webhook)으로 이동했다.
+        # 이 모듈은 웹훅 수신 라우트와 Discord 중계 워커만 맡는다.
+        # 메뉴가 없어 이 경로는 더 이상 호출되지 않으며, 직접 접근 시
+        # 아래 except절이 안내 페이지를 보여준다.
         arg = P.ModelSetting.to_dict()
         arg['api_webhook'] = receive_url()
         try:

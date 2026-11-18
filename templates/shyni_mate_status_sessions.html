@@ -19,7 +19,7 @@
   </div>
   <div class="row show-grid">
     <span class="col-md-12" style="font-size:12px; color:#aaa; text-align:right">
-      주기는 1~120분으로 저장할 수 있습니다. 대시보드·건강도와 같은 주기를 씁니다.
+      주기는 1~120분으로 저장할 수 있습니다.
     </span>
   </div>
 </div>
@@ -98,7 +98,7 @@ function load_sessions() {
       }
       $('#sessions_msg_div').hide();
       var str = '<div style="font-size:12px; color:#888; margin-bottom:8px">로그인 중인 기기 ' + list.length + '개 · 마지막 활동 순</div>';
-      str += '<table class="table table-striped" style="font-size:13px"><thead><tr><th>사용자</th><th>기기</th><th>앱</th><th>마지막 활동</th><th>로그인</th></tr></thead><tbody>';
+      str += '<div style="overflow-x:auto"><table class="table table-striped" style="font-size:13px"><thead><tr><th>사용자</th><th>기기</th><th>앱</th><th style="white-space:nowrap">마지막 활동</th><th style="white-space:nowrap">로그인</th></tr></thead><tbody>';
       for (var i = 0; i < list.length; i++) {
         var s = list[i];
         str += '<tr><td><strong>' + esc(s.user) + '</strong>' +
@@ -106,10 +106,10 @@ function load_sessions() {
                (ret.current_id && s.id === ret.current_id ? ' <span style="display:inline-block; font-size:11px; padding:1px 7px; border-radius:10px; background:#e6f4ea; color:#137333">현재</span>' : '') +
                '</td><td>' + (s.device_name ? esc(s.device_name) : '<span style="color:#888">기기 정보 없음</span>') + '</td>' +
                '<td>' + esc(s.app_name || '-') + '</td>' +
-               '<td>' + fmtTime(s.last_active_at) + '</td>' +
-               '<td>' + fmtTime(s.created_at) + '</td></tr>';
+               '<td style="white-space:nowrap">' + fmtTime(s.last_active_at) + '</td>' +
+               '<td style="white-space:nowrap">' + fmtTime(s.created_at) + '</td></tr>';
       }
-      str += '</tbody></table>';
+      str += '</tbody></table></div>';
       str += '<div style="font-size:12px; color:#888">· \'현재\'는 이 플러그인이 쓰는 세션입니다. · 세션은 shyni에 로그인할 때마다 생기고, 로그아웃할 때 지워집니다.</div>';
       $('#sessions_div').html(str).show();
     },

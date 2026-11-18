@@ -14,6 +14,7 @@ setting = {
                 'list': [
                     {'uri': 'setting', 'name': '설정'},
                     {'uri': 'advanced', 'name': 'Relay'},
+                    {'uri': 'webhook', 'name': '웹훅'},
                 ]
             },
             {
@@ -57,10 +58,10 @@ setting = {
                 ]
             },
             {
-                'uri': 'webhook',
-                'name': '웹훅',
+                'uri': 'meta',
+                'name': '메타',
                 'list': [
-                    {'uri': 'setting', 'name': '설정'},
+                    {'uri': 'list', 'name': '메타'},
                 ]
             },
             {
@@ -90,9 +91,10 @@ try:
     from .model_periodic import ModelPeriodicItem
     from .mod_trash import ModuleTrash
     from .model_trash import ModelTrashItem
+    from .mod_meta import ModuleMeta
     from .mod_webhook import ModuleWebhook
 
-    P.set_module_list([ModuleBase, ModuleScan, ModuleStatus, ModulePeriodic, ModuleTrash, ModuleWebhook])
+    P.set_module_list([ModuleBase, ModuleScan, ModuleStatus, ModulePeriodic, ModuleTrash, ModuleMeta, ModuleWebhook])
 
     # 외부 호출
     P.ModelScanItem = ModelScanItem

@@ -8,6 +8,7 @@
 
 <div id="startErrorDiv" style="display:none; border:1px solid #e53e3e; background:#fff5f5; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#9b2c2c"></div>
 <div id="startOkDiv" style="display:none; border:1px solid #38a169; background:#f0fff4; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#276749"></div>
+<div id="cancelOkDiv" style="display:none; border:1px solid #38a169; background:#f0fff4; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#276749"></div>
 
 <div id="currentBoxDiv"></div>
 
@@ -20,8 +21,8 @@
       <span id="libPickCount" style="color:#888; font-size:12.5px"></span>
     </div>
     <div style="display:flex; gap:6px; margin:10px 0 8px">
-      <input type="text" id="libPickSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="flex:1; min-width:0">
-      <select id="libPickSort" class="form-control input-sm" style="width:100px; flex:none">
+      <input type="text" id="libPickSearch" class="form-control input-sm" placeholder="라이브러리 이름으로 검색" style="flex:1; min-width:0; height:26px; padding:3px 8px; font-size:14px">
+      <select id="libPickSort" class="form-control input-sm" style="width:100px; flex:none; height:26px; padding:3px 8px; font-size:14px">
         <option value="default_asc">기본↑</option>
         <option value="default_desc">기본↓</option>
         <option value="name_asc">이름↑</option>
@@ -29,8 +30,8 @@
       </select>
     </div>
     <div style="margin-bottom:8px">
-      <button type="button" class="btn btn-xs btn-default" id="libPickAll">보이는 항목 전체 선택</button>
-      <button type="button" class="btn btn-xs btn-default" id="libPickNone">보이는 항목 전체 해제</button>
+      <button type="button" class="btn btn-sm btn-default" id="libPickAll">보이는 항목 전체 선택</button>
+      <button type="button" class="btn btn-sm btn-default" id="libPickNone">보이는 항목 전체 해제</button>
     </div>
     <div id="libPickList" style="overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:6px 10px; min-height:80px"></div>
     <div style="margin-top:12px; text-align:right">
@@ -114,14 +115,14 @@ function runningIdx() {
 function renderCurrentBox() {
   var cur = runningCur;
   if (!cur) {
-    $('#currentBoxDiv').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 주기적 스캔이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
+    $('#currentBoxDiv').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 주기적 스캔이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
     return;
   }
   var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin-bottom:8px; background:#f9f9f9">';
   str += '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
   str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
   str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
-  str += '<button type="button" class="btn btn-sm btn-danger" id="currentBoxCancelBtn">취소</button>';
+  str += '<button type="button" class="btn btn-sm btn-danger" id="currentBoxCancelBtn"' + (cancelPendingAt ? ' disabled' : '') + '>' + (cancelPendingAt ? '취소중' : '취소') + '</button>';
   str += '</div></div>';
   $('#currentBoxDiv').html(str);
 }
@@ -148,12 +149,32 @@ function renderStartError(err) {
   if (!err) { $('#startErrorDiv').hide(); return; }
   var name = err.job_name ? '\u2018' + esc(err.job_name) + '\u2019 ' : '';
   var at = (typeof err.at == 'number') ? ' (' + fmtTime(err.at) + ')' : '';
-  $('#startErrorDiv').html('\u26a0\ufe0f ' + name + '시작하지 못했습니다. ' + esc(err.reason || '') + at + ' <button type="button" id="startErrorClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
+  $('#startErrorDiv').html('\u26a0\ufe0f ' + name + '시작하지 못했습니다. ' + esc(err.reason || '') + at + ' <button type="button" id="startErrorClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
   $('#startErrorDiv').show();
 }
 
 // '작업이 시작되었습니다' — 지금 실행을 누른 뒤 실제 시작이 확인되면 한 번만 보여 준다.
 var pendingStartAt = 0;
+
+// 취소 확인·버튼 상태 전이 (Step5-1) — 확인 문구는 "XXX 작업이 취소됩니다.",
+// 확인하면 버튼이 "취소중"(비활성화)이 되고, 작업이 끝나면
+// "작업이 취소되었습니다"를 표시한 뒤 버튼이 "취소"로 돌아온다.
+var cancelPendingAt = 0;
+var cancelJobStartedAt = '';
+
+function requestCancel(btn) {
+  if (!runningCur) return;
+  var name = (runningCur.job_name || runningCur.section_title) || '';
+  if (!confirm((name ? name + ' ' : '') + '주기적 스캔 작업이 취소됩니다.')) return;
+  cancelPendingAt = Date.now();
+  cancelJobStartedAt = (runningCur && runningCur.job_started_at) || '';
+  $('#cancelOkDiv').hide();
+  $(btn).text('취소중').prop('disabled', true);
+  globalSendCommand('cancel_current', null);
+  setTimeout(loadCurrent, 2000);
+  setTimeout(loadCurrent, 8000);
+  setTimeout(loadCurrent, 20000);
+}
 
 function loadCurrent() {
   $.ajax({
@@ -167,10 +188,23 @@ function loadCurrent() {
         renderStartError(err);
       }
       var cur = ret.data || null;
+      if (cancelPendingAt && (!cur || (cur.job_started_at || '') !== cancelJobStartedAt)) {
+        // 취소 요청한 작업이 끝났다 (다른 작업이 시작된 경우도 포함) —
+        // 확인 표시를 보여 준다
+        cancelPendingAt = 0;
+        cancelJobStartedAt = '';
+        $('#cancelOkDiv').html('\u2705 작업이 취소되었습니다. <button type="button" id="cancelOkClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
+        $('#cancelOkDiv').show();
+      } else if (cancelPendingAt && Date.now() - cancelPendingAt > 180000) {
+        // 3분이 지나도 안 끝나면 기다리기를 그만둔다 — 버튼은 다음
+        // 그리기 때 '취소'로 돌아온다.
+        cancelPendingAt = 0;
+        cancelJobStartedAt = '';
+      }
       var wasRunning = !!runningCur;
       if (pendingStartAt && !wasRunning && cur) {
         if (Date.now() - pendingStartAt < 180000) {
-          $('#startOkDiv').html('\u2705 작업이 시작되었습니다. <button type="button" id="startOkClose" class="btn btn-xs btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
+          $('#startOkDiv').html('\u2705 작업이 시작되었습니다. <button type="button" id="startOkClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
           $('#startOkDiv').show();
         }
         pendingStartAt = 0;
@@ -280,7 +314,7 @@ function renderJobs() {
     str += '<label style="font-weight:normal; font-size:14px; margin:0"><input type="checkbox" class="j-use" name="tmp_j_use"' + (j.use ? ' checked' : '') + dis + '> 사용</label>';
     str += '<span style="margin-left:auto">';
     if (isRunning) {
-      str += '<button type="button" class="btn btn-sm btn-danger job-cancel" data-idx="' + i + '" style="padding:3px 8px; font-size:14px">취소</button> ';
+      str += '<button type="button" class="btn btn-sm btn-danger job-cancel" data-idx="' + i + '" style="padding:3px 8px; font-size:14px"' + (cancelPendingAt ? ' disabled' : '') + '>' + (cancelPendingAt ? '취소중' : '취소') + '</button> ';
     } else {
       str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '" style="padding:3px 8px; font-size:14px">지금 실행</button> ';
     }
@@ -380,13 +414,15 @@ $(document).ready(function () {
   });
 
   $(document).off('click', '.job-cancel').on('click', '.job-cancel', function () {
-    globalSendCommand('cancel_current', null);
-    setTimeout(loadCurrent, 2000);
+    requestCancel(this);
   });
 
   $(document).off('click', '#currentBoxCancelBtn').on('click', '#currentBoxCancelBtn', function () {
-    globalSendCommand('cancel_current', null);
-    setTimeout(loadCurrent, 2000);
+    requestCancel(this);
+  });
+
+  $(document).off('click', '#cancelOkClose').on('click', '#cancelOkClose', function () {
+    $('#cancelOkDiv').hide();
   });
 
   $(document).off('click', '#currentIdleClose').on('click', '#currentIdleClose', function () {

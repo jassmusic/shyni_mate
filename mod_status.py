@@ -740,6 +740,21 @@ class ModuleStatus(PluginModuleBase):
         return val
 
     @staticmethod
+    def _vfs_timeout_min(source=None):
+        """VFS 새로고침 제한 시간(분) — 휴지통 쪽이면 휴지통 설정,
+        그 외(주기적·대시보드)는 주기적 설정을 쓴다. 없거나 0 이하면
+        기본 360분으로 동작한다."""
+        key = ('trash_vfs_timeout_min' if source == 'trash'
+               else 'periodic_vfs_timeout_min')
+        try:
+            val = P.ModelSetting.get_int(key)
+        except Exception:
+            val = None
+        if val is None or val <= 0:
+            return 360
+        return val
+
+    @staticmethod
     def _started_over_min(record, minutes):
         """started_at이 minutes분보다 오래됐으면 True. 0 이하면 끔,
         시각을 읽을 수 없으면 False를 돌려준다."""
@@ -811,6 +826,23 @@ class ModuleStatus(PluginModuleBase):
                             'VFS 새로고침 작업 기록을 찾을 수 없습니다.')
                 except Exception:
                     pass
+            if vfs.get('status') == 'running' and cls._started_over_min(
+                    vfs, cls._vfs_timeout_min(vfs.get('source'))):
+                # VFS 새로고침 제한 시간 초과 — 대시보드 새로고침만은
+                # 여기가 아니면 기한이 없어 계속 진행 중으로 남는다.
+                # 새로고침 후 스캔은 실행 스레드도 같은 기한을 보지만,
+                # 이력 행 끝내기는 한 번만 되게 돼 있어 겹쳐도 괜찮다.
+                vfs['status'] = 'failed'
+                vfs['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                vfs['error'] = 'VFS 새로고침이 기한 안에 끝나지 않았습니다.'
+                logger.warning(f"[현황] VFS 새로고침 기한 초과로 정리: 섹션 {key} job {vfs['job']}")
+                changed = True
+                row_id = vfs.get('history_row_id')
+                if row_id:
+                    cls._dashboard_row_finish(
+                        row_id, 'failed', vfs['error'],
+                        vfs_duration=cls._slot_seconds(vfs.get('started_at'),
+                                                       vfs.get('finished_at')))
         meta = state.get('meta')
         if meta and meta.get('status') == 'running' \
                 and str(key) not in _meta_refresh_threads:
@@ -1771,7 +1803,9 @@ class ModuleStatus(PluginModuleBase):
             # 스레드가 끝날 때(중단 포함) 이 행을 끝낸다.
             row_id = (self._get_state(key).get('vfs') or {}).get('history_row_id')
             proceed = False
-            deadline = time.time() + 6 * 3600
+            # 대시보드 새로고침 후 스캔은 주기적 스캔 이력으로 가므로
+            # 주기적 스캔의 VFS 새로고침 제한 시간을 따른다.
+            deadline = time.time() + self._vfs_timeout_min() * 60
             while time.time() < deadline:
                 st = self._get_state(key)
                 vfs = (st or {}).get('vfs') or {}
