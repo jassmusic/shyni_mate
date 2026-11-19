@@ -361,6 +361,16 @@ function backToTrashOverview() {
   renderLibOptions(null);
   showTrashOverview();
   loadCounts(false);
+  // 조회로 캐시가 새로 생겼을 수 있다 — 캐시 시각도 다시 받아와
+  // 배지를 갱신한다. 메타는 backToMetaOverview의 loadOverview가
+  // 이 역할을 한다. 단일 조회 폴링(pollTrashState)은 진행률만 보고
+  // 캐시 시각을 갱신하지 않으므로, 돌아올 때 받아오는 것이 확실하다.
+  quietCommand('trash_state', null, null, function (ret) {
+    if (ret && ret.ret == 'success' && ret.data) {
+      trashCacheTimes = ret.data.cache_times || trashCacheTimes;
+      renderTrashOverview();
+    }
+  });
 }
 
 // ---- 전체 현황 정렬 ----
