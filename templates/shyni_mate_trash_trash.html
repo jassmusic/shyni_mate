@@ -282,7 +282,12 @@ function renderTrashOverview() {
     el.html('<div style="padding:16px 4px; color:#c0392b">라이브러리 목록을 가져오지 못했습니다.</div>');
     return;
   }
-  setTrashOvHead(true);
+  // 상세 화면에서는 머리말을 보여 주지 않는다 — 조회 완료 후 개수 갱신
+  // (loadCounts → renderLibOptions)이 상세에서도 현황을 다시 그리기
+  // 때문이다. 행은 숨은 채로 갱신해 두면 전체 현황으로 돌아갈 때 새 값이 보인다.
+  // 메타는 renderLibOptions가 현황을 다시 그리지 않아 이 문제가 없다.
+  if ($('#trash_overview').is(':visible')) setTrashOvHead(true);
+  else setTrashOvHead(false);
   buildTrashShowPanel(LIBS);
   var rows = sortedTrashOverviewRows().filter(function (lib) { return !trashHiddenLibs[String(lib.key)]; });
   if (!rows.length) {
