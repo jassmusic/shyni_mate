@@ -14,20 +14,8 @@
   <div class="row show-grid">
     <span class="col-md-12">
       <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
-        <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
-        <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
-          <label style="font-weight:normal; font-size:12.5px; margin:0">주기
-            <input type="number" id="refreshMinInput" min="1" max="120" value="{{ '30' if (arg['status_auto_refresh_min'] or '30') == '0' else arg['status_auto_refresh_min'] }}" style="width:52px; height:26px; display:inline-block; padding:2px 6px; font-size:12.5px" class="form-control"> 분
-          </label>
-        </span>
-        <button type="button" class="btn btn-primary" id="refreshSaveBtn" style="padding:2px 10px; font-size:12.5px">저장</button>
         <button type="button" class="btn btn-info" id="statusRefreshBtn" style="padding:2px 10px; font-size:12.5px">새로고침</button>
       </span>
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:12px; color:#aaa; text-align:right">
-      주기는 1~120분으로 저장할 수 있습니다.
     </span>
   </div>
 </div>
@@ -43,7 +31,7 @@
 @media (max-width: 1050px) { .sm-donut-row.cols-3, .sm-donut-row.cols-4 { grid-template-columns:repeat(2, 1fr); } }
 @media (max-width: 600px) { .sm-donut-row.cols-2, .sm-donut-row.cols-3, .sm-donut-row.cols-4 { grid-template-columns:1fr; } }
 </style>
-<div id="health_head_div" style="margin-bottom:6px; display:none"><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></g></svg>라이브러리 건강도</strong> <span style="font-size:12px; color:#888">Shyni 데이터베이스 기준</span></div>
+<div id="health_head_div" style="margin-bottom:6px; display:none"><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></g></svg>라이브러리 건강도</strong><div style="font-size:12px; color:#888; white-space:nowrap">Shyni 데이터베이스 기준</div></div>
 <div id="health_stale_div" style="font-size:13px; margin-bottom:10px; display:none"></div>
 <div id="health_div" style="margin-bottom:16px; display:none"></div>
 <div id="health_msg_div" style="padding:24px 4px; color:#888">건강도 정보를 불러오는 중입니다. 잠시만 기다려 주세요.</div>
@@ -62,17 +50,6 @@ function setupTimer(min) {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
   currentRefreshMin = min;
   if (min > 0) refreshTimer = setInterval(load_health, min * 60000);
-}
-
-function applyRefreshUI(min) {
-  if (min == 0) {
-    $('#refreshUseCheck').prop('checked', false);
-    $('#refreshMinWrap').hide();
-  } else {
-    $('#refreshUseCheck').prop('checked', true);
-    $('#refreshMinWrap').show();
-    $('#refreshMinInput').val(min);
-  }
 }
 
 
@@ -518,7 +495,10 @@ function finishHealthProgress(ret) {
   $('#health_progress_bar').css('width', '100%');
   var el = healthLoadStartAt ? fmtHealthElapsed(Date.now() - healthLoadStartAt) : '';
   var txt = '불러오기 완료' + (el ? ' · 소요시간 ' + el : '');
-  if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + ' 기준';
+  if (ret && ret.from_cache) {
+    var ca = fmtCachedAgo(ret.cached_at);
+    txt += ca ? ' · ' + ca : (ret.cached_at ? ' · ' + ret.cached_at + ' 기준' : '');
+  }
   $('#health_progress_text').text(txt);
   healthDoneOnce = true;
 }
@@ -530,6 +510,25 @@ function fmtStaleAt(ts) {
   function p(n) { return (n < 10 ? '0' : '') + n; }
   return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
     + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+// (N분 전) — 유닉스 시각(초) 기준 경과 표시. 대시보드와 같은 형식.
+function fmtAgo(ts) {
+  if (!ts) return '';
+  var sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (sec < 60) return '(' + sec + '초 전)';
+  if (sec < 3600) return '(' + Math.floor(sec / 60) + '분 전)';
+  if (sec < 86400) return '(' + Math.floor(sec / 3600) + '시간 전)';
+  return '(' + Math.floor(sec / 86400) + '일 전)';
+}
+
+// 서버가 보낸 'YYYY-MM-DD HH:MM:SS' 기준 시각을 경과 표시로 바꾼다.
+// 파싱이 안 되면 빈 문자열 — 그 경우 기존 절대 시각 표시로 넘어간다.
+function fmtCachedAgo(s) {
+  if (!s) return '';
+  var d = new Date(String(s).replace(' ', 'T'));
+  if (isNaN(d.getTime())) return '';
+  return fmtAgo(Math.floor(d.getTime() / 1000));
 }
 // 낡은 데이터 알림 줄 — Relay 꺼짐이면 회색, 연결 실패면 주황색
 function showHealthStale(relayOff, failed, at) {
@@ -594,7 +593,6 @@ function load_health(force) {
       showHealthStale(ret.db_relay_off, ret.db_stats_failed, ret.db_stats_at);
       renderHealth(ret.health);
       if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
-        applyRefreshUI(ret.refresh_min);
         setupTimer(ret.refresh_min);
       }
     },
@@ -606,30 +604,6 @@ function load_health(force) {
 
 $(document).ready(function() {
   $('#statusRefreshBtn').on('click', function(){ load_health(true); });
-  $('#refreshUseCheck').on('change', function(){
-    $('#refreshMinWrap').toggle(this.checked);
-  });
-  $('#refreshSaveBtn').on('click', function(){
-    var use = $('#refreshUseCheck').is(':checked');
-    var min = parseInt($('#refreshMinInput').val(), 10);
-    if (use && !(min >= 1 && min <= 120)) { alert('주기는 1~120분으로 입력해 주세요.'); return; }
-    $.ajax({
-      global: false,
-      type: 'POST',
-      url: API_BASE + 'set_refresh',
-      data: {min: use ? min : 0},
-      success: function (ret) {
-        if (window.notify) notify(ret.msg, ret.ret == 'success' ? 'success' : 'error');
-        else alert(ret.msg);
-        if (ret.ret == 'success') {
-          currentRefreshMin = use ? min : 0;
-          applyRefreshUI(currentRefreshMin);
-          setupTimer(currentRefreshMin);
-        }
-      },
-      error: function () { alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.'); }
-    });
-  });
   var initMin = parseInt("{{ arg['status_auto_refresh_min'] or '30' }}", 10);
   if (isNaN(initMin)) initMin = 1;
   currentRefreshMin = initMin;

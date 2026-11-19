@@ -18,12 +18,6 @@
   <div id="trash_progress_text" style="font-size:12.5px; color:#666; margin-top:4px">조회를 준비하고 있습니다…</div>
 </div>
 
-<div style="display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-top:10px; font-size:13px; color:#555">
-  <label for="trash_refresh_hours" style="font-weight:normal; margin:0">자동 갱신 주기</label>
-  <input type="number" id="trash_refresh_hours" min="0" value="{{ arg.get('base_trash_counts_refresh_hours') or '12' }}" style="width:64px; height:31px; display:inline-block; padding:2px 6px; font-size:13px" class="form-control">
-  <span>시간</span>
-</div>
-
 <div style="display:flex; gap:6px; align-items:center; margin:10px 0 0">
   <div id="trash_lib_pick" class="form-control" style="flex:1; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#888; height:31px; padding:3px 8px; font-size:14px">라이브러리를 선택해 주세요</div>
   <input type="hidden" id="trash_lib" value="">
@@ -32,7 +26,14 @@
   <button type="button" class="btn btn-sm btn-outline-primary" id="trash_query_all_btn" title="모두 조회" style="flex:0 0 auto">모두 조회</button>
 </div>
 
-<div id="trash_overview" style="margin-top:10px"></div>
+<div id="trash_ov_head" style="display:none; justify-content:space-between; align-items:center; margin:10px 0 6px">
+  <div style="font-size:13px; font-weight:bold">전체 현황</div>
+  <span style="display:flex; align-items:center; gap:10px; white-space:nowrap">
+    <span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888">표시 <button type="button" id="trash_show_btn" class="btn btn-default" style="height:31px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="trash_show_panel" style="display:none; position:absolute; right:0; top:35px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="trash_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="trash_show_all" checked> 전체</label><span id="trash_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span>
+    <label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 <select id="trashOverviewSort" onchange="setTrashOverviewSort(this.value)" style="display:inline-block; width:auto; height:31px; padding:2px 6px; font-size:12px; vertical-align:middle"><option value="trash_desc"{% if (arg.get('trash_overview_sort') or 'trash_desc') == 'trash_desc' %} selected{% endif %}>휴지통</option><option value="name"{% if arg.get('trash_overview_sort') == 'name' %} selected{% endif %}>이름</option><option value="default"{% if arg.get('trash_overview_sort') == 'default' %} selected{% endif %}>기본</option></select></label>
+  </span>
+</div>
+<div id="trash_overview"></div>
 
 <div id="trash_bulk_toast" style="display:none; position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#2d3748; color:#fff; font-size:13.5px; padding:10px 20px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.25); z-index:3000; white-space:nowrap"></div>
 
@@ -136,7 +137,6 @@ function daysSince(dtStr) {
 }
 
 var trashCounts = {{ arg['trash_counts_init']|tojson }};
-var trashCountsAt = {{ arg.get('trash_counts_at') or 0 }};
 
 function libByKey(key) {
   for (var i = 0; i < LIBS.length; i++) if (String(LIBS[i].key) === String(key)) return LIBS[i];
@@ -206,6 +206,12 @@ function loadSections() {
 // 않고 처음부터 표시된다. 이후 trash_state 응답으로 갱신된다.
 var trashCacheTimes = {{ arg['trash_cache_times']|tojson }};
 
+// 라이브러리별 상세 요약 {키: {files, groups, missing, trashed,
+// main_label}} — 전체 현황 행의 상세 내역 표시용. 첫 값은 페이지가
+// 뜰 때 서버가 함께 실어 보내고, 이후 trash_counts 응답으로 갱신된다.
+// 조회한 적 없는 라이브러리는 들어 있지 않다.
+var trashSummaries = {{ arg['trash_summaries_init']|tojson }};
+
 function fmtAgo(ts) {
   if (!ts) return '';
   var sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
@@ -265,35 +271,54 @@ function renderTrashOvLoading() {
 function renderTrashOverview() {
   var el = $('#trash_overview');
   if (LIBS_STATE === 'loading') {
+    setTrashOvHead(false);
     renderTrashOvLoading();
     return;
   }
   stopTrashOvTimer();
   trashOvKind = '';
   if (!LIBS.length) {
+    setTrashOvHead(false);
     el.html('<div style="padding:16px 4px; color:#c0392b">라이브러리 목록을 가져오지 못했습니다.</div>');
     return;
   }
-  var rows = sortedTrashOverviewRows();
-  var str = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">'
-    + '<div style="font-size:13px; font-weight:bold">전체 현황'
-    + ' <span style="font-weight:normal; color:#888; font-size:12px">' + (trashCountsAt ? fmtBasisTime(trashCountsAt) + ' 기준' : '') + '</span></div>'
-    + '<label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 '
-    + '<select id="trashOverviewSort" onchange="setTrashOverviewSort(this.value)" style="display:inline-block; width:auto; height:31px; padding:2px 6px; font-size:12px; vertical-align:middle">'
-    + '<option value="trash_desc"' + (trashOverviewSort == 'trash_desc' ? ' selected' : '') + '>휴지통</option>'
-    + '<option value="name"' + (trashOverviewSort == 'name' ? ' selected' : '') + '>이름</option>'
-    + '<option value="default"' + (trashOverviewSort == 'default' ? ' selected' : '') + '>기본</option>'
-    + '</select></label></div>';
-  str += '<div style="border:1px solid #e2e8f0; border-radius:8px; overflow:hidden">';
+  setTrashOvHead(true);
+  buildTrashShowPanel(LIBS);
+  var rows = sortedTrashOverviewRows().filter(function (lib) { return !trashHiddenLibs[String(lib.key)]; });
+  if (!rows.length) {
+    el.html('<div style="color:#888; font-size:13px; padding:14px 4px">표시할 라이브러리가 없습니다. 위쪽 표시에서 라이브러리를 선택해 주세요.</div>');
+    return;
+  }
+  var str = '<div style="border:1px solid #e2e8f0; border-radius:8px; overflow:hidden">';
   for (var i = 0; i < rows.length; i++) {
     var lib = rows[i];
     var c = trashCounts ? trashCounts[String(lib.key)] : null;
     var cat = trashCacheTimes[String(lib.key)] || 0;
-    str += '<div class="trash-ov-row" data-key="' + lib.key + '" style="display:flex; gap:8px; align-items:baseline; padding:8px 10px; cursor:pointer' + (i > 0 ? '; border-top:1px solid #edf2f7' : '') + '">'
-      + '<span style="flex:1; min-width:0; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis">' + esc(lib.title) + '</span>'
-      + '<span style="font-size:12.5px; color:#c05621; white-space:nowrap">휴지통 ' + (c != null ? fmtNum(c) + '개' : '-') + '</span>'
-      + (cat ? '<span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#ebf8ff; color:#2b6cb0; border:1px solid #bee3f8">캐시 있음 (' + fmtAgo(cat) + ')</span>'
-              : '<span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#f7fafc; color:#718096; border:1px solid #e2e8f0">캐시 없음</span>')
+    var s = trashSummaries ? trashSummaries[String(lib.key)] : null;
+    // 파일 수 — 개수 캐시가 우선이고, 없으면 상세 요약의 값을 쓴다.
+    var files = c != null ? c : (s && s.files != null ? s.files : null);
+    var groupPart = '';
+    if (s && s.groups != null && s.main_label) {
+      groupPart = ' (' + esc(s.main_label) + ' ' + fmtNum(s.groups) + '개)';
+    }
+    // 둘째 줄 — 파일 수와 상태 내역을 한 줄에 둔다. 제목까지
+    // 세 줄이 되면 행이 너무 길어진다. 비어 있으면 '비어 있음',
+    // 조회한 적 없으면 '-'로 보여 준다.
+    var statusPart;
+    if (files != null && files === 0) {
+      statusPart = '비어 있음';
+    } else if (s && s.missing != null && s.trashed != null) {
+      statusPart = 'missing ' + fmtNum(s.missing) + '개 · trashed ' + fmtNum(s.trashed) + '개';
+    } else {
+      statusPart = 'missing - · trashed -';
+    }
+    str += '<div class="trash-ov-row" data-key="' + lib.key + '" style="padding:8px 10px; cursor:pointer' + (i > 0 ? '; border-top:1px solid #edf2f7' : '') + '">'
+      + '<div style="display:flex; justify-content:space-between; gap:8px; align-items:baseline">'
+      + '<span style="font-weight:bold">' + esc(lib.title) + '</span>'
+      + (cat ? '<span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#ebf8ff; color:#2b6cb0; border:1px solid #bee3f8; white-space:nowrap">캐시 있음 (' + fmtAgo(cat) + ')</span>'
+              : '<span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#f7fafc; color:#718096; border:1px solid #e2e8f0; white-space:nowrap">캐시 없음</span>')
+      + '</div>'
+      + '<div style="font-size:12.5px; margin-top:2px"><span style="color:#c05621">파일 ' + (files != null ? fmtNum(files) + '개' : '-') + groupPart + '</span> <span style="color:#888">· ' + statusPart + '</span></div>'
       + '</div>';
   }
   str += '</div>';
@@ -301,12 +326,16 @@ function renderTrashOverview() {
 }
 
 function showTrashOverview() {
+  // 상세에서 남긴 진행률 막대·완료 문구를 지운다 — 전체 현황의
+  // 데이터와 무관한 잔상이 머리말과 함께 보이면 기준 시각이 두 개로 보인다.
+  $('#trash_progress_wrap').hide();
   $('#trash_overview').show();
   $('#trash_back_btn').hide();
   renderTrashOverview();
 }
 
 function hideTrashOverview() {
+  setTrashOvHead(false);
   $('#trash_overview').hide();
   $('#trash_back_btn').show();
 }
@@ -354,6 +383,67 @@ function setTrashOverviewSort(v) {
   $.ajax({type: 'POST', url: API_BASE + 'overview_sort', data: {sort: v}, global: false});
   renderTrashOverview();
 }
+
+// ---- 전체 현황 표시 선택 ----
+// 메타와 같은 방식 — 숨긴 라이브러리를 서버 설정
+// (trash_overview_hidden_libs)에 기억해 휴지통 화면만의 목록으로 쓴다.
+// 기본은 전체 표시.
+var trashHiddenLibs = {};
+String("{{ arg.get('trash_overview_hidden_libs') or '' }}").split(',').forEach(function (x) { x = x.trim(); if (x) trashHiddenLibs[x] = true; });
+var trashShowSig = '';
+function setTrashOvHead(show) {
+  // 머리말은 flex 줄이라 jQuery show()를 쓰면 block으로 바뀌어
+  // 정렬이 깨진다 — display 값을 직접 정한다.
+  $('#trash_ov_head').css('display', show ? 'flex' : 'none');
+}
+function saveTrashHiddenLibs() {
+  var keys = Object.keys(trashHiddenLibs).filter(function (k) { return trashHiddenLibs[k]; }).join(',');
+  $.ajax({type: 'POST', url: API_BASE + 'set_hidden_libs', data: {keys: keys}, global: false});
+}
+function paintTrashShowBtn(libs) {
+  var hidden = 0;
+  libs.forEach(function (s) { if (trashHiddenLibs[String(s.key)]) hidden++; });
+  $('#trash_show_btn').text(hidden == 0 ? '전체 ▾' : '일부 (' + (libs.length - hidden) + '/' + libs.length + ') ▾');
+  $('#trash_show_all').prop('checked', hidden == 0);
+}
+function buildTrashShowPanel(libs) {
+  var sig = libs.map(function (s) { return s.key; }).join(',');
+  if (sig != trashShowSig) {
+    trashShowSig = sig;
+    var str = '';
+    libs.forEach(function (s) {
+      str += '<label class="trash-show-row" data-title="' + esc(s.title) + '" style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:normal; padding:3px 2px; margin:0; cursor:pointer"><input type="checkbox" class="trash-show-chk" data-key="' + s.key + '"' + (trashHiddenLibs[String(s.key)] ? '' : ' checked') + '> ' + esc(s.title) + '</label>';
+    });
+    $('#trash_show_rows').html(str);
+  }
+  paintTrashShowBtn(libs);
+}
+$("body").on('click', '#trash_show_btn', function (e) {
+  e.stopPropagation();
+  $('#trash_show_panel').toggle();
+});
+$(document).on('click', function (e) {
+  if (!$(e.target).closest('#trash_show_panel, #trash_show_btn').length) $('#trash_show_panel').hide();
+});
+$("body").on('change', '.trash-show-chk', function () {
+  var k = String($(this).data('key'));
+  if (this.checked) delete trashHiddenLibs[k]; else trashHiddenLibs[k] = true;
+  saveTrashHiddenLibs();
+  renderTrashOverview();
+});
+$("body").on('change', '#trash_show_all', function () {
+  var show = this.checked;
+  LIBS.forEach(function (s) {
+    if (show) delete trashHiddenLibs[String(s.key)]; else trashHiddenLibs[String(s.key)] = true;
+  });
+  $('.trash-show-chk').prop('checked', show);
+  saveTrashHiddenLibs();
+  renderTrashOverview();
+});
+$("body").on('input', '#trash_show_search', function () {
+  var q = $(this).val().toLowerCase();
+  $('.trash-show-row').each(function () { $(this).toggle(!q || $(this).data('title').toLowerCase().indexOf(q) >= 0); });
+});
 
 // ---- 라이브러리 선택 팝업 정렬 ----
 // 기본 / 이름 / 휴지통 수 내림차순 — 선택은 서버에 저장해 둔다
@@ -451,7 +541,7 @@ function onTrashLibPicked(key) {
 function loadCounts(thenQuery) {
   quietCommand('trash_counts', null, null, function (ret) {
     if (ret && ret.ret == 'success') {
-      if (ret.at) trashCountsAt = ret.at;
+      if (ret.summaries) trashSummaries = ret.summaries;
       renderLibOptions(ret.data || {});
     } else renderLibOptions(null);
     if (thenQuery && $('#trash_lib').val()) {
@@ -473,14 +563,14 @@ function fmtElapsedMs(ms) {
   return Math.floor(s / 60) + '분 ' + Math.round(s % 60) + '초';
 }
 
-// 완료 문구 — 대시보드·건강도와 같은 형식: 불러오기 완료 · 소요시간 · 기준 시각
+// 완료 문구 — 대시보드·건강도와 같은 형식: 불러오기 완료 · 소요시간 · (N분 전)
 function trashDoneText(startedAt, finishedAt) {
   var txt = '불러오기 완료';
   if (startedAt && finishedAt && finishedAt >= startedAt) {
     txt += ' · 소요시간 ' + fmtElapsedMs((finishedAt - startedAt) * 1000);
   }
-  var t = fmtBasisTime(finishedAt);
-  if (t) txt += ' · ' + t + ' 기준';
+  var a = fmtAgo(finishedAt);
+  if (a) txt += ' · (' + a + ')';
   return txt;
 }
 
@@ -494,9 +584,9 @@ function fmtBasisTime(ts) {
 function paintBasis() {
   var el = $('#trash_basis');
   if (!trashData || !trashBasisKind) { el.hide(); return; }
-  var t = fmtBasisTime(trashBasisAt);
-  if (trashBasisKind == 'cache') el.text('캐시 데이터 기준' + (t ? ' · ' + t + '에 불러온 결과입니다' : ''));
-  else el.text('API 조회 결과' + (t ? ' · ' + t + ' 기준' : ''));
+  var a = fmtAgo(trashBasisAt);
+  if (trashBasisKind == 'cache') el.text('캐시 데이터 기준' + (a ? ' (' + a + ')' : ''));
+  else el.text('API 조회 결과' + (a ? ' (' + a + ')' : ''));
   el.show();
 }
 
@@ -885,17 +975,50 @@ function pollTrashState() {
   }, 700);
 }
 
+// 상세 목록 표시 경과 시간 — 현황 로딩 타이머와 같은 방식.
+// 목록을 새로 불러올 때마다 시작 시각을 다시 잡는다.
+var trashListTimer = null;
+var trashListStart = 0;
+function trashListElapsedText() {
+  var s = Math.max(0, Math.floor((Date.now() - trashListStart) / 1000));
+  if (s < 60) return s + '초 경과';
+  return Math.floor(s / 60) + '분 ' + (s % 60) + '초 경과';
+}
+function startTrashListTimer() {
+  stopTrashListTimer();
+  trashListStart = Date.now();
+  $('#trash_list_elapsed').text(trashListElapsedText());
+  trashListTimer = setInterval(function () {
+    var el = $('#trash_list_elapsed');
+    if (!el.length) { stopTrashListTimer(); return; }
+    el.text(trashListElapsedText());
+  }, 1000);
+}
+function stopTrashListTimer() {
+  if (trashListTimer) { clearInterval(trashListTimer); trashListTimer = null; }
+}
+
 function loadTrash(page) {
   var lib = $('#trash_lib').val();
   if (!lib) return;
   trashPage = page || 1;
-  $('#trash_list_div').html('<div style="padding:16px 4px; color:#888">불러오는 중입니다…</div>');
+  // 상세 목록은 데이터(캐시)가 이미 불러와진 뒤 내용을 그리는 단계라,
+  // '불러오는 중'이 아니라 '내용을 표시하는 중'으로 쓴다 — 메타와 같은
+  // 문구·물결 막대바·경과 시간 (2026-11-20 사용자 지적).
+  $('#trash_list_div').html('<div style="padding:16px 4px">'
+    + '<div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden">'
+    + '<div class="ov-loading-bar"></div>'
+    + '</div>'
+    + '<div style="font-size:12.5px; color:#888; margin-top:6px">내용을 표시하는 중입니다… <span id="trash_list_elapsed"></span></div>'
+    + '</div>');
+  startTrashListTimer();
   var opts = {
     page: trashPage,
     search: $('#trash_search').val() || '',
     order: $('#trash_order').val() || 'old'
   };
   quietCommand('trash_list', lib, JSON.stringify(opts), function (ret) {
+    stopTrashListTimer();
     if (!ret || ret.ret != 'success') {
       $('#trash_summary').text('');
       $('#trash_tools').hide();
@@ -914,9 +1037,16 @@ function renderTrash() {
   if (!d) return;
   var s = d.summary || {};
   var sumHtml = '파일 <strong>' + fmtNum(s.files) + '개</strong> (' + esc(d.main_label) + ' <strong>' + fmtNum(s.groups) + '개</strong>)';
+  // 둘째 줄 — 메타 상세 요약과 같은 두 줄 구조로, 상태별 내역과
+  // 보관 기간을 함께 보여 준다.
+  var sumDetail = '';
   if (s.missing != null && s.trashed != null) {
-    sumHtml += ' - missing <strong>' + fmtNum(s.missing) + '개</strong>, trashed <strong>' + fmtNum(s.trashed) + '개</strong>';
+    sumDetail = 'missing <strong>' + fmtNum(s.missing) + '개</strong> · trashed <strong>' + fmtNum(s.trashed) + '개</strong>';
   }
+  if (d.retention_days != null) {
+    sumDetail += (sumDetail ? ' · ' : '') + '보관 기간 <strong>' + d.retention_days + '일</strong>';
+  }
+  if (sumDetail) sumHtml += '<br>' + sumDetail;
   $('#trash_summary').html(sumHtml);
   $('#trash_tools').show();
   // API로 조회한 결과에서는 개별 선택 실행(새로고침·스캔)을 막는다
@@ -1200,29 +1330,6 @@ $(document).ready(function () {
       } else {
         // 이미 다른 곳에서 전체 조회가 돌고 있을 수 있다 — 상태를 맞춰 본다
         pollBulk();
-      }
-    });
-  });
-  // 자동 갱신 주기 — 바꾸면 바로 저장한다 (기본 설정에서 여기로 옮김, 2026-11-18).
-  // 대시보드·건강도의 휴지통 개수를 새로 읽어오는 주기다. 0이면 통계 계산 때마다 읽는다.
-  var trashRefreshHoursPrev = $('#trash_refresh_hours').val();
-  $('#trash_refresh_hours').off('change').on('change', function () {
-    var v = parseInt($(this).val(), 10);
-    if (isNaN(v) || v < 0) {
-      if (window.$ && $.notify) $.notify('0 이상의 시간을 입력해 주세요.', 'warn');
-      else alert('0 이상의 시간을 입력해 주세요.');
-      $(this).val(trashRefreshHoursPrev);
-      return;
-    }
-    quietCommand('trash_refresh_hours', String(v), null, function (ret) {
-      if (ret && ret.ret == 'success') {
-        trashRefreshHoursPrev = String(v);
-        if (window.$ && $.notify) $.notify(ret.msg || '저장했습니다.', 'success');
-      } else {
-        var m = (ret && ret.msg) || '저장에 실패했습니다. 잠시 후 다시 시도해 주세요.';
-        if (window.$ && $.notify) $.notify(m, 'warn');
-        else alert(m);
-        $('#trash_refresh_hours').val(trashRefreshHoursPrev);
       }
     });
   });

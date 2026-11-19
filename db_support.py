@@ -447,10 +447,10 @@ def album_folder_from_track(track_path):
     return d
 
 
-# 메타 상세 캐시 행 형식 버전 — 행에 폴더명이 추가되면서 2가 됐다.
-# 이전 형식(폴더명 없음) 캐시는 task_meta_view가 오래된 것으로 보고
-# 다시 계산한다.
-META_VIEW_FORMAT = 2
+# 메타 상세 캐시 행 형식 버전 — 폴더가 이름에서 전체 경로로 바뀌면서
+# 3이 됐다. 이전 형식(폴더 이름만) 캐시는 task_meta_view가 오래된
+# 것으로 보고 다시 계산한다.
+META_VIEW_FORMAT = 3
 
 
 def meta_compute(library_id, progress_cb=None):
@@ -467,12 +467,12 @@ def meta_compute(library_id, progress_cb=None):
            'items': [[id, title, parent_title, year, flags, folder], ...]}
     no_meta는 팝업의 '메타 없는 미디어'와 같은 값이다 — 폴더 라이브러리는
     표지 없음 수, 아니면 코드 없음 수이다.
-    folder는 작품이 담긴 폴더 이름이다. metadata_items에 folder_path가
-    있는 작품(쇼·도서·영화)은 그 값을 쓰고, 없는 작품(음악)은
-    media_parts의 파일 경로에서 뽑는다 — 음악은 트랙→앨범으로 거슬러
-    올라가고, 멀티디스크(CD1 등)면 shyni와 같은 규칙으로 한 단계 위
-    폴더를 쓴다. 도서·쇼도 folder_path가 비어 있으면 parts에서 거슬러
-    올라가 구한다.
+    folder는 작품이 담긴 폴더의 전체 경로이다 (/mnt/gds2/... 부터).
+    metadata_items에 folder_path가 있는 작품(쇼·도서·영화)은 그 값을
+    쓰고, 없는 작품(음악)은 media_parts의 파일 경로에서 뽑는다 — 음악은
+    트랙→앨범으로 거슬러 올라가고, 멀티디스크(CD1 등)면 shyni와 같은
+    규칙으로 한 단계 위 폴더를 쓴다. 도서·쇼도 folder_path가 비어
+    있으면 parts에서 거슬러 올라가 구한다.
     """
     conn = connect()
     try:
@@ -511,8 +511,8 @@ def meta_compute(library_id, progress_cb=None):
                 parents[int(pid)] = ptitle or ''
         if progress_cb:
             progress_cb(60)
-        # 작품별 폴더 이름 — folder_path가 있는 작품(쇼·도서)은 그 값을
-        # 쓰고, 없는 작품(음악·영화)은 media_parts에서 뽑는다.
+        # 작품별 폴더 전체 경로 — folder_path가 있는 작품(쇼·도서)은
+        # 그 값을 쓰고, 없는 작품(음악·영화)은 media_parts에서 뽑는다.
         folders = {}
         if lib_type == 'music':
             # 트랙(10)의 파일 경로에서 앨범(9) 폴더를 구한다
@@ -527,7 +527,7 @@ def meta_compute(library_id, progress_cb=None):
             for album_id, path in cur.fetchall():
                 f = album_folder_from_track(path)
                 if f:
-                    folders[int(album_id)] = os.path.basename(f) or f
+                    folders[int(album_id)] = f
         elif lib_type == 'movie':
             # 영화는 파일이 작품에 직접 달린다
             cur.execute("""
@@ -539,7 +539,7 @@ def meta_compute(library_id, progress_cb=None):
             for item_id, path in cur.fetchall():
                 d = os.path.dirname(path or '')
                 if d:
-                    folders[int(item_id)] = os.path.basename(d) or d
+                    folders[int(item_id)] = d
         elif lib_type in ('tv', 'show'):
             # 에피소드(4) → 시즌(3) → 쇼(2)로 두 단계 거슬러 올라간다
             cur.execute("""
@@ -554,7 +554,7 @@ def meta_compute(library_id, progress_cb=None):
             for show_id, path in cur.fetchall():
                 d = os.path.dirname(path or '')
                 if d:
-                    folders[int(show_id)] = os.path.basename(d) or d
+                    folders[int(show_id)] = d
         elif lib_type == 'book':
             # 책(102) → 시리즈(100)로 거슬러 올라간다. folder_path가
             # 있는 시리즈는 컬럼 값을 먼저 쓴다.
@@ -569,7 +569,7 @@ def meta_compute(library_id, progress_cb=None):
             for series_id, path in cur.fetchall():
                 d = os.path.dirname(path or '')
                 if d:
-                    folders[int(series_id)] = os.path.basename(d) or d
+                    folders[int(series_id)] = d
         if progress_cb:
             progress_cb(70)
         items = []
@@ -599,11 +599,10 @@ def meta_compute(library_id, progress_cb=None):
             if flags != META_FLAG_ALL:
                 n_missing += 1
             parent_id = r[3]
-            # 폴더 이름 — 스캐너가 저장한 folder_path가 있으면 그 마지막
-            # 부분, 없으면 parts에서 뽑은 폴더 이름을 쓴다
+            # 폴더 전체 경로 — 스캐너가 저장한 folder_path가 있으면 그
+            # 값 그대로, 없으면 parts에서 뽑은 폴더 경로를 쓴다
             stored = (r[8] or '').strip().rstrip('/')
-            folder = (os.path.basename(stored) if stored
-                      else folders.get(item_id, ''))
+            folder = stored if stored else folders.get(item_id, '')
             items.append([item_id, r[1] or '',
                           parents.get(int(parent_id), '') if parent_id else '',
                           r[2], flags, folder])

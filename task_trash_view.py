@@ -117,6 +117,20 @@ def cache_times():
     return {k: (v.get('at') or 0) for k, v in _cache_libs().items()}
 
 
+def cache_summaries():
+    """라이브러리별 상세 요약 {키: {files, groups, missing, trashed,
+    main_label}} — 전체 현황 행의 상세 내역 표시용. 조회한 적 없는
+    라이브러리는 들어 있지 않다."""
+    out = {}
+    for k, v in _cache_libs().items():
+        data = (v or {}).get('data') or {}
+        s = data.get('summary') or {}
+        out[k] = {'files': s.get('files'), 'groups': s.get('groups'),
+                  'missing': s.get('missing'), 'trashed': s.get('trashed'),
+                  'main_label': data.get('main_label')}
+    return out
+
+
 def files_for(lib_id, root_id):
     data = cached_data(lib_id)
     if not data:

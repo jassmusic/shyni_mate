@@ -18,12 +18,6 @@
   <div id="meta_progress_text" style="font-size:12.5px; color:#666; margin-top:4px">조회를 준비하고 있습니다…</div>
 </div>
 
-<div style="display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-top:10px; font-size:13px; color:#555">
-  <label for="meta_refresh_hours" style="font-weight:normal; margin:0">자동 갱신 주기</label>
-  <input type="number" id="meta_refresh_hours" min="0" value="{{ arg.get('base_meta_refresh_hours') or '12' }}" style="width:64px; height:31px; display:inline-block; padding:2px 6px; font-size:13px" class="form-control">
-  <span>시간</span>
-</div>
-
 <div id="meta_relay_off" style="display:none; border:1px solid #bee5eb; background:#e8f6f8; border-radius:6px; padding:16px; text-align:center; color:#0c5460; margin-top:10px">
   메타는 Relay를 켜면 표시됩니다.<br>
   <span style="font-size:13px">설정 &gt; Relay에서 켤 수 있습니다.</span>
@@ -38,7 +32,14 @@
     <button type="button" class="btn btn-sm btn-outline-primary" id="meta_query_all_btn" title="모두 조회" style="flex:0 0 auto">모두 조회</button>
   </div>
 
-  <div id="meta_overview" style="margin-top:10px"></div>
+  <div id="meta_ov_head" style="display:none; justify-content:space-between; align-items:center; margin:10px 0 6px">
+    <div style="font-size:13px; font-weight:bold">전체 현황</div>
+    <span style="display:flex; align-items:center; gap:10px; white-space:nowrap">
+      <span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888">표시 <button type="button" id="meta_show_btn" class="btn btn-default" style="height:31px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="meta_show_panel" style="display:none; position:absolute; right:0; top:35px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="meta_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="meta_show_all" checked> 전체</label><span id="meta_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span>
+      <label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 <select id="metaOverviewSort" onchange="setMetaOverviewSort(this.value)" style="display:inline-block; width:auto; height:31px; padding:2px 6px; font-size:12px; vertical-align:middle"><option value="nocode_desc"{% if (arg.get('meta_overview_sort') or 'nocode_desc') == 'nocode_desc' %} selected{% endif %}>메타</option><option value="code_desc"{% if arg.get('meta_overview_sort') == 'code_desc' %} selected{% endif %}>코드</option><option value="summary_desc"{% if arg.get('meta_overview_sort') == 'summary_desc' %} selected{% endif %}>설명</option><option value="year_desc"{% if arg.get('meta_overview_sort') == 'year_desc' %} selected{% endif %}>연도</option><option value="thumb_desc"{% if arg.get('meta_overview_sort') == 'thumb_desc' %} selected{% endif %}>표지</option><option value="name"{% if arg.get('meta_overview_sort') == 'name' %} selected{% endif %}>이름</option><option value="default"{% if arg.get('meta_overview_sort') == 'default' %} selected{% endif %}>기본</option></select></label>
+    </span>
+  </div>
+  <div id="meta_overview"></div>
 
   <div id="meta_bulk_toast" style="display:none; position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#2d3748; color:#fff; font-size:13.5px; padding:10px 20px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.25); z-index:3000; white-space:nowrap"></div>
 
@@ -116,8 +117,7 @@ var STATUS_API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/status/';
 var PRESELECT = {{ arg['meta_preselect']|default('')|tojson }};
 var metaPage = 1;
 var metaData = null;
-var metaCounts = null; // {라이브러리키: {total, no_meta, ...}} — 현황용
-var metaCountsAt = 0;
+var metaCounts = null; // {라이브러리키: {total, missing_any, no_code, ...}} — 현황용
 var metaOverviewState = 'loading'; // loading | ok | missing | relay_off | fail
 var metaRefreshPollTimer = null;
 var metaRefreshLib = null; // 메타 새로고침 진행 중인 라이브러리 키
@@ -138,11 +138,10 @@ function libByKey(key) {
 }
 
 // 라이브러리별 캐시 저장 시각 {키: epoch} — '캐시 있음' 표시용.
-// 첫 값은 페이지가 뜰 때 서버가 함께 실어 보낸 것이라, 응답을 기다리지
-// 않고 처음부터 표시된다. 이후 meta_state 응답으로 갱신된다.
+// 첫 값은 비어 있고, 페이지가 뜬 뒤 meta_state·meta_overview 응답으로
+// 채워진다. 첫 화면 렌더가 캐시에 닿지 않게 해 메뉴 클릭 때 페이지가
+// 늦게 뜨지 않게 한다.
 var metaCacheTimes = {{ arg['meta_cache_times']|tojson }};
-var metaRefreshHours = parseInt("{{ arg.get('base_meta_refresh_hours') or '12' }}", 10);
-if (isNaN(metaRefreshHours)) metaRefreshHours = 12;
 
 function fmtAgo(ts) {
   if (!ts) return '';
@@ -153,14 +152,6 @@ function fmtAgo(ts) {
   var hour = Math.floor(min / 60);
   if (hour < 24) return hour + '시간 전';
   return Math.floor(hour / 24) + '일 전';
-}
-
-function metaCacheStale(lib) {
-  // 주기가 0이면 캐시는 항상 오래된 것으로 본다 (열 때마다 새로 조회)
-  if (!(metaRefreshHours > 0)) return true;
-  var at = metaCacheTimes[String(lib)] || 0;
-  if (!at) return true;
-  return (Date.now() / 1000 - at) > metaRefreshHours * 3600;
 }
 
 function fmtBasisTime(ts) {
@@ -174,6 +165,13 @@ function cacheBadge(libKey) {
   var cat = metaCacheTimes[String(libKey)] || 0;
   if (!cat) return '<span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#f7fafc; color:#718096; border:1px solid #e2e8f0">캐시 없음</span>';
   return '<span style="display:inline-block; font-size:11px; padding:1px 6px; border-radius:8px; background:#ebf8ff; color:#2b6cb0; border:1px solid #bee3f8">캐시 있음 (' + fmtAgo(cat) + ')</span>';
+}
+
+// 현황 행의 캐시 표시 — 배지가 아니라 짧은 글씨로 이름 줄 오른쪽에 둔다.
+function cacheText(libKey) {
+  var cat = metaCacheTimes[String(libKey)] || 0;
+  if (!cat) return '<span style="font-size:12px; color:#888; white-space:nowrap">캐시 없음</span>';
+  return '<span style="font-size:12px; color:#2b6cb0; white-space:nowrap">캐시 ' + fmtAgo(cat) + '</span>';
 }
 
 // ---- 진입 현황 로딩 표시 ----
@@ -230,47 +228,52 @@ function renderMetaOvLoading(kind) {
 // 메타 없음 수 내림차순으로 정렬한다 (휴지통 현황과 같은 방식).
 function renderMetaOverview() {
   var el = $('#meta_overview');
-  if (metaOverviewState === 'relay_off') { stopMetaOvTimer(); metaOvKind = ''; el.html(''); return; }
+  if (metaOverviewState === 'relay_off') { stopMetaOvTimer(); metaOvKind = ''; setMetaOvHead(false); el.html(''); return; }
   if (LIBS_STATE === 'loading' || metaOverviewState === 'loading') {
+    setMetaOvHead(false);
     renderMetaOvLoading('loading');
     return;
   }
   if (metaOverviewState === 'missing') {
+    setMetaOvHead(false);
     renderMetaOvLoading('missing');
     return;
   }
   stopMetaOvTimer();
   metaOvKind = '';
   if (!LIBS.length) {
+    setMetaOvHead(false);
     el.html('<div style="padding:16px 4px; color:#c0392b">라이브러리 목록을 가져오지 못했습니다.</div>');
     return;
   }
-  var rows = sortedMetaOverviewRows();
-  var str = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">'
-    + '<div style="font-size:13px; font-weight:bold">전체 현황'
-    + ' <span style="font-weight:normal; color:#888; font-size:12px">' + (metaCountsAt ? fmtBasisTime(metaCountsAt) + ' 기준' : '') + '</span></div>'
-    + '<label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 '
-    + '<select id="metaOverviewSort" onchange="setMetaOverviewSort(this.value)" style="display:inline-block; width:auto; height:31px; padding:2px 6px; font-size:12px; vertical-align:middle">'
-    + '<option value="nocode_desc"' + (metaOverviewSort == 'nocode_desc' ? ' selected' : '') + '>메타</option>'
-    + '<option value="code_desc"' + (metaOverviewSort == 'code_desc' ? ' selected' : '') + '>코드</option>'
-    + '<option value="summary_desc"' + (metaOverviewSort == 'summary_desc' ? ' selected' : '') + '>설명</option>'
-    + '<option value="year_desc"' + (metaOverviewSort == 'year_desc' ? ' selected' : '') + '>연도</option>'
-    + '<option value="thumb_desc"' + (metaOverviewSort == 'thumb_desc' ? ' selected' : '') + '>표지</option>'
-    + '<option value="name"' + (metaOverviewSort == 'name' ? ' selected' : '') + '>이름</option>'
-    + '<option value="default"' + (metaOverviewSort == 'default' ? ' selected' : '') + '>기본</option>'
-    + '</select></label></div>';
-  str += '<div style="border:1px solid #e2e8f0; border-radius:8px; overflow:hidden">';
+  setMetaOvHead(true);
+  buildMetaShowPanel(LIBS);
+  var rows = sortedMetaOverviewRows().filter(function (lib) { return !metaHiddenLibs[String(lib.key)]; });
+  if (!rows.length) {
+    el.html('<div style="color:#888; font-size:13px; padding:14px 4px">표시할 라이브러리가 없습니다. 위쪽 표시에서 라이브러리를 선택해 주세요.</div>');
+    return;
+  }
+  var str = '<div style="border:1px solid #e2e8f0; border-radius:8px; overflow:hidden">';
   for (var i = 0; i < rows.length; i++) {
     var lib = rows[i];
     var c = metaCounts ? metaCounts[String(lib.key)] : null;
+    // 안 1 줄 분리 — 이름은 한 줄 전체에 쓰고(잘림 없음), 수치는 아래 줄에 둔다.
+    // 없음이 0개면 '메타 모두 있음', 비어 있으면 '비어 있음'을 보여 준다.
+    var thirdLine;
+    if (c && c.total === 0) {
+      thirdLine = '<div style="font-size:12px; color:#888; margin-top:2px">비어 있음</div>';
+    } else if (c && c.missing_any === 0) {
+      thirdLine = '<div style="font-size:12px; color:#276749; margin-top:2px">메타 모두 있음</div>';
+    } else {
+      thirdLine = '<div style="font-size:12px; color:#888; margin-top:2px">코드 ' + (c && c.no_code != null ? fmtNum(c.no_code) : '-') + ' · 설명 ' + (c && c.no_summary != null ? fmtNum(c.no_summary) : '-') + ' · 연도 ' + (c && c.no_year != null ? fmtNum(c.no_year) : '-') + ' · 표지 ' + (c && c.no_thumb != null ? fmtNum(c.no_thumb) : '-') + '</div>';
+    }
     str += '<div class="meta-ov-row" data-key="' + lib.key + '" style="padding:8px 10px; cursor:pointer' + (i > 0 ? '; border-top:1px solid #edf2f7' : '') + '">'
-      + '<div style="display:flex; gap:8px; align-items:baseline">'
-      + '<span style="flex:1; min-width:0; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis">' + esc(lib.title) + '</span>'
-      + '<span style="font-size:12.5px; color:#666; white-space:nowrap">전체 ' + (c ? fmtNum(c.total) + '개' : '-') + '</span>'
-      + '<span style="font-size:12.5px; color:#c05621; white-space:nowrap">메타 없음 ' + (c ? fmtNum(c.no_meta) + '개' : '-') + '</span>'
-      + cacheBadge(lib.key)
+      + '<div style="display:flex; justify-content:space-between; gap:8px; align-items:baseline">'
+      + '<span style="font-weight:bold">' + esc(lib.title) + '</span>'
+      + cacheText(lib.key)
       + '</div>'
-      + '<div style="font-size:12px; color:#888; margin-top:2px">코드 없음 ' + (c && c.no_code != null ? fmtNum(c.no_code) + '개' : '-') + ' · 설명 없음 ' + (c && c.no_summary != null ? fmtNum(c.no_summary) + '개' : '-') + ' · 연도 없음 ' + (c && c.no_year != null ? fmtNum(c.no_year) + '개' : '-') + ' · 표지 없음 ' + (c && c.no_thumb != null ? fmtNum(c.no_thumb) + '개' : '-') + '</div>'
+      + '<div style="font-size:12.5px; margin-top:2px"><span style="color:#666">전체 ' + (c ? fmtNum(c.total) + '개' : '-') + '</span> · <span style="color:#c05621">값이 없는 미디어 ' + (c && c.missing_any != null ? fmtNum(c.missing_any) + '개' : '-') + '</span></div>'
+      + thirdLine
       + '</div>';
   }
   str += '</div>';
@@ -278,12 +281,16 @@ function renderMetaOverview() {
 }
 
 function showMetaOverview() {
+  // 상세에서 남긴 진행률 막대·완료 문구를 지운다 — 전체 현황의
+  // 데이터와 무관한 잔상이 머리말과 함께 보이면 기준 시각이 두 개로 보인다.
+  $('#meta_progress_wrap').hide();
   $('#meta_overview').show();
   $('#meta_back_btn').hide();
   renderMetaOverview();
 }
 
 function hideMetaOverview() {
+  setMetaOvHead(false);
   $('#meta_overview').hide();
   $('#meta_back_btn').show();
 }
@@ -317,7 +324,6 @@ function loadOverview() {
     metaOverviewState = 'ok';
     if (ret.data) {
       metaCounts = ret.data.counts || {};
-      metaCountsAt = ret.data.at || 0;
       if (ret.data.cache_times) metaCacheTimes = ret.data.cache_times;
     }
     renderMetaOverview();
@@ -352,7 +358,7 @@ function renderLibOptions(counts) {
   }
   var lib = libByKey(cur);
   var c = metaCounts ? metaCounts[lib.key] : null;
-  el.text(lib.title + (c != null ? ' (전체 ' + fmtNum(c.total) + '개 · 메타 없음 ' + fmtNum(c.no_meta) + '개)' : '')).css('color', '');
+  el.text(lib.title + (c != null ? ' (전체 ' + fmtNum(c.total) + '개 · 값이 없는 미디어 ' + (c.missing_any != null ? fmtNum(c.missing_any) + '개' : '-') + ')' : '')).css('color', '');
 }
 
 function loadSections() {
@@ -383,9 +389,17 @@ function loadSections() {
 // ---- 전체 현황 정렬 ----
 // 선택 팝업의 정렬과는 별개로, 현황 목록의 정렬을 정한다.
 // 기본은 메타 없음 수 내림차순(지금까지의 고정 순서)이다.
-// 종류별 정렬 키 → 현황 개수 필드 (서버 meta_overview가 보내 주는 값)
-var META_COUNT_KEYS = {nocode_desc: 'no_meta', code_desc: 'no_code',
+// 종류별 정렬 키 → 현황 개수 필드 (서버 meta_overview가 보내 주는 값).
+// '메타'(nocode_desc)는 현황 첫 줄에 보이는 값이 없는 미디어 수로 정렬한다 —
+// 예전 no_meta(코드 없음 수)는 상세 첫 줄과 달라 보였다.
+var META_COUNT_KEYS = {nocode_desc: 'missing_any', code_desc: 'no_code',
   summary_desc: 'no_summary', year_desc: 'no_year', thumb_desc: 'no_thumb'};
+// 현황 정렬 → 상세 필터. 현황에서 라이브러리를 눌러 들어갈 때 상세의
+// 필터를 현황 조건과 같게 맞춘다. '메타'는 상세에 같은 필터가 없어
+// 기본(값이 없는 미디어 전체)으로 연다.
+var META_OV_TO_DETAIL_ORDER = {nocode_desc: 'default', code_desc: 'no_code',
+  summary_desc: 'no_summary', year_desc: 'no_year', thumb_desc: 'no_thumb',
+  name: 'name', default: 'default'};
 var META_SORT_VALUES = ['default', 'name', 'nocode_desc', 'code_desc',
   'summary_desc', 'year_desc', 'thumb_desc'];
 
@@ -421,6 +435,66 @@ function setMetaOverviewSort(v) {
   renderMetaOverview();
 }
 
+// ---- 전체 현황 표시 선택 — 대시보드와 같은 방식이다 ----
+// 사용자가 고른 숨김 목록은 서버 설정(meta_overview_hidden_libs)에
+// 기억해 메타 화면만의 목록으로 쓴다. 기본은 전체 표시.
+var metaHiddenLibs = {};
+String("{{ arg.get('meta_overview_hidden_libs') or '' }}").split(',').forEach(function (x) { x = x.trim(); if (x) metaHiddenLibs[x] = true; });
+var metaShowSig = '';
+function setMetaOvHead(show) {
+  // 머리말은 flex 줄이라 jQuery show()를 쓰면 block으로 바뀌어
+  // 정렬이 깨진다 — display 값을 직접 정한다.
+  $('#meta_ov_head').css('display', show ? 'flex' : 'none');
+}
+function saveMetaHiddenLibs() {
+  var keys = Object.keys(metaHiddenLibs).filter(function (k) { return metaHiddenLibs[k]; }).join(',');
+  $.ajax({type: 'POST', url: API_BASE + 'set_hidden_libs', data: {keys: keys}, global: false});
+}
+function paintMetaShowBtn(libs) {
+  var hidden = 0;
+  libs.forEach(function (s) { if (metaHiddenLibs[String(s.key)]) hidden++; });
+  $('#meta_show_btn').text(hidden == 0 ? '전체 ▾' : '일부 (' + (libs.length - hidden) + '/' + libs.length + ') ▾');
+  $('#meta_show_all').prop('checked', hidden == 0);
+}
+function buildMetaShowPanel(libs) {
+  var sig = libs.map(function (s) { return s.key; }).join(',');
+  if (sig != metaShowSig) {
+    metaShowSig = sig;
+    var str = '';
+    libs.forEach(function (s) {
+      str += '<label class="meta-show-row" data-title="' + esc(s.title) + '" style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:normal; padding:3px 2px; margin:0; cursor:pointer"><input type="checkbox" class="meta-show-chk" data-key="' + s.key + '"' + (metaHiddenLibs[String(s.key)] ? '' : ' checked') + '> ' + esc(s.title) + '</label>';
+    });
+    $('#meta_show_rows').html(str);
+  }
+  paintMetaShowBtn(libs);
+}
+$("body").on('click', '#meta_show_btn', function (e) {
+  e.stopPropagation();
+  $('#meta_show_panel').toggle();
+});
+$(document).on('click', function (e) {
+  if (!$(e.target).closest('#meta_show_panel, #meta_show_btn').length) $('#meta_show_panel').hide();
+});
+$("body").on('change', '.meta-show-chk', function () {
+  var k = String($(this).data('key'));
+  if (this.checked) delete metaHiddenLibs[k]; else metaHiddenLibs[k] = true;
+  saveMetaHiddenLibs();
+  renderMetaOverview();
+});
+$("body").on('change', '#meta_show_all', function () {
+  var show = this.checked;
+  LIBS.forEach(function (s) {
+    if (show) delete metaHiddenLibs[String(s.key)]; else metaHiddenLibs[String(s.key)] = true;
+  });
+  $('.meta-show-chk').prop('checked', show);
+  saveMetaHiddenLibs();
+  renderMetaOverview();
+});
+$("body").on('input', '#meta_show_search', function () {
+  var q = $(this).val().toLowerCase();
+  $('.meta-show-row').each(function () { $(this).toggle(!q || $(this).data('title').toLowerCase().indexOf(q) >= 0); });
+});
+
 // ---- 라이브러리 선택 팝업 ----
 var metaLibSort = "{{ arg['meta_lib_pick_sort'] or 'default' }}";
 if (META_SORT_VALUES.indexOf(metaLibSort) < 0) metaLibSort = 'default';
@@ -445,7 +519,7 @@ function renderMetaLibList() {
     var c = metaCounts ? metaCounts[lib.key] : null;
     var sel = String(lib.key) === String(cur);
     str += '<div class="meta-lib-row" data-key="' + lib.key + '" style="padding:6px 4px; cursor:pointer; border-radius:4px' + (sel ? '; background:#ebf4ff' : '') + '">' + esc(lib.title)
-      + (c != null ? ' <span style="color:#888; font-size:12px">(전체 ' + fmtNum(c.total) + '개 · 메타 없음 ' + fmtNum(c.no_meta) + '개)</span>' : '')
+      + (c != null ? ' <span style="color:#888; font-size:12px">(전체 ' + fmtNum(c.total) + '개 · 값이 없는 미디어 ' + (c.missing_any != null ? fmtNum(c.missing_any) + '개' : '-') + ')</span>' : '')
       + ' ' + cacheBadge(lib.key)
       + '</div>';
   }
@@ -462,7 +536,6 @@ function openMetaLibPicker() {
   quietCommand('meta_state', null, null, function (ret) {
     if (ret && ret.ret == 'success' && ret.data) {
       metaCacheTimes = ret.data.cache_times || {};
-      if (ret.data.refresh_hours != null) metaRefreshHours = ret.data.refresh_hours;
       renderMetaLibList();
     }
   });
@@ -480,10 +553,17 @@ function setMetaLibSort(v) {
 
 // 라이브러리를 고르면 상세 보기로 넘어간다. 이미 선택된 라이브러리를
 // 다시 골라도, 아직 아무것도 표시되지 않았으면 선택을 반영한다.
-function onMetaLibPicked(key, fromPreselect) {
+// 현황에서 들어오면(fromOverview·fromPreselect) 현황의 필터조건을
+// 상세에도 그대로 적용한다 — 선택 팝업에서 바꾸는 경우는 상세에
+// 골라 둔 필터를 그대로 둔다.
+function onMetaLibPicked(key, fromPreselect, fromOverview) {
   closeMetaLibPicker();
   if (String($('#meta_lib').val()) === String(key) && (metaData || metaPollLib)) return;
   $('#meta_lib').val(key);
+  if (fromOverview || fromPreselect) {
+    $('#meta_order').val(META_OV_TO_DETAIL_ORDER[metaOverviewSort] || 'default');
+    $('#meta_search').val('');
+  }
   renderLibOptions(null);
   hideMetaOverview();
   stopMetaPolling();
@@ -500,6 +580,7 @@ function onMetaLibPicked(key, fromPreselect) {
   // 없으면 그 사실을 목록 자리에 알려 준다.
   tryShowCache(key, function (shown) {
     if (shown === false) $('#meta_list_div').html('<div style="padding:16px 4px; color:#888">캐시된 데이터가 없습니다. 조회를 눌러 불러와 주세요.</div>');
+    else if (shown === 'timeout') $('#meta_list_div').html('<div style="padding:16px 4px; color:#888">서버 응답이 느립니다. 잠시 후 다시 선택해 주세요.</div>');
     else if (shown === null) $('#meta_list_div').html('<div style="padding:16px 4px; color:#888">캐시를 확인하지 못했습니다. 잠시 후 다시 선택하시거나, 조회를 눌러 불러와 주세요.</div>');
   });
 }
@@ -533,23 +614,23 @@ function fmtElapsedMs(ms) {
   return Math.floor(s / 60) + '분 ' + Math.round(s % 60) + '초';
 }
 
-// 완료 문구 — 대시보드·건강도와 같은 형식: 불러오기 완료 · 소요시간 · 기준 시각
+// 완료 문구 — 대시보드·건강도와 같은 형식: 불러오기 완료 · 소요시간 · (N분 전)
 function metaDoneText(startedAt, finishedAt) {
   var txt = '불러오기 완료';
   if (startedAt && finishedAt && finishedAt >= startedAt) {
     txt += ' · 소요시간 ' + fmtElapsedMs((finishedAt - startedAt) * 1000);
   }
-  var t = fmtBasisTime(finishedAt);
-  if (t) txt += ' · ' + t + ' 기준';
+  var a = fmtAgo(finishedAt);
+  if (a) txt += ' · (' + a + ')';
   return txt;
 }
 
 function paintBasis() {
   var el = $('#meta_basis');
   if (!metaData || !metaBasisKind) { el.hide(); return; }
-  var t = fmtBasisTime(metaBasisAt);
-  if (metaBasisKind == 'cache') el.text('캐시 데이터 기준' + (t ? ' · ' + t + '에 불러온 결과입니다' : ''));
-  else el.text('조회 결과' + (t ? ' · ' + t + ' 기준' : ''));
+  var a = fmtAgo(metaBasisAt);
+  if (metaBasisKind == 'cache') el.text('캐시 데이터 기준' + (a ? ' (' + a + ')' : ''));
+  else el.text('조회 결과' + (a ? ' (' + a + ')' : ''));
   el.show();
 }
 
@@ -573,6 +654,7 @@ function paintQueryStopped() {
 function showCacheAfterCancel(lib) {
   tryShowCache(lib, function (shown) {
     if (shown === false) $('#meta_list_div').html('<div style="padding:16px 4px; color:#888">조회를 취소했습니다. 저장된 메타 목록이 없습니다.</div>');
+    else if (shown === 'timeout') $('#meta_list_div').html('<div style="padding:16px 4px; color:#888">조회를 취소했습니다. 서버 응답이 느려 저장된 목록을 확인하지 못했습니다.</div>');
     else if (shown === null) $('#meta_list_div').html('<div style="padding:16px 4px; color:#888">조회를 취소했습니다. 저장된 목록을 확인하지 못했습니다.</div>');
   });
   setProgress(0, '조회를 취소했습니다.');
@@ -764,17 +846,19 @@ function clearBasis() {
 // 확인 실패를 '캐시 없음'으로 잘못 알리지 않기 위해 구분한다.
 // 같은 라이브러리의 계산이 돌고 있거나 접수돼 있으면, 캐시를 먼저
 // 보여 준 채로 완료를 지켜보다가 끝나면 목록을 새 결과로 바꾼다.
-// 캐시가 주기를 지났으면 뒤에서 새로 계산하고 끝나면 목록을 바꾼다.
+// 캐시가 오래됐어도 뒤에서 다시 계산하지 않는다 — 사용자가 최신으로
+// 조회나 모두 조회로 직접 새로고침한다 (2026-11-20 사용자 결정).
 function tryShowCache(lib, cb) {
+  var timedOut = false;
   var attempt = function (retried) {
-    quietCommand('meta_state', null, null, function (ret) {
+    quietCommand('meta_state', null, null, function (ret, status) {
       if (!ret || ret.ret != 'success' || !ret.data) {
+        if (status === 'timeout') timedOut = true;
         if (!retried) { setTimeout(function () { attempt(true); }, 800); return; }
-        if (cb) cb(null);
+        if (cb) cb(timedOut ? 'timeout' : null);
         return;
       }
       metaCacheTimes = ret.data.cache_times || metaCacheTimes;
-      if (ret.data.refresh_hours != null) metaRefreshHours = ret.data.refresh_hours;
       var libs = (ret.data.cache_libs || []).map(function (x) { return String(x); });
       if (libs.indexOf(String(lib)) < 0) { if (cb) cb(false); return; }
       metaBasisKind = 'cache';
@@ -785,15 +869,10 @@ function tryShowCache(lib, cb) {
       if (String(st0.lib) === String(lib)
           && (st0.busy || (st0.requested_at || 0) > (st0.finished_at || 0))) {
         watchCacheRefresh(lib);
-      } else if (metaCacheStale(lib)) {
-        // 캐시가 오래됐으면 뒤에서 새로 계산한다 — 서버가 주기를 보고
-        // 오래된 캐시는 다시 계산한다 (화면은 캐시를 계속 보여 준다)
-        quietCommand('meta_query', lib, '', function (ret2) {
-          if (ret2 && ret2.ret == 'success' && ret2.data && !ret2.data.from_cache) watchCacheRefresh(lib);
-        });
-        setProgress(0, '오래된 캐시를 보여 주는 중입니다. 새로 계산하고 있습니다…');
       } else {
-        // 계산이 돌고 있지 않으면 캐시를 불러온 것으로 완료 표시한다
+        // 계산이 돌고 있지 않으면 캐시를 불러온 것으로 완료 표시한다.
+        // 캐시가 오래됐어도 뒤에서 다시 계산하지 않는다 — 사용자가
+        // 오래됐다고 판단하면 최신으로 조회나 모두 조회로 직접 새로고침한다.
         setProgress(100, metaDoneText(0, metaBasisAt));
       }
       if (cb) cb(true);
@@ -868,12 +947,15 @@ var CMD_URL = '/' + location.pathname.split('/')[1] + '/ajax/meta/command';
 
 // 폴링 전용 조용한 명령 — globalSendCommand는 호출할 때마다 프레임워크
 // 로딩 표시가 떠서, 0.7초 간격 폴링에서는 화면이 계속 깜빡인다.
+// 30초 타임아웃 — 서버가 바빠 응답이 늦어지면 무한히 기다리지 않고
+// 끊는다. 타임아웃이면 두 번째 인자로 'timeout'을 넘겨, 호출하는 쪽이
+// '서버 응답이 느립니다'로 구분해 알릴 수 있게 한다.
 function quietCommand(command, arg1, arg2, cb) {
   $.ajax({
-    type: 'POST', url: CMD_URL, global: false,
+    type: 'POST', url: CMD_URL, global: false, timeout: 30000,
     data: {command: command, arg1: arg1 == null ? '' : arg1, arg2: arg2 == null ? '' : arg2, arg3: ''},
     success: function (ret) { cb(ret); },
-    error: function () { cb(null); }
+    error: function (xhr, status) { cb(null, status); }
   });
 }
 
@@ -991,7 +1073,7 @@ function sendMetaQuery() {
       var lib2 = metaPollLib;
       stopMetaPolling();
       tryShowCache(lib2, function (shown) {
-        if (shown === null) setTimeout(function () { tryShowCache(lib2, function () {}); }, 1500);
+        if (shown === null || shown === 'timeout') setTimeout(function () { tryShowCache(lib2, function () {}); }, 1500);
       });
       return;
     }
@@ -1008,11 +1090,11 @@ function startQuery(force) {
   var lib = $('#meta_lib').val();
   if (!lib) return;
   // 캐시 확인보다 조회가 먼저 눌린 경우의 방어 — '최신으로 조회'가
-  // 아닌데 주기 안에 든 캐시가 이미 있으면, 계산하지 않고 캐시를 보여 준다
-  if (!force && metaCacheTimes[String(lib)] && !metaCacheStale(lib)) {
+  // 아닌데 캐시가 이미 있으면, 계산하지 않고 캐시를 보여 준다
+  if (!force && metaCacheTimes[String(lib)]) {
     tryShowCache(lib, function (shown) {
       if (shown === false) startQuery(true);
-      else if (shown === null) {
+      else if (shown === null || shown === 'timeout') {
         // 확인이 실패한 경우 — 잠시 뒤 캐시 확인부터 다시 한다
         setTimeout(function () {
           if ($('#meta_lib').val() === String(lib) && !metaData && !metaPollLib) startQuery(false);
@@ -1106,24 +1188,59 @@ function pollMetaState() {
   }, 700);
 }
 
+// 상세 목록 표시 경과 시간 — 현황 로딩 타이머와 같은 방식.
+// 목록을 새로 불러올 때마다 시작 시각을 다시 잡는다.
+var metaListTimer = null;
+var metaListStart = 0;
+function metaListElapsedText() {
+  var s = Math.max(0, Math.floor((Date.now() - metaListStart) / 1000));
+  if (s < 60) return s + '초 경과';
+  return Math.floor(s / 60) + '분 ' + (s % 60) + '초 경과';
+}
+function startMetaListTimer() {
+  stopMetaListTimer();
+  metaListStart = Date.now();
+  $('#meta_list_elapsed').text(metaListElapsedText());
+  metaListTimer = setInterval(function () {
+    var el = $('#meta_list_elapsed');
+    if (!el.length) { stopMetaListTimer(); return; }
+    el.text(metaListElapsedText());
+  }, 1000);
+}
+function stopMetaListTimer() {
+  if (metaListTimer) { clearInterval(metaListTimer); metaListTimer = null; }
+}
+
 function loadMeta(page) {
   var lib = $('#meta_lib').val();
   if (!lib) return;
   metaPage = page || 1;
-  $('#meta_list_div').html('<div style="padding:16px 4px; color:#888">불러오는 중입니다…</div>');
+  // 상세 목록은 데이터(캐시)가 이미 불러와진 뒤 내용을 그리는 단계라,
+  // '불러오는 중'이 아니라 '내용을 표시하는 중'으로 쓴다 — 위쪽
+  // '불러오기 완료'와 모순돼 보인다는 2026-11-20 사용자 지적.
+  // 전체 현황과 같은 물결 막대바에 경과 시간을 함께 보여 준다.
+  $('#meta_list_div').html('<div style="padding:16px 4px">'
+    + '<div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden">'
+    + '<div class="ov-loading-bar"></div>'
+    + '</div>'
+    + '<div style="font-size:12.5px; color:#888; margin-top:6px">내용을 표시하는 중입니다… <span id="meta_list_elapsed"></span></div>'
+    + '</div>');
+  startMetaListTimer();
   var opts = {
     page: metaPage,
     search: $('#meta_search').val() || '',
     order: $('#meta_order').val() || 'default',
     scope: 'missing'
   };
-  quietCommand('meta_list', lib, JSON.stringify(opts), function (ret) {
+  quietCommand('meta_list', lib, JSON.stringify(opts), function (ret, status) {
+    stopMetaListTimer();
     if (!ret || ret.ret != 'success') {
       $('#meta_summary').text('');
       $('#meta_tools').hide();
       $('#meta_pager').hide();
       clearBasis();
-      $('#meta_list_div').html('<div style="padding:16px 4px; color:#c0392b">' + esc((ret && ret.msg) || '조회에 실패했습니다.') + '</div>');
+      var msg = (ret && ret.msg) || (status === 'timeout' ? '서버 응답이 느립니다. 잠시 후 다시 시도해 주세요.' : '조회에 실패했습니다.');
+      $('#meta_list_div').html('<div style="padding:16px 4px; color:#c0392b">' + esc(msg) + '</div>');
       return;
     }
     metaData = ret.data;
@@ -1141,7 +1258,7 @@ function renderMeta() {
   if (!d) return;
   var s = d.summary || {};
   var sumHtml = '값이 없는 미디어 <strong>' + fmtNum(s.missing_any) + '개</strong> · 전체 ' + fmtNum(s.total) + '개';
-  sumHtml += ' · 코드 없음 ' + fmtNum(s.no_code) + '개 · 설명 없음 ' + fmtNum(s.no_summary) + '개 · 연도 없음 ' + fmtNum(s.no_year) + '개 · 표지 없음 ' + fmtNum(s.no_thumb) + '개';
+  sumHtml += '<br>코드 ' + fmtNum(s.no_code) + ' · 설명 ' + fmtNum(s.no_summary) + ' · 연도 ' + fmtNum(s.no_year) + ' · 표지 ' + fmtNum(s.no_thumb);
   $('#meta_summary').html(sumHtml);
   $('#meta_tools').show();
   $('#meta_check_row').show();
@@ -1160,7 +1277,7 @@ function renderMeta() {
     str += '<div style="display:flex; gap:8px; align-items:flex-start">';
     str += '<input type="checkbox" class="meta-check" data-id="' + it.id + '"' + (metaSel[it.id] ? ' checked' : '') + ' style="margin-top:3px; flex:0 0 auto">';
     str += '<div style="flex:1; min-width:0"><div><strong>' + esc(title) + '</strong></div>';
-    if (it.folder) str += '<div style="font-size:12px; color:#888; margin-top:1px">폴더: ' + esc(it.folder) + '</div>';
+    if (it.folder) str += '<div style="font-size:12px; color:#888; margin-top:1px; overflow-wrap:break-word">폴더: ' + esc(it.folder) + '</div>';
     str += '<div style="font-size:12.5px; color:#666; margin-top:2px">';
     if (it.missing) {
       if (!it.has_code) str += missChip('메타 없음');
@@ -1196,10 +1313,15 @@ $(document).ready(function () {
   // 캐시 시각을 미리 받아 둔다 — 선택 팝업을 열면 '캐시 있음' 표시가
   // 서버 응답을 기다리지 않고 바로 보인다. 화면 표시 뒤에 조용히
   // 물어보는 것이라 처음 뜨는 속도에 영향을 주지 않는다.
+  // 전체 조회가 돌고 있는 채로 화면에 들어오면 진행 표시도 함께 이어받는다.
   quietCommand('meta_state', null, null, function (ret) {
     if (ret && ret.ret == 'success' && ret.data) {
       metaCacheTimes = ret.data.cache_times || {};
-      if (ret.data.refresh_hours != null) metaRefreshHours = ret.data.refresh_hours;
+      if (ret.data.bulk && ret.data.bulk.active) {
+        metaBulkActive = true;
+        paintBulkRunning(ret.data.bulk);
+        pollBulk();
+      }
     }
   });
 
@@ -1255,38 +1377,6 @@ $(document).ready(function () {
       }
     });
   });
-  // 자동 갱신 주기 — 바꾸면 바로 저장한다 (휴지통 페이지와 같은 방식).
-  // 주기가 지난 캐시는 다시 계산한다. 0이면 열 때마다 새로 조회한다.
-  var metaRefreshHoursPrev = $('#meta_refresh_hours').val();
-  $('#meta_refresh_hours').off('change').on('change', function () {
-    var v = parseInt($(this).val(), 10);
-    if (isNaN(v) || v < 0) {
-      if (window.$ && $.notify) $.notify('0 이상의 시간을 입력해 주세요.', 'warn');
-      else alert('0 이상의 시간을 입력해 주세요.');
-      $(this).val(metaRefreshHoursPrev);
-      return;
-    }
-    quietCommand('meta_refresh_hours', String(v), null, function (ret) {
-      if (ret && ret.ret == 'success') {
-        metaRefreshHoursPrev = String(v);
-        metaRefreshHours = v;
-        if (window.$ && $.notify) $.notify(ret.msg || '저장했습니다.', 'success');
-      } else {
-        var m = (ret && ret.msg) || '저장에 실패했습니다. 잠시 후 다시 시도해 주세요.';
-        if (window.$ && $.notify) $.notify(m, 'warn');
-        else alert(m);
-        $('#meta_refresh_hours').val(metaRefreshHoursPrev);
-      }
-    });
-  });
-  // 전체 조회가 돌고 있는 채로 화면에 들어오면 진행 표시를 이어받는다
-  quietCommand('meta_state', null, null, function (ret) {
-    if (ret && ret.ret == 'success' && ret.data && ret.data.bulk && ret.data.bulk.active) {
-      metaBulkActive = true;
-      paintBulkRunning(ret.data.bulk);
-      pollBulk();
-    }
-  });
   $('#meta_back_btn').off('click').on('click', function () { backToMetaOverview(); });
   $('#meta_lib_pick').off('click').on('click', function () { openMetaLibPicker(); });
   $('#metaLibSearch').off('input').on('input', renderMetaLibList);
@@ -1294,7 +1384,7 @@ $(document).ready(function () {
   $('#metaLibCancel').off('click').on('click', function () { closeMetaLibPicker(); });
   $('#metaLibModal').off('click').on('click', function (e) { if (e.target === this) closeMetaLibPicker(); });
   $(document).off('click', '.meta-lib-row').on('click', '.meta-lib-row', function () { onMetaLibPicked($(this).data('key')); });
-  $(document).off('click', '.meta-ov-row').on('click', '.meta-ov-row', function () { onMetaLibPicked($(this).data('key')); });
+  $(document).off('click', '.meta-ov-row').on('click', '.meta-ov-row', function () { onMetaLibPicked($(this).data('key'), false, true); });
   $('#meta_order').off('change').on('change', function () { if (metaData) loadMeta(1); });
   var searchTimer = null;
   $('#meta_search').off('input').on('input', function () {

@@ -10,10 +10,12 @@ from .shyni_backend import ShyniBackend
 from .task_trash_view import TaskTrashView
 from .task_trash_selected import TaskTrashSelected
 from .task_periodic import annotate_total_labels, current_scan_progress
-from .task_trash import (ACTION_LABEL, TaskTrash, clear_trash_start_error,
-                         fail_trash_start, get_last_trash_start_error,
-                         get_trash_current, get_trash_jobs,
-                         request_trash_cancel, update_trash_current_job_idx)
+from .task_trash import (ACTION_LABEL, LIBRARY_BUSY_MESSAGE, TaskTrash,
+                         _same_job_busy, _same_library_busy,
+                         clear_trash_start_error, fail_trash_start,
+                         get_last_trash_start_error, get_trash_currents,
+                         get_trash_jobs, request_trash_cancel,
+                         update_trash_current_job_idx)
 
 name = 'trash'
 logger = P.logger
@@ -27,6 +29,9 @@ TRASH_PICK_SORT_KEY = 'trash_lib_pick_sort'
 # 휴지통 조회 페이지 전체 현황 정렬 (선택 팝업과 별개, 기본은 휴지통 수 내림차순)
 TRASH_OVERVIEW_SORTS = ('default', 'name', 'trash_desc')
 TRASH_OVERVIEW_SORT_KEY = 'trash_overview_sort'
+# 휴지통 조회 페이지 전체 현황 표시 선택 — 숨긴 라이브러리 키(쉼표 구분,
+# 메타·대시보드·건강도와 별개). 메타의 meta_overview_hidden_libs와 같은 방식.
+TRASH_OVERVIEW_HIDDEN_LIBS_KEY = 'trash_overview_hidden_libs'
 
 
 def _parse_empty_stats(data):
@@ -84,6 +89,11 @@ class ModuleTrash(PluginModuleBase):
             # 이 시간까지 기다린다. 넘기면 그 폴더는 실패로 끝나고
             # 스캔·비우기에서 빠진다. 0 이하면 기본값으로 동작한다 (기본값 360)
             f'{self.name}_vfs_timeout_min': '360',
+            # 스캔·비우기 대기 기한(분) — shyni job이 끝나기를 이 시간까지
+            # 기다린다. 기한이 됐을 때 shyni에서 job이 아직 진행 중이면
+            # 이 시간만큼 기한을 연장하며 계속 기다린다. 0 이하면 기본값으로
+            # 동작한다 (기본값 360)
+            f'{self.name}_scan_timeout_min': '360',
             # 작업 대기 시간(분) — 앞선 작업이 돌고 있을 때 이 시간까지
             # 기다렸다가 끝나면 이어서 실행한다. 0이면 기다리지 않는다 (기본값 360)
             f'{self.name}_max_wait_min': '360',
@@ -92,6 +102,9 @@ class ModuleTrash(PluginModuleBase):
             f'{self.name}_lib_pick_sort': 'default',
             # 휴지통 조회 페이지 전체 현황 정렬 (기본은 휴지통 수 내림차순)
             f'{self.name}_overview_sort': 'trash_desc',
+            # 휴지통 조회 페이지 전체 현황 표시 선택 — 숨긴 라이브러리
+            # 키(쉼표 구분, 기본은 전체 표시)
+            f'{self.name}_overview_hidden_libs': '',
         }
         self.web_list_model = ModelTrashItem
 
@@ -262,10 +275,15 @@ class ModuleTrash(PluginModuleBase):
                     from .task_status import read_trash_cache
                     counts_cache = read_trash_cache() or {}
                     arg['trash_counts_init'] = counts_cache.get('data') or {}
-                    arg['trash_counts_at'] = counts_cache.get('at') or 0
                 except Exception:
                     arg['trash_counts_init'] = {}
-                    arg['trash_counts_at'] = 0
+                # 전체 현황 행의 상세 내역(파일·묶음 수, missing·trashed) —
+                # 조회한 적 있는 라이브러리의 상세 캐시 요약만 들어 있다.
+                try:
+                    from .task_trash_view import cache_summaries
+                    arg['trash_summaries_init'] = cache_summaries()
+                except Exception:
+                    arg['trash_summaries_init'] = {}
                 # 휴지통 조회 페이지 선택 팝업 정렬 (기본/이름/휴지통 수 내림차순)
                 sort = P.ModelSetting.get('trash_lib_pick_sort') or 'default'
                 arg['trash_lib_pick_sort'] = sort if sort in TRASH_PICK_SORTS else 'default'
@@ -315,8 +333,8 @@ class ModuleTrash(PluginModuleBase):
             # 시작되는 틈이나 다른 경로의 저장을 막기 위한 서버 쪽 확인이다.
             # 진행 중인 작업의 정의가 제출 목록 어딘가에 그대로 있으면 된다 —
             # 다른 행을 고치거나 앞 행을 지우는 저장은 그대로 허용한다.)
-            cur = get_trash_current()
-            if cur is not None:
+            # 여러 작업이 함께 돌 수 있으니 진행 중인 작업마다 확인한다.
+            for cur in get_trash_currents():
                 stored = get_trash_jobs()
                 ridx = cur.get('job_idx')
                 running = (stored[ridx] if isinstance(ridx, int)
@@ -340,7 +358,7 @@ class ModuleTrash(PluginModuleBase):
                 new_idx = next((k for k, c in enumerate(cleaned)
                                 if _same_job(running, c)), None)
                 if new_idx is not None and new_idx != ridx:
-                    update_trash_current_job_idx(new_idx)
+                    update_trash_current_job_idx(cur.get('claim_id'), new_idx)
             self.sched_remove_all()
             P.ModelSetting.set('trash_jobs', json.dumps(cleaned, ensure_ascii=False))
             self.start()
@@ -352,14 +370,28 @@ class ModuleTrash(PluginModuleBase):
                 idx = int(arg1)
             except Exception:
                 return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
-            if get_trash_current() is not None:
-                return jsonify({'ret': 'warning', 'msg': '이미 진행 중인 휴지통 스캔이 있습니다.'})
             jobs = get_trash_jobs()
             if idx < 0 or idx >= len(jobs):
                 return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
             if not (jobs[idx].get('sections') or []):
                 return jsonify({'ret': 'warning',
                                 'msg': '선택한 라이브러리가 없습니다. 라이브러리 선택에서 골라 주세요.'})
+            if _same_job_busy(jobs[idx].get('name') or ''):
+                return jsonify({'ret': 'warning', 'msg': '이미 실행 중입니다.'})
+            # 규칙 1이 규칙 2보다 먼저다. 규칙 1: 같은 모듈 안에서
+            # 같은 라이브러리가 실행 중이면 동작 종류와 무관하게
+            # 거절한다. 새로고침만·비우기만 하는 동작도 예외가 아니다.
+            if _same_library_busy(jobs[idx]['sections'][0]):
+                return jsonify({'ret': 'warning',
+                                'msg': LIBRARY_BUSY_MESSAGE})
+            # 규칙 2: 스캔이 들어간 동작은 첫 라이브러리 기준으로
+            # 게이트를 본다 — 같은 라이브러리가 스캔 중이거나 설정한
+            # 개수까지 돌고 있으면 시작하지 않고 거절한다.
+            # 새로고침만·비우기만 하는 동작은 스캔 자리를 안 쓴다.
+            if 'scan' in str(jobs[idx].get('action') or ''):
+                gate_msg = ModuleStatus.library_gate_check(jobs[idx]['sections'][0])
+                if gate_msg:
+                    return jsonify({'ret': 'warning', 'msg': gate_msg})
             result = self.one_execute(idx)
             logger.info(f'[Trash] 지금 실행 요청: idx={idx} 결과={result}')
             if result == 'is_running':
@@ -369,10 +401,19 @@ class ModuleTrash(PluginModuleBase):
             else:
                 ret['msg'] = '실행을 시작했습니다. 잠시 뒤 워커가 작업을 시작합니다.'
         elif command == 'cancel_current':
-            cur = get_trash_current()
+            claim_id = (arg1 or '').strip() or None
+            curs = get_trash_currents()
+            cur = None
+            if claim_id is not None:
+                for c in curs:
+                    if str(c.get('claim_id')) == claim_id:
+                        cur = c
+                        break
+            elif len(curs) == 1:
+                cur = curs[0]
             if cur is None:
                 return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 휴지통 스캔이 없습니다.'})
-            request_trash_cancel()
+            request_trash_cancel(cur.get('claim_id'))
             logger.info('[Trash] 취소 요청')
             # Step5-1 — shyni 스캔까지 함께 취소하므로 "웹에서 취소" 안내는 없앴다.
             # 비우기 중에는 버튼이 막혀 있지만, 들어온 요청은 비우기를
@@ -382,6 +423,8 @@ class ModuleTrash(PluginModuleBase):
                 ret['msg'] = '취소를 요청했습니다. shyni 스캔 취소가 확인되면 멈춥니다.'
             elif stage == 'empty':
                 ret['msg'] = '비우기는 끝까지 진행되고, 남은 라이브러리는 멈춥니다.'
+            elif stage == 'waiting':
+                ret['msg'] = '취소를 요청했습니다. 대기가 중단되면 멈춥니다.'
             else:
                 ret['msg'] = '취소를 요청했습니다. 새로고침이 정리되면 멈춥니다.'
         elif command == 'trash_counts':
@@ -391,26 +434,17 @@ class ModuleTrash(PluginModuleBase):
             try:
                 # 현황·건강도와 같은 개수 캐시를 쓴다 — 라이브러리 선택
                 # 팝업을 열 때마다 무거운 전체 읽기를 돌리지 않기 위해서다
-                from .task_status import trash_counts_for_stats, read_trash_cache
+                from .task_status import trash_counts_for_stats
                 ret['data'] = trash_counts_for_stats()
-                # 현황의 '기준' 시각 표시용 — 개수 캐시의 저장 시각
-                ret['at'] = (read_trash_cache() or {}).get('at') or 0
             except Exception as e:
                 return jsonify({'ret': 'fail', 'msg': f'휴지통 수를 읽지 못했습니다: {e}'})
-        elif command == 'trash_refresh_hours':
-            # 휴지통 페이지 우측 상단의 자동 갱신 주기 — 기본 설정에서
-            # 여기로 옮김 (2026-11-18). 바꾸면 바로 저장한다.
+            # 전체 현황 행의 상세 내역도 함께 실어 보낸다 — 조회가
+            # 끝난 뒤 현황으로 돌아올 때 새 요약을 바로 보여 주기 위해서다
             try:
-                hours = int((arg1 or '').strip())
+                from .task_trash_view import cache_summaries
+                ret['summaries'] = cache_summaries()
             except Exception:
-                return jsonify({'ret': 'warning', 'msg': '시간 값을 숫자로 입력해 주세요.'})
-            if hours < 0:
-                return jsonify({'ret': 'warning', 'msg': '0 이상의 시간을 입력해 주세요.'})
-            P.ModelSetting.set('base_trash_counts_refresh_hours', str(hours))
-            if hours == 0:
-                ret['msg'] = '통계 계산 때마다 휴지통 개수를 새로 읽어옵니다.'
-            else:
-                ret['msg'] = f'자동 갱신 주기를 {hours}시간으로 저장했습니다.'
+                ret['summaries'] = {}
         elif command == 'trash_query':
             # 조회 계산은 워커(task_trash_view)가 수행한다 — 웹은 요청만 남기고
             # 화면은 trash_state로 진행률을 폴링한다.
@@ -742,14 +776,22 @@ class ModuleTrash(PluginModuleBase):
                 return jsonify({'ret': 'fail', 'msg': err})
             return jsonify({'ret': 'success', 'data': sections})
         if sub == 'current':
-            cur = get_trash_current()
-            if cur and cur.get('action'):
-                from .model_trash import action_label
-                cur['action_label'] = action_label(cur.get('action'))
-            if cur and cur.get('stage') == 'scan' and cur.get('section_key'):
-                cur['scan_progress'] = current_scan_progress(
-                    cur['section_key'], 'trash')
-            return jsonify({'ret': 'success', 'data': cur,
+            from .model_trash import action_label
+            cards = []
+            for cur in get_trash_currents():
+                if cur.get('action'):
+                    cur['action_label'] = action_label(cur.get('action'))
+                if cur.get('stage') == 'scan' and cur.get('section_key'):
+                    cur['scan_progress'] = current_scan_progress(
+                        cur['section_key'], 'trash')
+                cards.append(cur)
+            # 대시보드에서 시작한 스캔도 함께 보여 준다 — 어디서
+            # 시작했든 진행 중인 스캔을 한곳에서 볼 수 있게 한다.
+            try:
+                cards.extend(ModuleStatus.dashboard_scan_cards())
+            except Exception as e:
+                logger.warning(f'[Trash] 대시보드 스캔 목록 조회 실패: {e}')
+            return jsonify({'ret': 'success', 'data': cards,
                             'last_error': get_last_trash_start_error()})
         if sub == 'clear_start_error':
             clear_trash_start_error()
@@ -773,6 +815,21 @@ class ModuleTrash(PluginModuleBase):
             if sort not in TRASH_OVERVIEW_SORTS:
                 return jsonify({'ret': 'fail', 'msg': '정렬 조건이 올바르지 않습니다.'})
             P.ModelSetting.set(TRASH_OVERVIEW_SORT_KEY, sort)
+            return jsonify({'ret': 'success'})
+        if sub == 'set_hidden_libs':
+            # '표시'에서 고른 숨김 라이브러리를 휴지통 화면 전용으로
+            # 기억한다. 메타의 set_hidden_libs와 같은 방식 — 체크할
+            # 때마다 조용히 저장하므로 성공 응답에 msg를 넣지 않는다.
+            keys = []
+            for part in (req.form.get('keys') or '').split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    keys.append(str(int(part)))
+                except Exception:
+                    return jsonify({'ret': 'fail', 'msg': '요청 값이 올바르지 않습니다.'})
+            P.ModelSetting.set(TRASH_OVERVIEW_HIDDEN_LIBS_KEY, ','.join(keys))
             return jsonify({'ret': 'success'})
         if sub == 'history':
             try:

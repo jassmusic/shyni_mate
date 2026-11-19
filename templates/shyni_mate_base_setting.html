@@ -8,7 +8,7 @@
 {{ macros.m_row_end() }}
 
 {% if arg.get('plugin_github_newer') %}
-<div style="border:1px solid #90cdf4; background:#ebf8ff; color:#2b6cb0; border-radius:6px; padding:8px 12px; font-size:13px; margin-bottom:12px">GitHub에 새 버전 <strong>{{ arg.get('plugin_github_version') }}</strong>가 있습니다. 재시작하면 업데이트됩니다.</div>
+<div style="border:1px solid #90cdf4; background:#ebf8ff; color:#2b6cb0; border-radius:6px; padding:8px 12px; font-size:13px; margin-bottom:12px">새 버전 <strong>{{ arg.get('plugin_github_version') }}</strong>가 있습니다. 재시작하면 업데이트됩니다.</div>
 {% endif %}
 
 <nav>
@@ -33,6 +33,7 @@
 {{ macros.m_tab_content_end() }}
 
 {{ macros.m_tab_content_start('etc', false) }}
+  {{ macros.setting_input_int('status_auto_refresh_min', '자동 업데이트 주기', min=0, max=120, value=arg['status_auto_refresh_min'], desc=['대시보드 · 건강도 · 세션 화면을 이 주기마다 자동으로 새로고침합니다.', '기본값 30 · 단위 분', '0이면 자동 업데이트를 하지 않고, 새로고침 버튼으로 직접 새로고침합니다.']) }}
   {{ macros.setting_input_int('scan_max_library_scan_count', '라이브러리 동시 스캔 수', min=1, max=20, value=arg['scan_max_library_scan_count'], desc=['대시보드 · 주기적 스캔 · 휴지통 스캔은 이 개수까지만 동시에 진행하며,', '동일한 라이브러리는 한 번에 하나만 스캔하고, 스캔 수 초과시 시작하지 않고 취소합니다.', '스캔 큐(폴더 단위)는 스캔 메뉴의 설정에서 동시 스캔 수로 별도로 제한됩니다.']) }}
 {{ macros.m_tab_content_end() }}
 

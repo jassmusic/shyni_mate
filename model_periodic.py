@@ -82,16 +82,21 @@ class ModelPeriodicItem(ModelBase):
         self.save()
 
     @classmethod
-    def set_terminated(cls, exclude_id=None):
+    def set_terminated(cls, exclude_id=None, exclude_ids=None):
         """플러그인 재시작 시 running·waiting으로 남은 이력을 정리한다.
-        exclude_id가 있으면 그 행은 남긴다 (복구 대상).
+        exclude_id나 exclude_ids에 있는 행은 남긴다 (복구 대상).
         대기 중이던 행은 대기가 중단됐다는 문구를 남긴다."""
         with F.app.app_context():
             try:
                 query = F.db.session.query(cls).filter(
                     cls.status.in_(['running', 'waiting']))
+                keep = set()
                 if exclude_id is not None:
-                    query = query.filter(cls.id != exclude_id)
+                    keep.add(exclude_id)
+                if exclude_ids:
+                    keep.update(exclude_ids)
+                if keep:
+                    query = query.filter(cls.id.notin_(keep))
                 rows = query.all()
                 for row in rows:
                     was_waiting = row.status == 'waiting'

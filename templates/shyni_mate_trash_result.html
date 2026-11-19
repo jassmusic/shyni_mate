@@ -14,6 +14,8 @@
 .hist-table .c-num .missing { display:block; font-size:13px; color:#dc3545; }
 </style>
 
+<div id="cancelOkDiv" style="display:none; border:1px solid #38a169; background:#f0fff4; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#276749"></div>
+
 <div id="trash_current_div">
   진행 상태를 불러오는 중입니다.
 </div>
@@ -40,6 +42,7 @@
 <script type="text/javascript">
 var LIBS = [];
 var API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/trash/';
+var STATUS_API_BASE = '/' + location.pathname.split('/')[1] + '/ajax/status/';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -101,7 +104,48 @@ function stageLabel(stage) {
   if (stage == 'refresh') return '새로고침 중';
   if (stage == 'scan') return '스캔 중';
   if (stage == 'empty') return '비우는 중';
+  if (stage == 'waiting') return '대기중';
   return stage || '';
+}
+
+// 동작 코드 → 한글 — 대시보드 카드는 action_label이 없어 action 코드만 온다.
+var ACTION_LABELS = {scan: '스캔', refresh: '새로고침', refresh_scan: '새로고침 후 스캔'};
+
+// 시각 'YYYY-MM-DD HH:MM:SS' → 시:분만 — 카드 두 번째 줄용.
+// 형식이 다르면 원본을 그대로 쓴다.
+function fmtHM(t) {
+  if (t == null) return '';
+  var s = String(t);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s)) return s.substring(11, 16);
+  return s;
+}
+
+// 시각 문자열 → epoch(ms). 파싱이 안 되면 -1.
+function parseTs(t) {
+  if (t == null) return -1;
+  var ms = new Date(String(t).replace(' ', 'T')).getTime();
+  return isNaN(ms) ? -1 : ms;
+}
+
+// 경과 표시 — '1분 미만' · '3분' · '73분' (분으로만 표시)
+function fmtElapsed(ms) {
+  if (ms == null || ms < 0) return '';
+  var mins = Math.floor(ms / 60000);
+  if (mins < 1) return '1분 미만';
+  return mins + '분';
+}
+
+// 경과 시간만 제자리에서 갱신한다 — 1분마다 카드 전체를 다시 그리면
+// 펼쳐 둔 상세나 닫은 배너가 다시 그려지기 때문이다.
+function updateElapsedTimers() {
+  var now = Date.now();
+  $('.elapsed-timer').each(function () {
+    var start = parseInt($(this).data('start'), 10);
+    if (!start) return;
+    var el = fmtElapsed(now - start);
+    if ($(this).data('wait')) $(this).text('대기 ' + el);
+    else $(this).text(el + ' 경과');
+  });
 }
 
 // 스캔 단계 영문 → 한글 표시 — 대시보드와 같은 표기
@@ -136,28 +180,127 @@ function progressText(sp) {
 // 진행 상태 서명 — 바뀔 때만 다시 그려, ✕로 닫은 배너가
 // 15초 폴링마다 다시 뜨지 않게 한다. 진행률은 서명에 넣어
 // 스캔이 진행될 때마다 숫자가 갱신되게 한다. (작업 관리와 같은 방식)
+// 여러 작업이 함께 돌 수 있어 목록으로 들고 있다.
 var currentSig = null;
+var currentCurs = [];
 
-function currentSignature(cur) {
-  if (!cur) return '';
-  var sp = cur.scan_progress || {};
-  return [cur.job_idx, cur.section_key, cur.stage, sp.processed, sp.total, sp.stage_processed, sp.stage_total].join('|');
+function currentSignature(curs) {
+  if (!curs || !curs.length) return '';
+  return curs.map(function (cur) {
+    var sp = cur.scan_progress || {};
+    return [cur.claim_id || ('dashboard:' + cur.section_key),
+            cur.section_key, cur.stage, sp.processed, sp.total,
+            sp.stage_processed, sp.stage_total].join('|');
+  }).join(';');
 }
 
-function renderCurrent(cur) {
-  if (!cur) {
+// 카드 Slim화 — 제목은 라이브러리·단계만(작업명과 같으면 한 번만), 두 번째 줄은
+// 동작·실행 방식·시작 시각·경과 시간. 카드는 작업 시작이 빠른 순으로 정렬한다.
+function renderCurrent(curs) {
+  if (!curs || !curs.length) {
     $('#trash_current_div').html('<div style="border:1px solid #a0aec0; background:#f7fafc; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:14px; color:#4a5568">⏸ 현재 진행 중인 휴지통 스캔이 없습니다. <button type="button" id="currentIdleClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">✕</button><div style="clear:both"></div></div>');
     return;
   }
-  var str = '<div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; margin:10px 0; background:#f9f9f9">';
-  str += '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">';
-  var prog = (cur.stage == 'scan' && cur.scan_progress) ? progressText(cur.scan_progress) : '';
-  str += '<div style="font-size:14px">🔄 <strong>진행 중</strong> — ' + esc(cur.job_name) + ' · ' + esc(cur.section_title) + ' <strong>' + stageLabel(cur.stage) + '</strong>' + prog + (cur.action_label ? ' <span style="font-size:13px; color:#888">(' + esc(cur.action_label) + ')</span>' : '');
-  str += '<div style="font-size:12px; color:#888; margin-top:2px">작업 시작 ' + esc(cur.job_started_at) + ' · 이 라이브러리 시작 ' + esc(cur.section_started_at) + (cur.mode == 'manual' ? ' · 수동 실행' : ' · 스케줄 실행') + '</div></div>';
-  str += '<button type="button" class="btn btn-sm btn-danger" id="trashCancelBtn">취소</button>';
-  str += '</div>';
-  str += '</div>';
+  var list = curs.slice().sort(function (a, b) {
+    var ta = a.job_started_at || '9999', tb = b.job_started_at || '9999';
+    return ta < tb ? -1 : (ta > tb ? 1 : 0);
+  });
+  var runCount = 0, waitCount = 0;
+  for (var c = 0; c < list.length; c++) {
+    if (list[c].stage == 'waiting') waitCount++; else runCount++;
+  }
+  var headBits = [];
+  if (runCount) headBits.push('진행 중 ' + runCount + '개');
+  if (waitCount) headBits.push('대기중 ' + waitCount + '개');
+  var str = '<div style="font-size:14px; font-weight:bold; margin:10px 0 6px 0">' + headBits.join(' · ') + '</div>';
+  var now = Date.now();
+  for (var n = 0; n < list.length; n++) {
+    var cur = list[n];
+    var isWaiting = (cur.stage == 'waiting');
+    var prog = (cur.stage == 'scan' && cur.scan_progress) ? progressText(cur.scan_progress) : '';
+    var title = esc(cur.section_title || cur.job_name || '');
+    if (cur.job_name && cur.section_title && cur.job_name != cur.section_title) {
+      title = esc(cur.job_name) + ' · ' + esc(cur.section_title);
+    }
+    str += '<div style="border:1px solid #ddd; border-radius:6px; padding:8px 10px; margin:0 0 8px 0; background:#f9f9f9">';
+    str += '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px">';
+    str += '<div style="font-size:14px; min-width:0">' + (isWaiting ? '⏳ ' : '🔄 ') + title + (isWaiting ? ' · <strong>대기중</strong>' : ' · <strong>' + stageLabel(cur.stage) + '</strong>');
+    if (prog) str += '<div style="font-size:13px; color:#555; margin-top:2px">' + prog.substring(3) + '</div>';
+    var bits = [];
+    var actLabel = cur.action_label || ACTION_LABELS[cur.action] || '';
+    if (actLabel) bits.push(esc(actLabel));
+    bits.push(cur.mode == 'manual' ? '수동' : '스케줄');
+    var startedMs = parseTs(isWaiting ? cur.section_started_at : cur.job_started_at);
+    if (isWaiting) {
+      bits.push(fmtHM(cur.section_started_at) + ' 대기 시작');
+      if (startedMs > 0) bits.push('<span class="elapsed-timer" data-start="' + startedMs + '" data-wait="1">대기 ' + fmtElapsed(now - startedMs) + '</span>');
+    } else {
+      bits.push(fmtHM(cur.job_started_at) + ' 시작');
+      if (startedMs > 0) bits.push('<span class="elapsed-timer" data-start="' + startedMs + '">' + fmtElapsed(now - startedMs) + ' 경과</span>');
+    }
+    str += '<div style="font-size:12px; color:#888; margin-top:2px">' + bits.join(' · ') + '</div></div>';
+    var pendKey = (cur.source == 'dashboard') ? ('dashboard:' + cur.section_key) : String(cur.claim_id);
+    var pending = !!cancelPending[pendKey];
+    if (cur.source == 'dashboard') {
+      str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-source="dashboard" data-key="' + esc(cur.section_key) + '"' + (pending ? ' disabled' : '') + ' style="flex-shrink:0">' + (pending ? '취소중' : '취소') + '</button>';
+    } else {
+      // Step5-1 — 비우기 중에는 취소 버튼을 비활성화한다 (비우기는 취소 불가).
+      var emptying = cur.stage == 'empty';
+      str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-claim="' + esc(cur.claim_id) + '"' + ((pending || emptying) ? ' disabled' : '') + (emptying ? ' title="비우기 중에는 취소할 수 없습니다."' : '') + ' style="flex-shrink:0">' + (pending ? '취소중' : '취소') + '</button>';
+    }
+    str += '</div>';
+    str += '</div>';
+  }
   $('#trash_current_div').html(str);
+}
+
+// 취소 확인·버튼 상태 전이 (Step5-1) — 작업 관리와 같은 동작.
+// 확인 문구는 "XXX 작업이 취소됩니다.", 확인하면 버튼이 "취소중"
+// (비활성화)이 되고, 작업이 끝나면 "작업이 취소되었습니다"를 표시한 뒤
+// 버튼이 "취소"로 돌아온다. 취소 대기는 작업마다 따로 들고 있다 —
+// 키는 자기 작업이면 claim_id, 대시보드 카드면 'dashboard:' + 라이브러리 번호다.
+var cancelPending = {};
+
+function requestCancel(btn) {
+  var $btn = $(btn);
+  var claimId = $btn.data('claim');
+  var source = $btn.data('source');
+  var key = $btn.data('key');
+  if (source == 'dashboard') {
+    var title = '';
+    for (var n = 0; n < currentCurs.length; n++) {
+      if (currentCurs[n].source == 'dashboard'
+          && String(currentCurs[n].section_key) == String(key)) {
+        title = currentCurs[n].section_title || '';
+        break;
+      }
+    }
+    if (!confirm((title ? title + ' ' : '') + '스캔이 취소됩니다.')) return;
+    cancelPending['dashboard:' + key] = {at: Date.now()};
+    $('#cancelOkDiv').hide();
+    $btn.text('취소중').prop('disabled', true);
+    $.ajax({type: 'POST', url: STATUS_API_BASE + 'cancel', data: {key: key}, global: false});
+    setTimeout(loadCurrent, 2000);
+    setTimeout(loadCurrent, 8000);
+    setTimeout(loadCurrent, 20000);
+    return;
+  }
+  var cur = null;
+  if (claimId) {
+    for (var n = 0; n < currentCurs.length; n++) {
+      if (String(currentCurs[n].claim_id) == String(claimId)) { cur = currentCurs[n]; break; }
+    }
+  }
+  if (!cur) return;
+  var name = (cur.job_name || cur.section_title) || '';
+  if (!confirm((name ? name + ' ' : '') + '휴지통 스캔 작업이 취소됩니다.')) return;
+  cancelPending[String(cur.claim_id)] = {at: Date.now(), startedAt: cur.job_started_at || ''};
+  $('#cancelOkDiv').hide();
+  $btn.text('취소중').prop('disabled', true);
+  globalSendCommand('cancel_current', cur.claim_id);
+  setTimeout(loadCurrent, 2000);
+  setTimeout(loadCurrent, 8000);
+  setTimeout(loadCurrent, 20000);
 }
 
 function loadCurrent() {
@@ -165,10 +308,36 @@ function loadCurrent() {
     type: 'POST', url: API_BASE + 'current', data: {}, global: false,
     success: function (ret) {
       if (ret.ret != 'success') return;
-      var sig = currentSignature(ret.data || null);
+      var curs = ret.data;
+      if (!Array.isArray(curs)) curs = curs ? [curs] : [];
+      // 취소 대기 확인 — 요청한 카드가 목록에서 사라졌으면 취소된 것이다.
+      // 3분이 지나도 안 끝나면 기다리기를 그만둔다.
+      var resolved = false;
+      for (var pendKey in cancelPending) {
+        var pend = cancelPending[pendKey];
+        var gone = true;
+        for (var n = 0; n < curs.length; n++) {
+          var c = curs[n];
+          var cKey = (c.source == 'dashboard')
+            ? ('dashboard:' + c.section_key) : String(c.claim_id);
+          if (cKey == pendKey) { gone = false; break; }
+        }
+        if (gone) {
+          delete cancelPending[pendKey];
+          resolved = true;
+        } else if (Date.now() - pend.at > 180000) {
+          delete cancelPending[pendKey];
+        }
+      }
+      if (resolved) {
+        $('#cancelOkDiv').html('\u2705 작업이 취소되었습니다. <button type="button" id="cancelOkClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
+        $('#cancelOkDiv').show();
+      }
+      var sig = currentSignature(curs);
       if (sig === currentSig) return;
       currentSig = sig;
-      renderCurrent(ret.data);
+      currentCurs = curs;
+      renderCurrent(curs);
     }
   });
 }
@@ -507,6 +676,7 @@ $(document).ready(function () {
     // 펼쳐 둔 대기중·실행중 상세는 상태가 바뀌면 다시 읽어온다.
     for (var id in expandedIds) loadDetail(id);
   }, 15000);
+  setInterval(updateElapsedTimers, 60000);
   // 대기 중인 상세의 대기 시간을 초 단위로 올린다 — 서버가 준 기준점
   // (waiting_seconds)에서 시작해 1초마다 1씩 더한다.
   setInterval(function () {
@@ -518,9 +688,12 @@ $(document).ready(function () {
     });
   }, 1000);
 
-  $(document).off('click', '#trashCancelBtn').on('click', '#trashCancelBtn', function () {
-    globalSendCommand('cancel_current', null);
-    setTimeout(loadCurrent, 2000);
+  $(document).off('click', '.current-cancel').on('click', '.current-cancel', function () {
+    requestCancel(this);
+  });
+
+  $(document).off('click', '#cancelOkClose').on('click', '#cancelOkClose', function () {
+    $('#cancelOkDiv').hide();
   });
 
   $(document).off('click', '#currentIdleClose').on('click', '#currentIdleClose', function () {

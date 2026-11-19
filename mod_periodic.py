@@ -3,9 +3,10 @@ import json
 from .model_periodic import ModelPeriodicItem
 from .mod_status import ModuleStatus
 from .setup import *
-from .task_periodic import (TaskPeriodic, annotate_total_labels,
-                            clear_start_error, current_scan_progress,
-                            fail_start, get_current,
+from .task_periodic import (LIBRARY_BUSY_MESSAGE, TaskPeriodic,
+                            _same_job_busy, _same_library_busy,
+                            annotate_total_labels, clear_start_error,
+                            current_scan_progress, fail_start, get_currents,
                             get_jobs, get_last_start_error,
                             periodic_action_to_kind_use_vfs,
                             periodic_kind_use_vfs_to_action, request_cancel,
@@ -37,6 +38,10 @@ class ModulePeriodic(PluginModuleBase):
             # 이 시간까지 기다린다. 넘기면 그 라이브러리는 실패로 끝나고
             # 스캔은 보내지 않는다. 0 이하면 기본값으로 동작한다 (기본값 360)
             f'{self.name}_vfs_timeout_min': '360',
+            # 스캔 대기 기한(분) — 스캔이 끝나기를 이 시간까지 기다린다.
+            # 기한이 됐을 때 shyni에서 스캔이 아직 진행 중이면 이 시간만큼
+            # 기한을 연장하며 계속 기다린다. 0 이하면 기본값으로 동작한다 (기본값 360)
+            f'{self.name}_scan_timeout_min': '360',
             # 작업 대기 시간(분) — 앞선 작업이 돌고 있을 때 이 시간까지
             # 기다렸다가 끝나면 이어서 실행한다. 0이면 기다리지 않는다 (기본값 360)
             f'{self.name}_max_wait_min': '360',
@@ -234,8 +239,8 @@ class ModulePeriodic(PluginModuleBase):
             # 시작되는 틈이나 다른 경로의 저장을 막기 위한 서버 쪽 확인이다.
             # 진행 중인 작업의 정의가 제출 목록 어딘가에 그대로 있으면 된다 —
             # 다른 행을 고치거나 앞 행을 지우는 저장은 그대로 허용한다.)
-            cur = get_current()
-            if cur is not None:
+            # 여러 작업이 함께 돌 수 있으니 진행 중인 작업마다 확인한다.
+            for cur in get_currents():
                 stored = get_jobs()
                 ridx = cur.get('job_idx')
                 running = (stored[ridx] if isinstance(ridx, int)
@@ -260,7 +265,7 @@ class ModulePeriodic(PluginModuleBase):
                 new_idx = next((k for k, c in enumerate(cleaned)
                                 if _same_job(running, c)), None)
                 if new_idx is not None and new_idx != ridx:
-                    update_current_job_idx(new_idx)
+                    update_current_job_idx(cur.get('claim_id'), new_idx)
             self.sched_remove_all()
             P.ModelSetting.set('periodic_jobs', json.dumps(cleaned, ensure_ascii=False))
             self.start()
@@ -272,14 +277,30 @@ class ModulePeriodic(PluginModuleBase):
                 idx = int(arg1)
             except Exception:
                 return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
-            if get_current() is not None:
-                return jsonify({'ret': 'warning', 'msg': '이미 진행 중인 주기적 스캔이 있습니다.'})
             jobs = get_jobs()
             if idx < 0 or idx >= len(jobs):
                 return jsonify({'ret': 'warning', 'msg': '작업 번호가 올바르지 않습니다.'})
             if not (jobs[idx].get('sections') or []):
                 return jsonify({'ret': 'warning',
                                 'msg': '선택한 라이브러리가 없습니다. 라이브러리 선택에서 골라 주세요.'})
+            if _same_job_busy(jobs[idx].get('name') or ''):
+                return jsonify({'ret': 'warning', 'msg': '이미 실행 중입니다.'})
+            # 규칙 1이 규칙 2보다 먼저다. 규칙 1: 같은 모듈 안에서
+            # 같은 라이브러리가 실행 중이면 동작 종류와 무관하게
+            # 거절한다. 새로고침만 하는 동작도 예외가 아니다.
+            if _same_library_busy(jobs[idx]['sections'][0]):
+                return jsonify({'ret': 'warning',
+                                'msg': LIBRARY_BUSY_MESSAGE})
+            # 규칙 2: 스캔이 들어간 동작은 첫 라이브러리 기준으로
+            # 게이트를 본다 — 같은 라이브러리가 스캔 중이거나 설정한
+            # 개수까지 돌고 있으면 시작하지 않고 거절한다.
+            # 새로고침만 하는 동작은 스캔 자리를 안 쓴다.
+            action = periodic_kind_use_vfs_to_action(
+                jobs[idx].get('kind'), jobs[idx].get('use_vfs'))
+            if 'scan' in str(action or ''):
+                gate_msg = ModuleStatus.library_gate_check(jobs[idx]['sections'][0])
+                if gate_msg:
+                    return jsonify({'ret': 'warning', 'msg': gate_msg})
             result = self.one_execute(idx)
             logger.info(f'[Periodic] 지금 실행 요청: idx={idx} 결과={result}')
             if result == 'is_running':
@@ -289,14 +310,26 @@ class ModulePeriodic(PluginModuleBase):
             else:
                 ret['msg'] = '실행을 시작했습니다. 잠시 뒤 워커가 작업을 시작합니다.'
         elif command == 'cancel_current':
-            cur = get_current()
+            claim_id = (arg1 or '').strip() or None
+            curs = get_currents()
+            cur = None
+            if claim_id is not None:
+                for c in curs:
+                    if str(c.get('claim_id')) == claim_id:
+                        cur = c
+                        break
+            elif len(curs) == 1:
+                cur = curs[0]
             if cur is None:
-                return jsonify({'ret': 'warning', 'msg': '지금 진행 중인 주기적 스캔이 없습니다.'})
-            request_cancel()
+                return jsonify({'ret': 'warning',
+                                'msg': '지금 진행 중인 주기적 스캔이 없습니다.'})
+            request_cancel(cur.get('claim_id'))
             logger.info('[Periodic] 취소 요청')
             # Step5-1 — shyni 스캔까지 함께 취소하므로 "웹에서 취소" 안내는 없앴다.
             if (cur.get('stage') or '') == 'scan':
                 ret['msg'] = '취소를 요청했습니다. shyni 스캔 취소가 확인되면 멈춥니다.'
+            elif (cur.get('stage') or '') == 'waiting':
+                ret['msg'] = '취소를 요청했습니다. 대기가 중단되면 멈춥니다.'
             else:
                 ret['msg'] = '취소를 요청했습니다. 새로고침이 정리되면 멈춥니다.'
         return jsonify(ret)
@@ -309,14 +342,22 @@ class ModulePeriodic(PluginModuleBase):
                 return jsonify({'ret': 'fail', 'msg': err})
             return jsonify({'ret': 'success', 'data': sections})
         if sub == 'current':
-            cur = get_current()
-            if cur and cur.get('action'):
-                from .model_periodic import action_label
-                cur['action_label'] = action_label(cur.get('action'))
-            if cur and cur.get('stage') == 'scan' and cur.get('section_key'):
-                cur['scan_progress'] = current_scan_progress(
-                    cur['section_key'], 'periodic')
-            return jsonify({'ret': 'success', 'data': cur,
+            from .model_periodic import action_label
+            cards = []
+            for cur in get_currents():
+                if cur.get('action'):
+                    cur['action_label'] = action_label(cur.get('action'))
+                if cur.get('stage') == 'scan' and cur.get('section_key'):
+                    cur['scan_progress'] = current_scan_progress(
+                        cur['section_key'], 'periodic')
+                cards.append(cur)
+            # 대시보드에서 시작한 스캔도 함께 보여 준다 — 어디서
+            # 시작했든 진행 중인 스캔을 한곳에서 볼 수 있게 한다.
+            try:
+                cards.extend(ModuleStatus.dashboard_scan_cards())
+            except Exception as e:
+                logger.warning(f'[Periodic] 대시보드 스캔 목록 조회 실패: {e}')
+            return jsonify({'ret': 'success', 'data': cards,
                             'last_error': get_last_start_error()})
         if sub == 'clear_start_error':
             clear_start_error()

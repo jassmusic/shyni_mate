@@ -25,6 +25,11 @@ DEFAULT_MAX_WAIT_MIN = 360
 # 이 시간까지 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
 VFS_TIMEOUT_KEY = 'periodic_vfs_timeout_min'
 DEFAULT_VFS_TIMEOUT_MIN = 360
+# 스캔 대기 기한 설정 키(분) — 스캔이 끝나기를 이 시간까지 기다린다.
+# 기한이 됐을 때 shyni에서 스캔이 아직 진행 중이면 이 시간만큼 기한을
+# 연장하며 계속 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
+SCAN_TIMEOUT_KEY = 'periodic_scan_timeout_min'
+DEFAULT_SCAN_TIMEOUT_MIN = 360
 # 가장 최근 시작 실패 — 작업 관리 배너가 읽는다. '지금 실행'을 눌렀는데
 # 아무것도 시작되지 않은 경우(진행 중·목록 조회 실패 등)는 이력 행이
 # 생기기 전에 끝나므로, 로그에만 남던 사유를 여기에 남긴다.
@@ -34,11 +39,10 @@ START_ERROR_MAX_AGE_SEC = 3600
 
 STAGE_LABEL = {'vfs': 'VFS 새로고침', 'scan': '스캔'}
 
-# 스캔 대기 기한·폴링 실패 기준 (W7): 스캔 완료를 기다리는 기한은
-# 6시간으로 두고, 폴링 중 일시적 오류(연결 끊김 등)는 재시도하며,
-# 연속 3회 실패 시에만 섹션을 실패로 확정한다.
-# (VFS 새로고침 기한은 설정 periodic_vfs_timeout_min에서 읽는다.)
-WAIT_TIMEOUT_SEC = 6 * 3600
+# 스캔 폴링 실패 기준 (W7): 폴링 중 일시적 오류(연결 끊김 등)는
+# 재시도하며, 연속 3회 실패 시에만 섹션을 실패로 확정한다.
+# (스캔 대기 기한은 설정 periodic_scan_timeout_min에서 읽고,
+# VFS 새로고침 기한은 설정 periodic_vfs_timeout_min에서 읽는다.)
 POLL_FAIL_MAX = 3
 VFS_POLL_SEC = 5
 SCAN_POLL_SEC = 10
@@ -296,12 +300,15 @@ def _write_status(key, slot, entry, label='주기적 스캔'):
 
 
 def _record_scan_progress(key):
-    """스캔 진행률을 현황 'scan' 슬롯에 기록한다. 실패하면 무시한다.
-    진행 표시용으로만 쓰고, 완료 판정은 job 폴링이 계속 맡는다."""
+    """스캔 진행률을 현황 'scan' 슬롯에 기록한다.
+    진행 표시용으로만 쓰고, 완료 판정은 job 폴링이 계속 맡는다.
+    기록에 실패하면 경고로 남긴다 (2026-11-19 실측: 어느 스캔에서도
+    scan_progress가 쌓이지 않아, 조용히 넘기던 실패를 로그로 확인한다)."""
     try:
         from .shyni_admin import api_scan_status
         st = api_scan_status(key)
         if not st:
+            logger.warning(f'[Periodic] 스캔 진행률 조회 실패 (섹션 {key}): 관리자 API 응답 없음')
             return
         cur = ModuleStatus._get_state(int(key))
         entry = dict(cur.get('scan') or {})
@@ -318,8 +325,8 @@ def _record_scan_progress(key):
         }
         cur['scan'] = entry
         ModuleStatus._set_state(int(key), cur)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f'[Periodic] 스캔 진행률 기록 실패 (섹션 {key}): {type(e).__name__}: {e}')
 
 
 def current_scan_progress(section_key, source):
@@ -440,33 +447,73 @@ def get_jobs():
     return []
 
 
-def get_current():
-    raw = P.ModelSetting.get(CURRENT_KEY)
-    if raw:
-        try:
-            cur = json.loads(raw)
-            if isinstance(cur, dict):
-                return cur
-        except Exception:
-            pass
-    return None
+def _parse_currents(raw):
+    """진행 상태 저장값 → 목록. 구 형식(객체 하나)이면 목록으로 감싸고,
+    비어 있거나 깨졌으면 빈 목록을 돌려준다. 순수 함수(하니스 검증용)."""
+    if not raw:
+        return []
+    try:
+        cur = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(cur, dict):
+        return [cur]
+    if isinstance(cur, list):
+        return [c for c in cur if isinstance(c, dict)]
+    return []
 
 
-def _set_current(cur):
-    if cur is None:
-        P.ModelSetting.set(CURRENT_KEY, '')
-    else:
-        P.ModelSetting.set(CURRENT_KEY, json.dumps(cur, ensure_ascii=False))
+def get_currents():
+    """지금 돌고 있는 주기적 스캔 진행 상태 목록 (claim_id 순)."""
+    return _parse_currents(P.ModelSetting.get(CURRENT_KEY))
 
 
-def update_current_job_idx(new_idx):
-    """진행 상태의 작업 번호를 바꾼다 — 작업 관리에서 순서를 바꿔
-    저장했을 때 진행 중인 작업의 위치를 새 목록에 맞게 고친다."""
-    cur = get_current()
-    if cur is None or cur.get('job_idx') == new_idx:
+def _save_currents(curs):
+    P.ModelSetting.set(CURRENT_KEY, json.dumps(curs, ensure_ascii=False))
+
+
+def _upsert_current(cur):
+    """진행 상태 한 건을 넣거나 고친다 — claim_id가 같은 항목이 있으면
+    그 자리에서 합치고(새 값이 이긴다), 없으면 뒤에 붙인다.
+    합치는 방식이라 차지할 때 넣어 둔 claimed_at 같은 값은
+    섹션이 바뀌어도 유지된다."""
+    curs = get_currents()
+    claim_id = (cur or {}).get('claim_id')
+    for i, c in enumerate(curs):
+        if claim_id is not None and c.get('claim_id') == claim_id:
+            merged = dict(c)
+            merged.update(cur)
+            curs[i] = merged
+            _save_currents(curs)
+            return
+    curs.append(cur)
+    _save_currents(curs)
+
+
+def _remove_current(claim_id):
+    """claim_id가 같은 진행 상태를 지운다. 없으면 그대로 둔다."""
+    if claim_id is None:
         return
-    cur['job_idx'] = new_idx
-    _set_current(cur)
+    curs = [c for c in get_currents() if c.get('claim_id') != claim_id]
+    _save_currents(curs)
+
+
+def _clear_currents():
+    P.ModelSetting.set(CURRENT_KEY, '')
+
+
+def update_current_job_idx(claim_id, new_idx):
+    """진행 상태의 작업 번호를 바꾼다 — 작업 관리에서 순서를 바꿔
+    저장했을 때 진행 중인 작업의 위치를 새 목록에 맞게 고친다.
+    claim_id로 그 작업의 진행 상태만 고친다."""
+    curs = get_currents()
+    for cur in curs:
+        if cur.get('claim_id') == claim_id:
+            if cur.get('job_idx') == new_idx:
+                return
+            cur['job_idx'] = new_idx
+            _save_currents(curs)
+            return
 
 
 def _max_wait_min():
@@ -493,6 +540,18 @@ def _vfs_timeout_sec():
     return val * 60
 
 
+def _scan_timeout_sec():
+    """스캔 대기 기한(초) — 설정값(분)을 초로 바꾼다.
+    없거나 숫자가 아니거나 0 이하면 기본 360분으로 동작한다."""
+    try:
+        val = P.ModelSetting.get_int(SCAN_TIMEOUT_KEY)
+    except Exception:
+        val = None
+    if val is None or val <= 0:
+        return DEFAULT_SCAN_TIMEOUT_MIN * 60
+    return val * 60
+
+
 def _fmt_wait(sec):
     """대기 시간 표시 — 45초 · 12분 3초 · 6시간 5분. 순수 함수(하니스 검증용)."""
     sec = int(sec)
@@ -512,9 +571,9 @@ def _same_job_busy(name):
     """같은 이름의 작업이 이미 돌거나 기다리고 있으면 True.
     스케줄이 겹쳐 같은 작업이 두 번 도는 것을 막는다."""
     try:
-        cur = get_current()
-        if cur is not None and (cur.get('job_name') or '') == (name or ''):
-            return True
+        for cur in get_currents():
+            if (cur.get('job_name') or '') == (name or ''):
+                return True
     except Exception:
         pass
     try:
@@ -527,23 +586,137 @@ def _same_job_busy(name):
         return False
 
 
-def _try_claim(idx, name, mode, job_started, job_row_id, section_label='전체', action=None):
-    """차례를 차지한다 — 진행 상태를 이 작업 것으로 쓰고 다시 읽어
+# 규칙 1 — 같은 모듈 안에서 같은 라이브러리가 진행 중일 때 내는 문구.
+# 동작 종류(새로고침·스캔·새로고침 후 스캔)와 무관하게 이 문구로 거절한다.
+LIBRARY_BUSY_MESSAGE = '현재 해당 라이브러리 작업이 진행중 입니다.'
+
+
+def _same_library_busy(first_key, exclude_claim_id=None):
+    """규칙 1 — 같은 모듈 안에서 첫 라이브러리가 이미 실행 중이면 True.
+    동작 종류와 무관하게 막는다. 대기 중인 작업은 자리를 예약하지
+    않으므로 세지 않는다 — 대기 중인 작업까지 세면 대기 중인 작업끼리
+    서로를 막아 아무도 시작하지 못한다. 자기 claim_id는 뺀다 (대기 중
+    재검사 때 자기 대기 표시 때문에 스스로 막히지 않게)."""
+    if first_key is None:
+        return False
+    try:
+        for cur in get_currents():
+            if (exclude_claim_id is not None
+                    and cur.get('claim_id') == exclude_claim_id):
+                continue
+            if cur.get('stage') == 'waiting':
+                continue
+            if str(cur.get('section_key') or '') == str(first_key):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _rule1_survives(claim_id, first_key, claimed_at):
+    """규칙 1 차지 재확인 — 차지한 자리가 살아남으면 True.
+    게이트를 보고 차지하는 사이에 같은 라이브러리의 다른 작업이
+    차지했을 수 있어, 차지한 뒤에 한 번 더 확인한다. 동시에 차지한
+    작업끼리는 차지한 시각(claimed_at) 순서로 가른다 — 앞 순서가
+    자리를 갖고, 뒤 순서가 물러난다. 차지한 시각이 없는 옛 항목은
+    가장 먼저 차지한 것으로 센다. 대기 중인 항목은 세지 않는다.
+    읽기에 실패하면 True로 열어 둔다."""
+    try:
+        my_at = int(claimed_at) if claimed_at is not None else 0
+    except Exception:
+        my_at = 0
+    try:
+        curs = get_currents()
+    except Exception:
+        return True
+    for cur in curs:
+        if not isinstance(cur, dict):
+            continue
+        if cur.get('claim_id') == claim_id:
+            continue
+        if cur.get('stage') == 'waiting':
+            continue
+        if str(cur.get('section_key') or '') != str(first_key):
+            continue
+        try:
+            other_at = int(cur.get('claimed_at') or 0)
+        except Exception:
+            other_at = 0
+        # 나보다 먼저 차지한 작업이 있으면 내가 물러난다. 나보다
+        # 늦게 차지한 작업은 그쪽이 나를 보고 스스로 물러난다.
+        # 같은 시각이면 claim_id 문자열 순서로 가른다.
+        if (other_at, str(cur.get('claim_id') or '')) < (my_at, str(claim_id)):
+            return False
+    return True
+
+
+def _slot_free(first_key, action, exclude_claim_id=None):
+    """이 작업이 시작할 자리가 있는지 — (자리 있음, 막는 사유).
+    규칙 1이 규칙 2보다 먼저다. 규칙 1: 같은 모듈 안에서 같은
+    라이브러리가 실행 중이면 동작 종류와 무관하게 막는다.
+    규칙 2: 스캔이 들어간 동작만 동시 스캔 수 게이트를 본다.
+    새로고침만 하는 동작은 스캔 자리를 쓰지 않지만 규칙 1은 본다.
+    첫 라이브러리를 기준으로 검사한다 — 나중 라이브러리는 섹션
+    시작 때 게이트가 다시 본다."""
+    if _same_library_busy(first_key, exclude_claim_id=exclude_claim_id):
+        return False, LIBRARY_BUSY_MESSAGE
+    if 'scan' not in str(action or ''):
+        return True, None
+    try:
+        msg = ModuleStatus.library_gate_check(first_key)
+    except Exception as e:
+        logger.warning(f'[주기적 스캔] 게이트 검사 실패: {e}')
+        return True, None
+    return msg is None, msg
+
+
+def _try_claim(idx, name, mode, job_started, job_row_id, claim_id,
+               section_label='전체', action=None, first_key=None):
+    """차례를 차지한다 — 진행 상태를 목록에 넣고 다시 읽어
     확인한다. 차지했으면 True.
     두 작업이 거의 동시에 차지하려는 틈을 줄이기 위해 쓰고 잠깐 쉰
     뒤에 확인한다. 확인에 실패하면 상대가 차지한 것이니 기다린다.
     section_label — 진행 상태에 표시할 라이브러리명. 대상이 1개면
-    그 이름, 여러 개면 '전체'."""
-    claim_id = (f'wait-{job_row_id}' if job_row_id
-                else f'run-{idx}-{int(time.time() * 1000)}')
-    _set_current({
-        'job_idx': idx, 'job_name': name, 'section_key': '',
-        'section_title': section_label, 'stage': 'scan', 'mode': mode,
+    그 이름, 여러 개면 '전체'. first_key — 첫 라이브러리 번호.
+    차지한 시점부터 자리를 세게 진행 상태에 미리 넣어 둔다."""
+    stage = 'vfs' if action in ('refresh', 'refresh_scan') else 'scan'
+    claimed_at = int(time.time() * 1000)
+    _upsert_current({
+        'job_idx': idx, 'job_name': name,
+        'section_key': str(first_key) if first_key is not None else '',
+        'section_title': section_label, 'stage': stage, 'mode': mode,
         'job_started_at': job_started, 'section_started_at': _now_text(),
-        'claim_id': claim_id, 'job_row_id': job_row_id, 'action': action})
+        'claim_id': claim_id, 'job_row_id': job_row_id, 'action': action,
+        'claimed_at': claimed_at})
     time.sleep(random.uniform(0.3, 1.0))
-    cur = get_current() or {}
-    return cur.get('claim_id') == claim_id
+    curs = get_currents()
+    if not any(c.get('claim_id') == claim_id for c in curs):
+        return False
+    # 규칙 1 재확인 — 게이트를 보고 차지하는 사이에 같은
+    # 라이브러리의 다른 작업이 차지했을 수 있다. 스캔이 안 들어간
+    # 동작도 같은 라이브러리와 겹치면 물러난다. 동시에 차지한
+    # 작업끼리는 차지한 시각 순서로 가른다.
+    try:
+        survives1 = _rule1_survives(claim_id, first_key, claimed_at)
+    except Exception as e:
+        logger.warning(f'[주기적 스캔] 규칙 1 재확인 실패: {e}')
+        survives1 = True
+    if not survives1:
+        _remove_current(claim_id)
+        return False
+    if 'scan' in str(action or ''):
+        # 자리 재확인 — 게이트를 보고 차지하는 사이에 다른 작업이
+        # 차지했을 수 있다. 동시에 차지한 작업끼리는 차지한 시각
+        # 순서로 가른다 (앞 순서가 자리를 갖고, 뒤 순서가 물러난다).
+        try:
+            survives = ModuleStatus.claim_survives(claim_id, first_key, claimed_at)
+        except Exception as e:
+            logger.warning(f'[주기적 스캔] 자리 재확인 실패: {e}')
+            survives = True
+        if not survives:
+            _remove_current(claim_id)
+            return False
+    return True
 
 
 def _finish_job_row(row_id, status, message):
@@ -558,23 +731,40 @@ def _finish_job_row(row_id, status, message):
         logger.warning(f'[주기적 스캔] 대기 행 정리 실패: {e}')
 
 
-def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=None):
+def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
+                   action=None, first_key=None):
     """차례를 기다렸다가 차지한다.
-    (대기 행 id 또는 None, 기다린 초 또는 None)을 돌려준다.
-    바로 시작하면 (None, 0), 기다렸다 시작하면 (행 id, 기다린 초),
-    기다리다 시간 초과하면 (None, None) — 이 때는 실패 행을 남긴다.
+    (대기 행 id 또는 None, 기다린 초 또는 None, claim_id 또는 None)을
+    돌려준다. 바로 시작하면 (None, 0, claim_id), 기다렸다 시작하면
+    (행 id, 기다린 초, claim_id), 기다리다 시간 초과하면
+    (None, None, None) — 이 때는 실패 행을 남긴다.
     작업 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
+    '지금 실행'(수동)은 기다리지 않고 자리가 없으면 바로 실패로 끝낸다.
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
-    그 이름, 여러 개면 '전체'."""
-    if get_current() is None and _try_claim(idx, name, mode, job_started, None, section_label, action):
-        return (None, 0)
+    그 이름, 여러 개면 '전체'. first_key — 첫 라이브러리 번호."""
+    claim_id = f'run-{idx}-{int(time.time() * 1000)}'
+    free, gate_msg = _slot_free(first_key, action,
+                                exclude_claim_id=claim_id)
+    if free and _try_claim(idx, name, mode, job_started, None, claim_id,
+                           section_label, action, first_key):
+        return (None, 0, claim_id)
+    if mode == 'manual':
+        fail_start(name, mode,
+                   gate_msg or '이미 진행 중인 주기적 스캔이 있어 시작하지 못했습니다.',
+                   section_label, action)
+        return (None, None, None)
     max_min = _max_wait_min()
     if max_min <= 0:
-        fail_start(name, mode, '이미 진행 중인 주기적 스캔이 있어 시작하지 못했습니다.', section_label, action)
-        return (None, None)
-    running_name = (get_current() or {}).get('job_name') or ''
-    if running_name:
-        wait_msg = f'앞선 작업({running_name}) 진행 중으로 끝나면 이어서 진행합니다.'
+        fail_start(name, mode,
+                   gate_msg or '이미 진행 중인 주기적 스캔이 있어 시작하지 못했습니다.',
+                   section_label, action)
+        return (None, None, None)
+    running_names = [(c.get('job_name') or '') for c in get_currents()]
+    running_names = [n for n in running_names if n]
+    if running_names:
+        shown = ', '.join(running_names[:2])
+        extra = f' 외 {len(running_names) - 2}개' if len(running_names) > 2 else ''
+        wait_msg = f'앞선 작업({shown}{extra}) 진행 중으로 끝나면 이어서 진행합니다.'
     else:
         wait_msg = '앞선 작업 진행 중으로 끝나면 이어서 진행합니다.'
     item = ModelPeriodicItem(name, '', section_label, mode, action)
@@ -585,13 +775,32 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
     except Exception as e:
         logger.error(f'[주기적 스캔] 대기 행 저장 실패: {e}')
         fail_start(name, mode, '대기 기록을 남기지 못했습니다.', section_label, action)
-        return (None, None)
+        return (None, None, None)
     row_id = item.id
+    # 대기 중 표시 — 작업 관리·작업 결과 목록에 '대기중' 카드가
+    # 나오게 진행 상태에도 넣어 둔다. 차지할 때 _try_claim이 같은
+    # claim_id로 덮어써 실행 중 표시로 바뀐다. 대기 중 표시는
+    # 자리를 예약하지 않는다 — 게이트 집계에서는 세지 않는다.
+    _upsert_current({
+        'job_idx': idx, 'job_name': name,
+        'section_key': str(first_key) if first_key is not None else '',
+        'section_title': section_label, 'stage': 'waiting', 'mode': mode,
+        'job_started_at': job_started, 'section_started_at': _now_text(),
+        'claim_id': claim_id, 'job_row_id': row_id, 'action': action})
     t0 = time.time()
     deadline = t0 + max_min * 60
     while time.time() < deadline:
         time.sleep(WAIT_POLL_SEC)
-        if get_current() is None and _try_claim(idx, name, mode, job_started, row_id, section_label, action):
+        # 대기 중 취소 — 카드의 취소 버튼이 먹히게 여기서도 확인한다.
+        if _cancel_requested(claim_id):
+            _finish_job_row(row_id, 'cancelled', '취소 요청으로 대기를 중단했습니다.')
+            _remove_current(claim_id)
+            _clear_cancel(claim_id)
+            logger.info(f'[주기적 스캔] {name}: 대기 중 취소됐습니다.')
+            return (None, None, None)
+        free, _ = _slot_free(first_key, action, exclude_claim_id=claim_id)
+        if free and _try_claim(idx, name, mode, job_started, row_id, claim_id,
+                               section_label, action, first_key):
             waited = int(time.time() - t0)
             try:
                 row = (F.db.session.query(ModelPeriodicItem)
@@ -603,11 +812,13 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
                     row.save()
             except Exception as e:
                 logger.warning(f'[주기적 스캔] 대기 행 시작 기록 실패: {e}')
-            return (row_id, waited)
+            return (row_id, waited, claim_id)
     _finish_job_row(row_id, 'failed',
                     f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (작업 대기 {_fmt_wait(max_min * 60)})')
+    _remove_current(claim_id)
+    _clear_cancel(claim_id)
     logger.warning(f'[주기적 스캔] {name}: 작업 대기 시간 초과로 시작하지 않습니다.')
-    return (None, None)
+    return (None, None, None)
 
 
 def _record_start_error(job_name, reason):
@@ -666,30 +877,75 @@ def fail_start(job_name, mode, reason, section_label='전체', action=None):
     _record_start_error(job_name, reason)
 
 
-def _cancel_requested():
-    return (P.ModelSetting.get(CANCEL_KEY) or '') == '1'
+def _cancel_ids():
+    """취소 요청된 작업의 claim_id 목록. 구 형식 '1'(전부 취소)이면
+    ['*']로, 비어 있거나 깨졌으면 빈 목록으로 돌려준다."""
+    raw = P.ModelSetting.get(CANCEL_KEY) or ''
+    if raw == '1':
+        return ['*']
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return [str(x) for x in data if x is not None]
+    return []
+
+
+def _cancel_requested(claim_id=None):
+    """이 작업에 취소 요청이 들어왔으면 True. claim_id가 없으면
+    구 형식 '1'(전부 취소)일 때만 True를 돌려준다."""
+    ids = _cancel_ids()
+    if '*' in ids:
+        return True
+    if claim_id is None:
+        return False
+    return str(claim_id) in ids
 
 
 def _clear_resume_current(item_id):
     """복구용 진행 상태면 지운다 — 새 실행의 진행 상태를 건드리지 않는다."""
     try:
-        cur = get_current()
-        if isinstance(cur, dict) and str(cur.get('resume_item_id')) == str(item_id):
-            _set_current(None)
+        for cur in get_currents():
+            if str(cur.get('resume_item_id')) == str(item_id):
+                _remove_current(cur.get('claim_id'))
+                return
     except Exception:
         pass
 
 
-def request_cancel():
-    P.ModelSetting.set(CANCEL_KEY, '1')
+def request_cancel(claim_id):
+    """이 작업의 취소를 요청한다 — 다른 작업의 취소 요청은 건드리지 않는다."""
+    if claim_id is None:
+        return
+    ids = _cancel_ids()
+    if '*' in ids or str(claim_id) in ids:
+        return
+    ids.append(str(claim_id))
+    P.ModelSetting.set(CANCEL_KEY, json.dumps(ids, ensure_ascii=False))
+
+
+def _clear_cancel(claim_id):
+    """끝난 작업의 취소 요청을 지운다 — 목록이 쌓이지 않게 한다."""
+    if claim_id is None:
+        return
+    ids = [x for x in _cancel_ids() if x != str(claim_id)]
+    if '*' in ids:
+        return
+    P.ModelSetting.set(CANCEL_KEY,
+                       json.dumps(ids, ensure_ascii=False) if ids else '')
 
 
 class TaskPeriodic:
     """주기적 스캔 실행 — 선택한 섹션을 하나씩 순차로 처리한다.
 
     단계: (옵션) VFS 새로고침 → 완료 확인 → 스캔 전송 → 완료 확인.
-    진행 상태는 ModelSetting periodic_current에 기록해 현황/주기 화면이 공유한다.
-    취소는 periodic_cancel 플래그로 요청받고, 단계 폴링 중 확인해 멈춘다.
+    진행 상태는 ModelSetting periodic_current에 목록으로 기록해
+    현황/주기 화면이 공유한다. 여러 작업이 설정한 '라이브러리 동시
+    스캔 수'까지 함께 돌 수 있다. 취소는 periodic_cancel에 claim_id
+    목록으로 요청받고, 단계 폴링 중 확인해 멈춘다.
     완료된 스캔의 집계는 이력 행에 남기고, 진행 상황은 대시보드 섹션 상태
     (status_sec_N)에도 수동 작업과 같은 모양으로 기록한다.
     """
@@ -700,18 +956,12 @@ class TaskPeriodic:
             try:
                 TaskPeriodic._run(idx, mode)
             except Exception as e:
+                # _run이 차지한 뒤의 오류는 _run 안에서 자기 진행
+                # 상태·이력 행까지 정리한다. 여기까지 올라오는 건
+                # 차지하기 전의 오류라 진행 상태를 건드리지 않는다
+                # (다른 작업의 진행 상태를 지우면 안 된다).
                 logger.error(f'주기적 스캔 실행 실패: {e}')
                 logger.error(traceback.format_exc())
-                try:
-                    row_id = (get_current() or {}).get('job_row_id')
-                except Exception:
-                    row_id = None
-                _set_current(None)
-                if row_id:
-                    # 기다렸다 시작한 작업이면 대기 행을 실패로 끝낸다 —
-                    # fail_start로 또 행을 만들면 두 개가 된다.
-                    _finish_job_row(row_id, 'failed', f'실행 중 오류가 발생했습니다: {e}')
-                    return
                 try:
                     jobs = get_jobs()
                     job = jobs[idx] if 0 <= idx < len(jobs) else None
@@ -739,7 +989,6 @@ class TaskPeriodic:
         if _same_job_busy(job_name):
             logger.info(f'주기적 스캔: {job_name} — 이미 실행 중이거나 대기 중이라 건너뜁니다.')
             return
-        P.ModelSetting.set(CANCEL_KEY, '')
         sections, err = ModuleStatus._sections()
         if err:
             logger.error(f'주기적 스캔: 섹션 조회 실패 — {err}')
@@ -767,27 +1016,46 @@ class TaskPeriodic:
                      if len(_valid_keys) == 1 else '전체')
         # 앞선 작업이 돌고 있으면 기다렸다가 차례가 되면 실행한다.
         # 기다리다 시간 초과하면 _wait_for_turn이 실패 행을 남긴다.
-        job_row_id, _waited = _wait_for_turn(idx, job_name, mode, job_started, job_label, action)
+        # 자리 검사는 첫 라이브러리 기준으로 한다 — 나중 라이브러리는
+        # 섹션 시작 때 게이트가 다시 본다.
+        job_row_id, _waited, claim_id = _wait_for_turn(
+            idx, job_name, mode, job_started, job_label, action,
+            first_key=_valid_keys[0])
         if _waited is None:
             return
-        for key in job.get('sections') or []:
-            if _cancel_requested():
-                logger.info('주기적 스캔: 취소 요청으로 중단합니다.')
-                break
-            sec = sec_map.get(str(key))
-            if sec is None:
-                continue
-            if TaskPeriodic._run_section(job, idx, sec, mode, job_started, job_row_id):
-                any_scan_done = True
-            if _cancel_requested():
-                break
+        try:
+            for key in job.get('sections') or []:
+                if _cancel_requested(claim_id):
+                    logger.info('주기적 스캔: 취소 요청으로 중단합니다.')
+                    break
+                sec = sec_map.get(str(key))
+                if sec is None:
+                    continue
+                if TaskPeriodic._run_section(job, idx, sec, mode, job_started,
+                                             job_row_id, claim_id):
+                    any_scan_done = True
+                if _cancel_requested(claim_id):
+                    break
+        except Exception as e:
+            # 차지한 뒤의 오류는 여기서 자기 것만 정리한다 — 다른
+            # 작업의 진행 상태·이력 행은 건드리지 않는다.
+            logger.error(f'주기적 스캔 실행 실패: {e}')
+            logger.error(traceback.format_exc())
+            _remove_current(claim_id)
+            _clear_cancel(claim_id)
+            if job_row_id is not None:
+                _finish_job_row(job_row_id, 'failed', f'실행 중 오류가 발생했습니다: {e}')
+            else:
+                fail_start(job_name, mode, f'실행 중 오류가 발생했습니다: {e}',
+                           action=action)
+            return
         if job_row_id is not None:
-            if _cancel_requested():
+            if _cancel_requested(claim_id):
                 _finish_job_row(job_row_id, 'cancelled', '취소 요청으로 중단했습니다.')
             else:
                 _finish_job_row(job_row_id, 'done', '완료됐습니다.')
-        _set_current(None)
-        P.ModelSetting.set(CANCEL_KEY, '')
+        _remove_current(claim_id)
+        _clear_cancel(claim_id)
         if any_scan_done:
             # 스캔으로 통계가 바뀌었을 수 있어 현황 통계 재계산을 요청한다
             try:
@@ -803,13 +1071,19 @@ class TaskPeriodic:
         휴지통 스캔 중인 섹션은 건너뛰고, 가드 조회에 실패하면
         fail-closed로 건너뛴다 (W5). 섹션 시작 시마다 다시 읽는다."""
         trash_parse_ok = True
-        trash_section_key = None
+        trash_section_keys = set()
         raw_cur = P.ModelSetting.get('trash_current')
         if raw_cur:
             try:
                 cur = json.loads(raw_cur)
                 if isinstance(cur, dict):
-                    trash_section_key = cur.get('section_key')
+                    if cur.get('section_key') and cur.get('stage') != 'waiting':
+                        trash_section_keys.add(str(cur.get('section_key')))
+                elif isinstance(cur, list):
+                    for c in cur:
+                        if (isinstance(c, dict) and c.get('section_key')
+                                and c.get('stage') != 'waiting'):
+                            trash_section_keys.add(str(c.get('section_key')))
                 else:
                     trash_parse_ok = False
             except Exception:
@@ -820,7 +1094,8 @@ class TaskPeriodic:
                               for k in ('vfs', 'scan', 'meta', 'trash'))
         except Exception:
             status_busy = False
-        return _periodic_skip_decision(trash_parse_ok, trash_section_key,
+        return _periodic_skip_decision(trash_parse_ok,
+                                       str(key) if str(key) in trash_section_keys else None,
                                        status_busy, key)
 
     @staticmethod
@@ -843,7 +1118,8 @@ class TaskPeriodic:
             logger.warning(f'[주기적 스캔] 현황 상태 정리 실패: {e}')
 
     @staticmethod
-    def _run_section(job, idx, sec, mode, job_started, job_row_id=None):
+    def _run_section(job, idx, sec, mode, job_started, job_row_id=None,
+                     claim_id=None):
         key = sec['key']
         job_name = job.get('name') or ''
         title = sec.get('title') or ''
@@ -867,9 +1143,10 @@ class TaskPeriodic:
             'job_started_at': job_started,
             'section_started_at': _now_text(),
             'job_row_id': job_row_id,
+            'claim_id': claim_id,
             'action': action,
         }
-        _set_current(cur)
+        _upsert_current(cur)
         logger.info(f"주기적 스캔: {title} 시작 (종류: {'VFS 새로고침만' if vfs_only else '스캔'})")
         vfs_duration = None
         scan_duration = None
@@ -914,7 +1191,7 @@ class TaskPeriodic:
                 item.vfs_duration = vfs_duration
                 item.save()
                 cur['stage'] = 'scan'
-                _set_current(cur)
+                _upsert_current(cur)
             # 스캔 시작 전 MAX(media_parts.id)를 기록해 둔다 —
             # 추가 파일 목록 2차 방법(전후 비교)용 기준점이다.
             pre_max_id = None
@@ -928,11 +1205,12 @@ class TaskPeriodic:
                 # 추가 파일 2차 방법(전후 비교)용 기준점 — 재시작 후
                 # 복구해도 쓸 수 있게 진행 상태에 함께 남긴다.
                 cur['pre_max_id'] = pre_max_id
-                _set_current(cur)
+                _upsert_current(cur)
             # 라이브러리 동시 스캔 수 게이트 — 같은 라이브러리가 스캔
             # 중이거나 상한까지 돌고 있으면 이 섹션은 실패로 끝낸다
-            # (기다리지 않는다).
-            gate_msg = ModuleStatus.library_gate_check(key, exclude_source='periodic')
+            # (기다리지 않는다). 자기 작업의 진행 상태만 빼고 센다.
+            gate_msg = ModuleStatus.library_gate_check(
+                key, exclude_claim_id=claim_id)
             if gate_msg:
                 item.finish('failed', gate_msg)
                 return False
@@ -945,7 +1223,7 @@ class TaskPeriodic:
 
             def _on_scan_job(scan_jobid):
                 cur['scan_job'] = scan_jobid
-                _set_current(cur)
+                _upsert_current(cur)
                 # shyni 작업 번호를 이력 행에도 남긴다 — 재시작 후
                 # 복구가 이 번호로 스캔 완료를 이어서 확인할 수 있다.
                 item.shyni_job_id = scan_jobid
@@ -956,7 +1234,7 @@ class TaskPeriodic:
                     'status': 'running', 'source': 'periodic',
                     'job_name': job_name})
 
-            sres = TaskPeriodic._do_scan(sec, on_job_id=_on_scan_job)
+            sres = TaskPeriodic._do_scan(sec, claim_id, on_job_id=_on_scan_job)
             scan_duration = sres['duration']
             job_id = sres.get('job_id')
             stats = sres.get('stats')
@@ -1027,7 +1305,7 @@ class TaskPeriodic:
                                {'dir': remote, 'recursive': 'true', '_async': 'true'})
         jobid = ret.get('jobid')
         cur['vfs_job'] = jobid
-        _set_current(cur)
+        _upsert_current(cur)
         if on_job_id is not None and jobid:
             try:
                 on_job_id(jobid)
@@ -1036,7 +1314,7 @@ class TaskPeriodic:
         deadline = time.time() + _vfs_timeout_sec()
         fail_count = 0
         while time.time() < deadline:
-            if _cancel_requested():
+            if _cancel_requested(cur.get('claim_id')):
                 try:
                     ModuleStatus._rc(addr, 'job/stop', {'jobid': jobid})
                 except Exception as e:
@@ -1085,12 +1363,13 @@ class TaskPeriodic:
                 'duration': int(time.time() - t0), 'jobid': jobid}
 
     @staticmethod
-    def _do_scan(sec, on_job_id=None):
+    def _do_scan(sec, claim_id=None, on_job_id=None):
         """스캔을 전송하고 완료까지 기다린다.
         {'status': done|failed|cancelled, 'message', 'job_id', 'stats',
          'duration': 초}를 돌려준다. 6시간 기한이 있고, 폴링 중 일시적
         오류는 재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7).
-        job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3)."""
+        job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3).
+        claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
         t0 = time.time()
         url, token = ShyniBackend.get_config()
         if not url or not token:
@@ -1112,22 +1391,70 @@ class TaskPeriodic:
                 pass
         logger.info(f"주기적 스캔: {sec.get('title')} 스캔 전송 (job {job_id})")
         return TaskPeriodic._poll_scan_job(url, token, job_id, t0,
-                                           section_key=sec['key'])
+                                           section_key=sec['key'],
+                                           claim_id=claim_id)
 
     @staticmethod
-    def _poll_scan_job(url, token, job_id, t0, section_key=None):
+    def _poll_scan_job(url, token, job_id, t0, section_key=None, claim_id=None):
         """compat job 완료까지 폴링한다. _do_scan과 재시작 복구가 함께 쓴다.
         {'status': done|failed|cancelled, 'message', 'job_id', 'stats',
-         'duration': 초}를 돌려준다. 6시간 기한이 있고, 폴링 중 일시적
-        오류는 재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7).
+         'duration': 초}를 돌려준다. 기한(설정 periodic_scan_timeout_min,
+        기본 360분)이 됐을 때 shyni에서 스캔이 아직 진행 중이면 기한을
+        연장하며 계속 기다리고, 폴링 중 일시적 오류는 재시도하며 연속
+        3회 실패 시에만 실패로 확정한다 (W7).
         job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3).
         section_key가 있으면 60초마다 스캔 진행률을 현황에 기록한다
-        (진행 표시용 — 완료 판정은 job 폴링이 계속 맡는다)."""
-        deadline = time.time() + WAIT_TIMEOUT_SEC
+        (진행 표시용 — 완료 판정은 job 폴링이 계속 맡는다).
+        claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
+        timeout_sec = _scan_timeout_sec()
+        deadline = time.time() + timeout_sec
         fail_count = 0
         poll_count = 0
-        while time.time() < deadline:
-            if _cancel_requested():
+        while True:
+            if time.time() >= deadline:
+                # 기한 도달 — job을 한 번 더 조회해 연장 여부를 정한다.
+                # shyni에서 아직 진행 중이면 기한을 연장하고 계속
+                # 기다린다. job이 끝났으면 그 결과를 그대로 쓴다.
+                job = _fetch_compat_job(url, token, job_id)
+                if isinstance(job, dict):
+                    fail_count = 0
+                    outcome, msg = _scan_poll_outcome(200, job)
+                    if outcome == 'done':
+                        logger.info(f"주기적 스캔 완료 (job {job_id})")
+                        return {'status': 'done', 'message': msg,
+                                'job_id': job_id,
+                                'stats': job.get('stats') or {},
+                                'duration': int(time.time() - t0)}
+                    if outcome == 'failed':
+                        return {'status': 'failed', 'message': msg,
+                                'job_id': job_id,
+                                'stats': job.get('stats') or {},
+                                'duration': int(time.time() - t0)}
+                    if outcome == 'cancelled':
+                        return {'status': 'cancelled', 'message': msg,
+                                'job_id': job_id,
+                                'stats': job.get('stats') or {},
+                                'duration': int(time.time() - t0)}
+                    deadline = time.time() + timeout_sec
+                    logger.info(
+                        f"주기적 스캔: shyni에서 아직 진행 중이라 기한을 "
+                        f"{_fmt_wait(timeout_sec)} 연장합니다 (job {job_id})")
+                    continue
+                if job == 'not_found':
+                    return {'status': 'failed',
+                            'message': '스캔 작업 기록을 찾을 수 없습니다.',
+                            'job_id': job_id, 'stats': None,
+                            'duration': int(time.time() - t0)}
+                # 조회 실패 — 연속 실패 로직으로 처리한다. 아직 기준에
+                # 못 미치면 잠깐 뒤에 다시 확인한다.
+                fail_count += 1
+                if fail_count >= POLL_FAIL_MAX:
+                    return {'status': 'failed',
+                            'message': f'스캔 확인이 연속 {POLL_FAIL_MAX}회 실패했습니다.',
+                            'job_id': job_id, 'stats': None,
+                            'duration': int(time.time() - t0)}
+                deadline = time.time() + SCAN_POLL_SEC
+            if _cancel_requested(claim_id):
                 # Step5-1 — shyni 스캔도 함께 취소하고 확인한다.
                 # job이 이미 끝났으면 그 결과를 그대로 쓴다.
                 cres = _cancel_shyni_scan(url, token, job_id, section_key)
@@ -1204,10 +1531,6 @@ class TaskPeriodic:
             if section_key and poll_count % 6 == 0:
                 _record_scan_progress(section_key)
             time.sleep(SCAN_POLL_SEC)
-        return {'status': 'failed',
-                'message': '스캔이 기한 안에 끝나지 않았습니다.',
-                'job_id': job_id, 'stats': None,
-                'duration': int(time.time() - t0)}
 
     @F.celery.task
     def resume(item_id):
@@ -1241,8 +1564,11 @@ class TaskPeriodic:
             item.finish('failed', '스캔 작업 번호가 없어 복구할 수 없습니다.')
             _clear_resume_current(item_id)
             return
-        cur = get_current() or {}
-        pre_max_id = cur.get('pre_max_id')
+        pre_max_id = None
+        for cur in get_currents():
+            if str(cur.get('resume_item_id')) == str(item_id):
+                pre_max_id = cur.get('pre_max_id')
+                break
         url, token = ShyniBackend.get_config()
         if not url or not token:
             item.finish('failed', 'shyni 주소와 토큰을 먼저 설정해 주세요.')
@@ -1250,8 +1576,25 @@ class TaskPeriodic:
             return
         logger.info(f'주기적 스캔 복구: {item.section_title} '
                     f'스캔(job {job_id}) 완료 확인을 이어서 합니다.')
+        # 복구 시작 때 현황 슬롯도 running으로 되돌린다 — 안 그러면
+        # _record_scan_progress가 failed 슬롯을 보고 건너뛰어 진행률이
+        # 완료 전까지 안 보인다 (2026-11-20 V.A job 20723 실측).
+        try:
+            st = ModuleStatus._get_state(int(key))
+            prev = st.get('scan') or {}
+            started = prev.get('started_at')
+            if not started and item.start_time:
+                started = item.start_time.strftime('%Y-%m-%d %H:%M:%S')
+            _write_status(key, 'scan', {
+                'job': job_id, 'path': prev.get('path', ''),
+                'started_at': started, 'finished_at': None,
+                'status': 'running', 'source': 'periodic',
+                'job_name': item.job_name or ''})
+        except Exception as e:
+            logger.warning(f'[주기적 스캔 복구] 현황 상태 기록 실패: {e}')
         res = TaskPeriodic._poll_scan_job(url, token, job_id, time.time(),
-                                          section_key=key)
+                                          section_key=key,
+                                          claim_id=f'resume-{item_id}')
         stats = res.get('stats')
         # 스캔 소요는 섹션 시작부터 끝까지에서 VFS 소요를 뺀 값으로 본다
         # (재시작으로 멈췄던 시간도 벽시계 기준으로는 스캔 단계에 든 시간이다).
@@ -1327,7 +1670,8 @@ class TaskPeriodic:
 
         스캔 전송까지 끝난 이력(작업 번호가 이력 행에 있음)만 복구한다.
         VFS 단계에서 멈춘 이력은 복구하지 않는다 — 다음 실행 때 VFS부터
-        다시 하면 된다. 복구를 시작했으면 True, 복구할 게 없으면 False."""
+        다시 하면 된다. 여러 작업이 함께 돌고 있었다면 그만큼 복구한다.
+        복구를 시작했으면 True, 복구할 게 없으면 False."""
         with F.app.app_context():
             try:
                 rows = (F.db.session.query(ModelPeriodicItem)
@@ -1336,61 +1680,74 @@ class TaskPeriodic:
             except Exception as e:
                 logger.error(f'[주기적 스캔 복구] 이력 조회 실패: {e}')
                 return False
-            target = None
+            targets = []
             for row in rows:
                 if row.shyni_job_id:
-                    target = row
-                    break
-            if target is None:
+                    targets.append({
+                        'item_id': row.id,
+                        'job_id': row.shyni_job_id,
+                        'job_name': row.job_name or '',
+                        'section_key': str(row.section_key),
+                        'section_title': row.section_title or '',
+                        'mode': row.mode or '',
+                        'action': row.action,
+                        'section_started': (row.start_time.strftime('%Y-%m-%d %H:%M:%S')
+                                            if row.start_time else ''),
+                    })
+            if not targets:
                 return False
-            # 세션이 닫히기 전에 필요한 값을 평범한 값으로 뽑아 둔다
-            item_id = target.id
-            job_id = target.shyni_job_id
-            job_name = target.job_name or ''
-            section_key = str(target.section_key)
-            section_title = target.section_title or ''
-            mode = target.mode or ''
-            action = target.action
-            section_started = (target.start_time.strftime('%Y-%m-%d %H:%M:%S')
-                               if target.start_time else '')
         # 복구 대상이 아닌 running 이력은 중단됨으로 정리한다
         try:
-            ModelPeriodicItem.set_terminated(exclude_id=item_id)
+            ModelPeriodicItem.set_terminated(
+                exclude_ids=[t['item_id'] for t in targets])
         except Exception as e:
             logger.error(f'[주기적 스캔 복구] 나머지 이력 정리 실패: {e}')
         # 진행 중 표시를 복구 상태로 유지한다 — 새 실행을 막고
         # 대시보드·작업 관리 화면이 진행 중임을 알 수 있게 한다.
+        # 복구 대상이 아닌 옛 진행 상태는 버린다.
         try:
-            cur = get_current() or {}
-            cur.update({
-                'job_name': job_name,
-                'section_key': section_key,
-                'section_title': section_title,
-                'stage': 'scan',
-                'mode': mode,
-                'section_started_at': section_started,
-                'scan_job': job_id,
-                'resume_item_id': item_id,
-                'action': action,
-            })
-            _set_current(cur)
+            old = {str(c.get('section_key')): c for c in get_currents()
+                   if c.get('section_key')}
+            entries = []
+            for t in targets:
+                prev = old.get(t['section_key']) or {}
+                entries.append({
+                    'job_idx': prev.get('job_idx'),
+                    'job_name': t['job_name'],
+                    'section_key': t['section_key'],
+                    'section_title': t['section_title'],
+                    'stage': 'scan',
+                    'mode': t['mode'],
+                    'job_started_at': prev.get('job_started_at') or t['section_started'],
+                    'section_started_at': t['section_started'],
+                    'scan_job': t['job_id'],
+                    'resume_item_id': t['item_id'],
+                    'claim_id': f"resume-{t['item_id']}",
+                    'claimed_at': prev.get('claimed_at'),
+                    'pre_max_id': prev.get('pre_max_id'),
+                    'action': t['action'],
+                })
+            _save_currents(entries)
         except Exception as e:
             logger.error(f'[주기적 스캔 복구] 진행 상태 기록 실패: {e}')
-        logger.info(f'[주기적 스캔 복구] {section_title} '
-                    f'스캔(job {job_id}) 완료 확인을 이어서 합니다.')
-        def _launch():
-            try:
-                start_celery(TaskPeriodic.resume, None, *(item_id,))
-            except Exception as e:
-                logger.error(f'[주기적 스캔 복구] 복구 작업 시작 실패: {e}')
+        for t in targets:
+            logger.info(f"[주기적 스캔 복구] {t['section_title']} "
+                        f"스캔(job {t['job_id']}) 완료 확인을 이어서 합니다.")
+            item_id = t['item_id']
+
+            def _launch(item_id=item_id):
                 try:
-                    with F.app.app_context():
-                        item = (F.db.session.query(ModelPeriodicItem)
-                                .filter(ModelPeriodicItem.id == item_id).first())
-                        if item is not None and item.status == 'running':
-                            item.finish('failed', '복구 작업을 시작하지 못했습니다.')
-                    _clear_resume_current(item_id)
-                except Exception:
-                    pass
-        threading.Thread(target=_launch, daemon=True).start()
+                    start_celery(TaskPeriodic.resume, None, *(item_id,))
+                except Exception as e:
+                    logger.error(f'[주기적 스캔 복구] 복구 작업 시작 실패: {e}')
+                    try:
+                        with F.app.app_context():
+                            item = (F.db.session.query(ModelPeriodicItem)
+                                    .filter(ModelPeriodicItem.id == item_id).first())
+                            if item is not None and item.status == 'running':
+                                item.finish('failed', '복구 작업을 시작하지 못했습니다.')
+                        _clear_resume_current(item_id)
+                    except Exception:
+                        pass
+            threading.Thread(target=_launch, daemon=True).start()
         return True

@@ -873,9 +873,13 @@ class ModuleStatus(PluginModuleBase):
                 alive = False
                 try:
                     raw_cur = P.ModelSetting.get(cur_key)
-                    cur = json.loads(raw_cur) if raw_cur else None
-                    alive = (isinstance(cur, dict)
-                             and str(cur.get('section_key')) == str(key))
+                    curs = json.loads(raw_cur) if raw_cur else None
+                    if isinstance(curs, dict):
+                        curs = [curs]
+                    alive = any(isinstance(c, dict)
+                                and c.get('stage') != 'waiting'
+                                and str(c.get('section_key')) == str(key)
+                                for c in (curs or []))
                 except Exception:
                     alive = False
                 stale = (not alive) and cls._started_over_min(
@@ -965,6 +969,22 @@ class ModuleStatus(PluginModuleBase):
                                 scan_duration=cls._slot_seconds(
                                     scan.get('started_at'), scan.get('finished_at')),
                                 pre_max_id=scan.get('pre_max_id'))
+                        elif job.get('status') == 'cancelled':
+                            # Step5-1 — 관리자 API·shyni 웹에서 취소된 스캔은
+                            # job이 'cancelled'로 끝난다. 슬롯도 취소됨으로
+                            # 정리하고 이력 행에 '취소됨'으로 남긴다.
+                            scan['status'] = 'cancelled'
+                            scan['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            logger.info(f"[현황] 스캔 취소됨: 섹션 {key} job {scan['job']}")
+                            changed = True
+                            cls._dashboard_row_finish(
+                                scan.get('history_row_id'), 'cancelled',
+                                '스캔이 취소됐습니다.',
+                                job=job, job_id=scan.get('job'),
+                                vfs_duration=vfs_secs,
+                                scan_duration=cls._slot_seconds(
+                                    scan.get('started_at'), scan.get('finished_at')),
+                                pre_max_id=scan.get('pre_max_id'))
                     elif res.status_code == 404:
                         # job 기록이 사라지면(보관 기간 경과·shyni 재시작 등)
                         # 완료를 확인할 길이 없어 진행 중으로 굳는다 — 중단으로 정리한다
@@ -995,13 +1015,15 @@ class ModuleStatus(PluginModuleBase):
             cls._set_state(key, state)
         return state
 
-    # ---------- 라이브러리 동시 스캔 수 게이트 ----------
-    # 스캔이 들어간 작업은 경로와 상관없이 1건으로 세서, 설정
+    # ---------- 라이브러리 동시 스캔 수 게이트 (규칙 2) ----------
+    # 규칙 1(같은 모듈 안에서 같은 라이브러리 중복 금지)이 규칙 2보다
+    # 먼저 적용된다 — 규칙 1은 task_periodic/task_trash에서 본다.
+    # 규칙 2: 스캔이 들어간 작업은 경로와 상관없이 1건으로 세서, 설정
     # '라이브러리 동시 스캔 수'(기본값 2)까지만 동시에 돈다.
     # 대시보드 스캔·새로고침 후 스캔은 누른 시점부터 1건이고,
     # 주기적·휴지통은 스캔이 들어간 작업이 실행 중이면 1건이다.
     # 상한에 걸리거나 같은 라이브러리가 스캔 중이면 시작하지 않고
-    # 취소한다 — 기다리지 않는다.
+    # 취소한다 — 기다리지 않는다. 대기 중인 작업은 세지 않는다.
     # 스캔 큐(폴더 단위)는 기존 '동시 스캔 수'가 따로 제한하므로
     # 여기서 세지 않는다. 실행 중 집계는 현황 scan 슬롯을 compat
     # job으로 직접 확인해 센다 — shyni 스캔 상태 API는 큐 스캔까지
@@ -1022,15 +1044,111 @@ class ModuleStatus(PluginModuleBase):
         return max(1, min(20, v))
 
     @classmethod
-    def running_library_scans(cls, exclude_source=None):
+    def dashboard_running_scans(cls):
+        """대시보드에서 시작한 스캔 — [(key, title)]. 현황 scan·vfs
+        슬롯을 compat job으로 확인해 세며, 주기적·휴지통 진행
+        상태는 세지 않는다. (차지 재확인용.)"""
+        try:
+            sections, err = cls._sections()
+        except Exception:
+            return []
+        if err or not sections:
+            return []
+        running = {}
+        for sec in sections:
+            key = sec.get('key')
+            if key is None:
+                continue
+            try:
+                state = cls._refresh_state(int(key), cls._get_state(int(key)))
+            except Exception:
+                continue
+            scan = (state or {}).get('scan') or {}
+            if scan.get('status') in ('running', 'requested'):
+                running[str(key)] = sec.get('title') or f'라이브러리 {key}'
+                continue
+            vfs = (state or {}).get('vfs') or {}
+            if vfs.get('status') == 'running' and vfs.get('then_scan'):
+                running[str(key)] = sec.get('title') or f'라이브러리 {key}'
+        order = {str(sec.get('key')): i for i, sec in enumerate(sections)}
+        return sorted(running.items(), key=lambda kv: order.get(kv[0], 999))
+
+    @classmethod
+    def claim_survives(cls, claim_id, first_key, claimed_at):
+        """차지한 스캔 자리가 살아남는지 — True면 그대로 진행, False면
+        자리를 내놓고 기다린다. 게이트를 보고 차지하는 사이에 다른
+        작업이 차지했을 수 있어, 차지한 뒤에 한 번 더 확인한다.
+        동시에 차지한 작업끼리는 차지한 시각(claimed_at) 순서로
+        가른다 — 앞 순서가 자리를 갖고, 뒤 순서가 물러난다. (전부
+        물러나면 아무도 시작하지 못하니 순서로 가른다.) 차지한
+        시각이 없는 옛 항목은 가장 먼저 차지한 것으로 센다.
+        대시보드 스캔은 이미 돌고 있는 것이라 전부 센다. 대기 중인
+        항목은 자리를 예약하지 않으므로 세지 않는다.
+        읽기에 실패하면 True로 열어 둔다 (게이트가 스캔을 막지 않게)."""
+        try:
+            limit = cls.library_scan_limit()
+        except Exception:
+            return True
+        try:
+            dashboard = cls.dashboard_running_scans()
+        except Exception:
+            dashboard = []
+        running = {str(k) for k, _t in dashboard}
+        if str(first_key) in running:
+            return False
+        try:
+            my_at = int(claimed_at) if claimed_at is not None else 0
+        except Exception:
+            my_at = 0
+        for setting_key in ('periodic_current', 'trash_current'):
+            try:
+                raw = P.ModelSetting.get(setting_key)
+                curs = json.loads(raw) if raw else None
+            except Exception:
+                continue
+            if isinstance(curs, dict):
+                curs = [curs]
+            if not isinstance(curs, list):
+                continue
+            for cur in curs:
+                if not isinstance(cur, dict):
+                    continue
+                if cur.get('claim_id') == claim_id:
+                    continue
+                if cur.get('stage') == 'waiting':
+                    continue
+                if 'scan' not in str(cur.get('action') or ''):
+                    continue
+                try:
+                    other_at = int(cur.get('claimed_at') or 0)
+                except Exception:
+                    other_at = 0
+                # 나보다 늦게 차지한 작업은 세지 않는다 — 그쪽이
+                # 나를 보고 스스로 물러난다. 같은 시각이면
+                # claim_id 문자열 순서로 가른다.
+                if (other_at, str(cur.get('claim_id') or '')) >= (my_at, str(claim_id)):
+                    continue
+                skey = cur.get('section_key')
+                if not skey:
+                    continue
+                if str(skey) == str(first_key):
+                    return False
+                running.add(str(skey))
+        return len(running) < limit
+
+    @classmethod
+    def running_library_scans(cls, exclude_source=None, exclude_claim_id=None):
         """지금 스캔 중인 라이브러리 — [(key, title)].
         현황 scan 슬롯을 compat job으로 확인해 세므로, 대시보드를
         열지 않아 표시만 낡게 남은 스캔은 세지 않는다. 새로고침 후
         스캔은 새로고침 단계부터 센다. 주기적·휴지통은 진행 상태에
-        스캔이 들어간 작업이 있으면 그 라이브러리를 센다.
+        스캔이 들어간 작업이 있으면 그 라이브러리를 센다. 대기 중인
+        작업은 자리를 예약하지 않으므로 세지 않는다.
         exclude_source='periodic'/'trash'면 그쪽 진행 상태는 빼고
-        센다 (자기 작업이 자기 자리를 막지 않게). 목록을 읽지 못하면
-        빈 목록을 돌려준다 (게이트가 스캔을 막지 않게)."""
+        센다 (호환용). exclude_claim_id면 그 작업만 빼고 센다 —
+        여러 작업이 함께 돌 때 자기 자리만 빼는 정확한 방식이다.
+        목록을 읽지 못하면 빈 목록을 돌려준다 (게이트가 스캔을
+        막지 않게)."""
         try:
             sections, err = cls._sections()
         except Exception:
@@ -1061,29 +1179,40 @@ class ModuleStatus(PluginModuleBase):
                 continue
             try:
                 raw = P.ModelSetting.get(setting_key)
-                cur = json.loads(raw) if raw else None
+                curs = json.loads(raw) if raw else None
             except Exception:
-                cur = None
-            if not isinstance(cur, dict):
+                curs = None
+            if isinstance(curs, dict):
+                curs = [curs]
+            if not isinstance(curs, list):
                 continue
-            skey = cur.get('section_key')
-            if not skey:
-                continue
-            if 'scan' not in str(cur.get('action') or ''):
-                continue
-            skey = str(skey)
-            if skey not in running:
-                running[skey] = (titles.get(skey)
-                                 or cur.get('section_title')
-                                 or f'라이브러리 {skey}')
+            for cur in curs:
+                if not isinstance(cur, dict):
+                    continue
+                if (exclude_claim_id is not None
+                        and cur.get('claim_id') == exclude_claim_id):
+                    continue
+                if cur.get('stage') == 'waiting':
+                    continue
+                skey = cur.get('section_key')
+                if not skey:
+                    continue
+                if 'scan' not in str(cur.get('action') or ''):
+                    continue
+                skey = str(skey)
+                if skey not in running:
+                    running[skey] = (titles.get(skey)
+                                     or cur.get('section_title')
+                                     or f'라이브러리 {skey}')
         order = {str(sec.get('key')): i for i, sec in enumerate(sections)}
         return sorted(running.items(), key=lambda kv: order.get(kv[0], 999))
 
     @classmethod
-    def library_gate_check(cls, key, exclude_source=None):
+    def library_gate_check(cls, key, exclude_source=None, exclude_claim_id=None):
         """스캔 시작 전 게이트 검사 — 막아야 하면 안내 문구, 아니면 None.
         같은 라이브러리가 이미 스캔 중이면 그 문구를 먼저 낸다."""
-        running = cls.running_library_scans(exclude_source=exclude_source)
+        running = cls.running_library_scans(
+            exclude_source=exclude_source, exclude_claim_id=exclude_claim_id)
         if str(key) in {str(k) for k, _ in running}:
             return cls.LIBRARY_SCAN_SAME_MESSAGE
         limit = cls.library_scan_limit()
@@ -1092,6 +1221,76 @@ class ModuleStatus(PluginModuleBase):
             return (f'다른 라이브러리 스캔 {len(running)}개가 실행 중입니다 '
                     f'({names}). (라이브러리 동시 스캔 수: {limit}개)')
         return None
+
+    @classmethod
+    def dashboard_scan_cards(cls):
+        """대시보드에서 시작한 진행 중 스캔 카드 — 주기적·휴지통
+        작업 관리·결과 페이지의 진행 중 카드 목록에 이어 붙인다.
+        현황 scan·vfs 슬롯을 compat job으로 검증한 뒤, 주기적·
+        휴지통 진행 상태가 소유한 섹션과 source가 'periodic'/
+        'trash'인 슬롯은 뺀다. 카드 모양은 주기적·휴지통 카드와
+        같고, 출처는 job_name='대시보드'로 표시한다."""
+        try:
+            sections, err = cls._sections()
+        except Exception:
+            return []
+        if err or not sections:
+            return []
+        owned = set()
+        for setting_key in ('periodic_current', 'trash_current'):
+            try:
+                raw = P.ModelSetting.get(setting_key)
+                curs = json.loads(raw) if raw else None
+            except Exception:
+                curs = None
+            if isinstance(curs, dict):
+                curs = [curs]
+            if isinstance(curs, list):
+                for c in curs:
+                    if (isinstance(c, dict) and c.get('section_key') is not None
+                            and c.get('stage') != 'waiting'):
+                        owned.add(str(c.get('section_key')))
+        cards = []
+        for sec in sections:
+            key = sec.get('key')
+            if key is None or str(key) in owned:
+                continue
+            try:
+                state = cls._refresh_state(int(key), cls._get_state(int(key)))
+            except Exception:
+                continue
+            scan = (state or {}).get('scan') or {}
+            vfs = (state or {}).get('vfs') or {}
+            if scan.get('source') in ('periodic', 'trash'):
+                continue
+            if vfs.get('source') in ('periodic', 'trash'):
+                continue
+            stage = None
+            action = None
+            started_at = None
+            if scan.get('status') in ('running', 'requested'):
+                stage = 'scan'
+                action = 'scan'
+                started_at = scan.get('started_at')
+            elif vfs.get('status') == 'running':
+                if vfs.get('then_scan'):
+                    stage = 'vfs'
+                    action = 'refresh_scan'
+                else:
+                    stage = 'refresh'
+                    action = 'refresh'
+                started_at = vfs.get('started_at')
+            if stage is None:
+                continue
+            cards.append({
+                'source': 'dashboard', 'job_name': '대시보드',
+                'section_key': str(key),
+                'section_title': sec.get('title') or f'라이브러리 {key}',
+                'stage': stage, 'mode': 'manual', 'action': action,
+                'job_started_at': started_at,
+                'section_started_at': started_at,
+            })
+        return cards
 
     # ---------- 대시보드 목록 재구축 (Celery 워커 전용) ----------
     @classmethod
@@ -1121,22 +1320,26 @@ class ModuleStatus(PluginModuleBase):
         # 도서 카드 신규는 주기 스캔 이력 실측값으로 채운다
         # (shyni 도서 stats에는 신규 키가 없어 last_scan이 비어 있다).
         cls._fill_book_new(rows)
-        periodic_current = None
+        periodic_current = []
         raw_cur = P.ModelSetting.get('periodic_current')
         if raw_cur:
             try:
                 cur = json.loads(raw_cur)
                 if isinstance(cur, dict):
-                    periodic_current = cur
+                    cur = [cur]
+                if isinstance(cur, list):
+                    periodic_current = [c for c in cur if isinstance(c, dict)]
             except Exception:
                 pass
-        trash_current = None
+        trash_current = []
         raw_trash = P.ModelSetting.get('trash_current')
         if raw_trash:
             try:
                 cur = json.loads(raw_trash)
                 if isinstance(cur, dict):
-                    trash_current = cur
+                    cur = [cur]
+                if isinstance(cur, list):
+                    trash_current = [c for c in cur if isinstance(c, dict)]
             except Exception:
                 pass
         type_counts = {}
@@ -1206,7 +1409,7 @@ class ModuleStatus(PluginModuleBase):
                 return jsonify({'ret': 'success', 'data': [], 'need_config': True,
                                 'log_files': 0,
                                 'refresh_min': self._refresh_min(),
-                                'periodic_current': None, 'trash_current': None,
+                                'periodic_current': [], 'trash_current': [],
                                 'type_counts': {},
                                 'db_loading': False, 'list_loading': False,
                                 'progress': 100,
@@ -1255,7 +1458,7 @@ class ModuleStatus(PluginModuleBase):
                 return jsonify({'ret': 'success', 'data': [],
                                 'log_files': None,
                                 'refresh_min': interval,
-                                'periodic_current': None, 'trash_current': None,
+                                'periodic_current': [], 'trash_current': [],
                                 'type_counts': {},
                                 'db_stats_on': False,
                                 'db_loading': False,
@@ -1384,17 +1587,6 @@ class ModuleStatus(PluginModuleBase):
             P.ModelSetting.set(allowed[which][0], value)
             return jsonify({'ret': 'success'})
 
-        if sub == 'set_refresh':
-            try:
-                minutes = int(req.form.get('min'))
-            except Exception:
-                return jsonify({'ret': 'fail', 'msg': '분 값을 숫자로 입력해 주세요.'})
-            minutes = max(0, min(120, minutes))
-            P.ModelSetting.set('status_auto_refresh_min', str(minutes))
-            if minutes == 0:
-                return jsonify({'ret': 'success', 'msg': '자동 업데이트를 껐습니다.'})
-            return jsonify({'ret': 'success', 'msg': f'자동 업데이트 주기를 {minutes}분으로 저장했습니다.'})
-
         if sub == 'set_hidden_libs':
             # '표시'에서 고른 숨김 라이브러리를 화면별로 따로 기억한다.
             # 체크할 때마다 조용히 저장하므로 성공 응답에 msg를 넣지 않는다.
@@ -1445,38 +1637,56 @@ class ModuleStatus(PluginModuleBase):
                     sub = 'trash_empty'
 
             if sub == 'cancel':
+                # Step5-1 — 취소는 shyni 스캔까지 함께 취소한다.
+                # 응답에 stage(어떤 작업인지)와 cancelled(바로 확인됐는지)를
+                # 함께 넣어, 화면이 버튼을 '취소중'으로 바꿨다가 확인되면
+                # '작업이 취소되었습니다'로 표시할 수 있게 한다.
                 # 주기적 스캔이 이 라이브러리를 실행 중이면 그쪽 취소를 요청한다
-                raw_cur = P.ModelSetting.get('periodic_current')
-                if raw_cur:
-                    try:
-                        cur = json.loads(raw_cur)
-                    except Exception:
-                        cur = None
-                    if isinstance(cur, dict) and str(cur.get('section_key')) == str(key):
-                        P.ModelSetting.set('periodic_cancel', '1')
-                        logger.info(f"[현황] 주기적 스캔 취소 요청: {sec['title']}")
-                        return jsonify({'ret': 'success',
-                                        'msg': '주기적 스캔 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'})
+                # (task_periodic이 이 모듈을 참조하므로 순환을 피하려 안에서 가져온다)
+                from .task_periodic import get_currents, request_cancel
+                cur = None
+                for c in get_currents():
+                    if str(c.get('section_key')) == str(key):
+                        cur = c
+                        break
+                if cur is not None:
+                    request_cancel(cur.get('claim_id'))
+                    logger.info(f"[현황] 주기적 스캔 취소 요청: {sec['title']}")
+                    if (cur.get('stage') or '') == 'scan':
+                        msg = '주기적 스캔 취소를 요청했습니다. shyni 스캔 취소가 확인되면 멈추고 하이라이트가 해제됩니다.'
+                    elif (cur.get('stage') or '') == 'waiting':
+                        msg = '주기적 스캔 취소를 요청했습니다. 대기가 중단되면 멈추고 하이라이트가 해제됩니다.'
+                    else:
+                        msg = '주기적 스캔 취소를 요청했습니다. 새로고침이 정리되면 멈추고 하이라이트가 해제됩니다.'
+                    return jsonify({'ret': 'success', 'stage': 'periodic',
+                                    'cancelled': False, 'msg': msg})
                 # 휴지통 스캔이 이 라이브러리를 실행 중이면 그쪽 취소를 요청한다
-                raw_trash = P.ModelSetting.get('trash_current')
-                if raw_trash:
-                    try:
-                        cur = json.loads(raw_trash)
-                    except Exception:
-                        cur = None
-                    if isinstance(cur, dict) and str(cur.get('section_key')) == str(key):
-                        # task_trash가 이 모듈을 참조하므로 순환을 피하려 안에서 가져온다
-                        from .task_trash import request_trash_cancel
-                        request_trash_cancel()
-                        logger.info(f"[현황] 휴지통 스캔 취소 요청: {sec['title']}")
-                        return jsonify({'ret': 'success',
-                                        'msg': '휴지통 스캔 취소를 요청했습니다. 진행 중인 단계가 정리되면 멈추고 하이라이트가 해제됩니다. shyni에서 실행 중인 스캔은 계속될 수 있으니, 멈추려면 shyni 웹에서 취소해 주세요.'})
+                from .task_trash import get_trash_currents, request_trash_cancel
+                cur = None
+                for c in get_trash_currents():
+                    if str(c.get('section_key')) == str(key):
+                        cur = c
+                        break
+                if cur is not None:
+                    request_trash_cancel(cur.get('claim_id'))
+                    logger.info(f"[현황] 휴지통 스캔 취소 요청: {sec['title']}")
+                    if (cur.get('stage') or '') == 'empty':
+                        # 비우기는 끝까지 가고 남은 라이브러리가 멈춘다
+                        msg = '비우기는 끝까지 진행되고, 남은 라이브러리는 멈춥니다.'
+                    elif (cur.get('stage') or '') == 'scan':
+                        msg = '휴지통 스캔 취소를 요청했습니다. shyni 스캔 취소가 확인되면 멈추고 하이라이트가 해제됩니다.'
+                    elif (cur.get('stage') or '') == 'waiting':
+                        msg = '휴지통 스캔 취소를 요청했습니다. 대기가 중단되면 멈추고 하이라이트가 해제됩니다.'
+                    else:
+                        msg = '휴지통 스캔 취소를 요청했습니다. 새로고침이 정리되면 멈추고 하이라이트가 해제됩니다.'
+                    return jsonify({'ret': 'success', 'stage': 'trash',
+                                    'cancelled': False, 'msg': msg})
                 meta = state.get('meta')
                 if meta and meta.get('status') == 'running':
                     meta['cancel'] = True
                     self._set_state(key, state)
                     logger.info(f"[현황] 메타 새로고침 취소 요청: {sec['title']}")
-                    return jsonify({'ret': 'success',
+                    return jsonify({'ret': 'success', 'stage': 'meta', 'cancelled': False,
                                     'msg': f"{sec['title']} 메타 새로고침에서 진행 예정인 작업을 취소합니다. 현재 처리 중인 항목까지만 마치고 멈춥니다."})
                 vfs = state.get('vfs')
                 if vfs and vfs.get('status') == 'running' and vfs.get('job') is not None:
@@ -1493,10 +1703,38 @@ class ModuleStatus(PluginModuleBase):
                     self._dashboard_row_finish(vfs.get('history_row_id'), 'cancelled',
                                                '취소 요청으로 중단했습니다.')
                     logger.info(f"[현황] VFS 새로고침 취소: {sec['title']} job {vfs['job']}")
-                    return jsonify({'ret': 'success', 'msg': f"{sec['title']} VFS 새로고침을 취소했습니다."})
+                    return jsonify({'ret': 'success', 'stage': 'vfs', 'cancelled': True,
+                                    'msg': f"{sec['title']} VFS 새로고침을 취소했습니다."})
                 scan = state.get('scan')
-                if scan and scan.get('status') == 'running':
-                    return jsonify({'ret': 'fail', 'msg': '스캔 취소는 지금 사용 중인 토큰으로는 할 수 없습니다. shyni 웹 화면에서 취소해 주세요.'})
+                if scan and scan.get('status') in ('running', 'requested'):
+                    # Step5-1 — 관리자 API로 shyni 스캔을 취소한다.
+                    # 확인은 목록 조회(_refresh_state)가 compat job
+                    # 'cancelled'로 한다 — 화면이 폴링해 확인되면
+                    # '작업이 취소되었습니다'를 표시한다.
+                    from . import shyni_admin
+                    if not shyni_admin.admin_available():
+                        return jsonify({'ret': 'fail', 'msg': '스캔 취소를 하려면 관리자 API 설정이 필요합니다. 기본 설정에서 shyni 관리자 아이디·비밀번호를 입력해 주세요.'})
+                    res = shyni_admin.api_cancel_scan(key)
+                    if res is None or (res.status_code != 404 and res.status_code >= 300):
+                        return jsonify({'ret': 'fail', 'msg': 'shyni 스캔 취소 요청에 실패했습니다. shyni 웹 화면에서 취소해 주세요.'})
+                    job_id = scan.get('job')
+                    if not job_id:
+                        # 작업 번호가 없어 완료를 확인할 수 없는 표시 —
+                        # 취소 요청이 받아들여졌으니 바로 취소됨으로 정리한다.
+                        scan['status'] = 'cancelled'
+                        scan['finished_at'] = now
+                        self._set_state(key, state)
+                        self._dashboard_row_finish(scan.get('history_row_id'), 'cancelled',
+                                                   '스캔이 취소됐습니다.')
+                        logger.info(f"[현황] 스캔 취소 (작업 번호 없음): {sec['title']}")
+                        return jsonify({'ret': 'success', 'stage': 'scan', 'cancelled': True,
+                                        'msg': f"{sec['title']} 스캔을 취소했습니다."})
+                    logger.info(f"[현황] 스캔 취소 요청: {sec['title']} job {job_id}")
+                    return jsonify({'ret': 'success', 'stage': 'scan', 'cancelled': False,
+                                    'msg': f"{sec['title']} 스캔 취소를 요청했습니다. shyni에서 취소가 확인되면 멈춥니다."})
+                trash = state.get('trash')
+                if trash and trash.get('status') == 'running':
+                    return jsonify({'ret': 'fail', 'msg': '휴지통 비우기 중에는 취소할 수 없습니다.'})
                 return jsonify({'ret': 'fail', 'msg': '지금 취소할 수 있는 진행 중 작업이 없습니다.'})
 
             # 시작 계열 — 같은 섹션에 실행 중 작업이 있으면 중복 시작 금지
@@ -1790,7 +2028,9 @@ class ModuleStatus(PluginModuleBase):
                                     'albums': st['main_count'], 'no_code': st['no_code'],
                                     'missing_any': missing_any})
         lib_no_code.sort(key=lambda x: -x['no_code'])
-        scan = {'periodic_running': bool(periodic_current),
+        scan = {'periodic_running': bool([c for c in (periodic_current or [])
+                                          if isinstance(c, dict)
+                                          and c.get('stage') != 'waiting']),
                 'running': 0, 'analyzing': 0, 'done': 0, 'failed': 0,
                 'queued': 0, 'assembling': 0, 'ready': 0, 'held': 0, 'total': 0}
         try:

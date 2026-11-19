@@ -17,6 +17,8 @@ META_PICK_SORT_KEY = 'meta_lib_pick_sort'
 META_OVERVIEW_SORTS = ('default', 'name', 'nocode_desc', 'code_desc',
                        'summary_desc', 'year_desc', 'thumb_desc')
 META_OVERVIEW_SORT_KEY = 'meta_overview_sort'
+# 메타 전체 현황 표시 선택 — 숨긴 라이브러리 키(쉼표 구분, 대시보드·건강도와 별개)
+META_OVERVIEW_HIDDEN_LIBS_KEY = 'meta_overview_hidden_libs'
 
 
 class ModuleMeta(PluginModuleBase):
@@ -34,6 +36,7 @@ class ModuleMeta(PluginModuleBase):
             f'{self.name}_db_version': '1',
             f'{self.name}_lib_pick_sort': 'default',
             f'{self.name}_overview_sort': 'nocode_desc',
+            f'{self.name}_overview_hidden_libs': '',
         }
 
     def plugin_load(self):
@@ -46,8 +49,9 @@ class ModuleMeta(PluginModuleBase):
 
     # ---------- 화면 ----------
     def process_menu(self, sub, req):
-        # 서브메뉴: list(메타) — 대시보드 '메타 상세' 버튼이
+        # 서브메뉴: list(메타) · manual(매뉴얼) — 대시보드 '메타 상세' 버튼이
         # /shyni_mate/meta/list?key=<라이브러리 key>로 넘어온다.
+        # manual은 템플릿만 렌더한다 (주기적·휴지통·스캔 매뉴얼과 같은 방식).
         arg = P.ModelSetting.to_dict()
         try:
             if sub == 'list':
@@ -58,13 +62,10 @@ class ModuleMeta(PluginModuleBase):
                     arg['meta_preselect'] = (req.args.get('key') or '') if req is not None else ''
                 except Exception:
                     arg['meta_preselect'] = ''
-                # 캐시 현황은 첫 화면부터 바로 보이게 페이지에 함께 실어 보낸다.
-                # 저장된 값을 읽는 것이라 페이지 표시를 늦추지 않는다.
-                try:
-                    from .task_meta_view import cache_times
-                    arg['meta_cache_times'] = cache_times()
-                except Exception:
-                    arg['meta_cache_times'] = {}
+                # 캐시 현황은 첫 화면에 실어 보내지 않는다 — 페이지가 뜬 뒤
+                # meta_state로 채운다. 첫 화면 렌더가 캐시에 닿지 않게
+                # 해 메뉴 클릭 때 페이지가 늦게 뜨지 않게 한다.
+                arg['meta_cache_times'] = {}
                 sort = P.ModelSetting.get(META_PICK_SORT_KEY) or 'default'
                 arg['meta_lib_pick_sort'] = sort if sort in META_PICK_SORTS else 'default'
                 # 전체 현황 정렬 (기본/이름/메타 없음 수 내림차순 — 기본은 메타 없음 수 내림차순)
@@ -80,8 +81,10 @@ class ModuleMeta(PluginModuleBase):
         ret = {'ret': 'success'}
         if command == 'meta_overview':
             # 진입 현황 — 라이브러리별 전체·메타 없음 수 + 캐시 정보.
-            # 개수는 대시보드 통계 캐시(현황·건강도와 같은 값, 워커가
-            # 6시간마다 새로 계산)를 재사용해 DB를 다시 읽지 않는다.
+            # 개수는 메타 상세 캐시의 요약(인덱스)에서 가져온다 — 상세와
+            # 같은 출처·같은 시점이라 현황·상세 숫자가 일치한다
+            # (2026-11-20 출처 통일). 아직 상세 캐시가 없는 라이브러리는
+            # 대시보드 통계 캐시 값으로 채운다.
             from . import db_support
             if not db_support.db_ready():
                 return jsonify({'ret': 'success', 'relay_off': True})
@@ -91,12 +94,13 @@ class ModuleMeta(PluginModuleBase):
                 saved = json.loads(raw) if raw else {}
                 libs = ((saved.get('data') or {}).get('libs') or {}) \
                     if isinstance(saved, dict) else {}
-                at = saved.get('at') or 0
             except Exception:
-                libs, at = {}, 0
-            if not libs:
-                # 아직 계산된 통계가 없으면 워커에 계산을 요청하고,
-                # 화면이 잠시 뒤 다시 물어보게 한다.
+                libs = {}
+            from .task_meta_view import cache_times, read_index
+            index = read_index()
+            if not libs and not index:
+                # 아직 계산된 통계도, 상세 캐시도 없으면 워커에 계산을
+                # 요청하고, 화면이 잠시 뒤 다시 물어보게 한다.
                 try:
                     from .task_status import request_stats
                     request_stats()
@@ -104,41 +108,55 @@ class ModuleMeta(PluginModuleBase):
                     pass
                 return jsonify({'ret': 'success', 'relay_off': False,
                                 'stats_missing': True})
-            from .task_meta_view import cache_times
             out = {}
-            for k, st in libs.items():
+            for k in sorted(set([str(x) for x in libs.keys()]
+                                + [str(x) for x in index.keys()])):
+                st = libs.get(k)
                 if not isinstance(st, dict):
-                    continue
-                no_meta = st.get('no_meta')
-                if no_meta is None:
-                    no_meta = st.get('no_code') or 0
-                out[str(k)] = {
-                    'total': st.get('main_count') or 0,
-                    'no_meta': no_meta,
-                    'no_code': st.get('no_code') or 0,
-                    'no_summary': st.get('no_summary') or 0,
-                    'no_year': st.get('no_year') or 0,
-                    'no_thumb': st.get('no_thumb') or 0,
-                    'is_folder': bool(st.get('is_folder')),
-                    'main_label': st.get('main_label') or '미디어',
-                }
-            ret['data'] = {'counts': out, 'at': at,
+                    st = {}
+                entry = index.get(k) or {}
+                summary = entry.get('summary') \
+                    if isinstance(entry.get('summary'), dict) else None
+                if summary is not None:
+                    no_meta = summary.get('no_meta')
+                    if no_meta is None:
+                        no_meta = summary.get('no_code') or 0
+                    out[k] = {
+                        'total': summary.get('total')
+                        if summary.get('total') is not None
+                        else (entry.get('total') or 0),
+                        'no_meta': no_meta,
+                        'missing_any': summary.get('missing_any'),
+                        'no_code': summary.get('no_code') or 0,
+                        'no_summary': summary.get('no_summary') or 0,
+                        'no_year': summary.get('no_year') or 0,
+                        'no_thumb': summary.get('no_thumb') or 0,
+                        'is_folder': entry.get('is_folder')
+                        if entry.get('is_folder') is not None
+                        else bool(st.get('is_folder')),
+                        'main_label': entry.get('main_label')
+                        or st.get('main_label') or '미디어',
+                    }
+                else:
+                    no_meta = st.get('no_meta')
+                    if no_meta is None:
+                        no_meta = st.get('no_code') or 0
+                    out[k] = {
+                        'total': st.get('main_count') or 0,
+                        'no_meta': no_meta,
+                        # 값이 하나라도 없는 미디어 수 — 상세 첫 줄과 같은 값이라
+                        # 현황 첫 줄에도 이 수를 쓴다 (no_meta는 코드 없음 수라
+                        # 상세와 달라 보였다).
+                        'missing_any': st.get('missing_any'),
+                        'no_code': st.get('no_code') or 0,
+                        'no_summary': st.get('no_summary') or 0,
+                        'no_year': st.get('no_year') or 0,
+                        'no_thumb': st.get('no_thumb') or 0,
+                        'is_folder': bool(st.get('is_folder')),
+                        'main_label': st.get('main_label') or '미디어',
+                    }
+            ret['data'] = {'counts': out,
                            'cache_times': cache_times()}
-        elif command == 'meta_refresh_hours':
-            # 메타 페이지 우측 상단의 자동 갱신 주기 — 휴지통 페이지의
-            # 자동 갱신 주기와 같은 방식이다. 바꾸면 바로 저장한다.
-            # 0이면 열 때마다 새로 조회한다.
-            try:
-                hours = int((arg1 or '').strip())
-            except Exception:
-                return jsonify({'ret': 'warning', 'msg': '시간 값을 숫자로 입력해 주세요.'})
-            if hours < 0:
-                return jsonify({'ret': 'warning', 'msg': '0 이상의 시간을 입력해 주세요.'})
-            P.ModelSetting.set('base_meta_refresh_hours', str(hours))
-            if hours == 0:
-                ret['msg'] = '메타 목록을 열 때마다 새로 조회합니다.'
-            else:
-                ret['msg'] = f'자동 갱신 주기를 {hours}시간으로 저장했습니다.'
         elif command == 'meta_query':
             # 조회 계산은 워커(task_meta_view)가 수행한다 — 웹은 요청만 남기고
             # 화면은 meta_state로 진행률을 폴링한다.
@@ -174,13 +192,12 @@ class ModuleMeta(PluginModuleBase):
             from .task_meta_view import cancel_query
             cancel_query()
         elif command == 'meta_state':
-            from .task_meta_view import (cache_libs, cache_times, read_state,
-                                         read_bulk, refresh_hours)
+            from .task_meta_view import cache_state, read_state, read_bulk
+            cs = cache_state()
             ret['data'] = {'state': read_state(),
-                           'cache_libs': cache_libs(),
-                           'cache_times': cache_times(),
-                           'bulk': read_bulk(),
-                           'refresh_hours': refresh_hours()}
+                           'cache_libs': cs['libs'],
+                           'cache_times': cs['times'],
+                           'bulk': read_bulk()}
         elif command == 'meta_list':
             # 워커가 계산해 둔 캐시를 범위·검색·정렬·페이지 단위로 잘라 돌려준다.
             from . import db_support
@@ -233,6 +250,20 @@ class ModuleMeta(PluginModuleBase):
             if sort not in META_OVERVIEW_SORTS:
                 return jsonify({'ret': 'fail', 'msg': '정렬 조건이 올바르지 않습니다.'})
             P.ModelSetting.set(META_OVERVIEW_SORT_KEY, sort)
+            return jsonify({'ret': 'success'})
+        if sub == 'set_hidden_libs':
+            # '표시'에서 고른 숨김 라이브러리를 메타 화면 전용으로 기억한다.
+            # 체크할 때마다 조용히 저장하므로 성공 응답에 msg를 넣지 않는다.
+            keys = []
+            for part in (req.form.get('keys') or '').split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    keys.append(str(int(part)))
+                except Exception:
+                    return jsonify({'ret': 'fail', 'msg': '요청 값이 올바르지 않습니다.'})
+            P.ModelSetting.set(META_OVERVIEW_HIDDEN_LIBS_KEY, ','.join(keys))
             return jsonify({'ret': 'success'})
         return jsonify({'ret': 'fail', 'msg': '알 수 없는 요청입니다.'})
 

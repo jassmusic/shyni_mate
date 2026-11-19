@@ -1,19 +1,26 @@
 import json
 import os
 import random
+import threading
 import time
 
 import requests
 
 from .setup import *
 from .shyni_backend import ShyniBackend
-from .task_periodic import (CANCEL_RESULT_MESSAGE, WAIT_TIMEOUT_SEC,
-                            _cancel_shyni_scan, _extract_job_id,
+from .task_periodic import (CANCEL_RESULT_MESSAGE, _cancel_shyni_scan,
+                            _extract_job_id, _fetch_compat_job,
                             _record_scan_progress, _scan_poll_outcome,
                             _stat_int, _write_status,
                             apply_scan_result, scan_summary_text)
 
 logger = P.logger
+
+# 지금 이 스레드에서 돌고 있는 작업의 식별자 — start()가 _run을 같은
+# 스레드에서 부르므로, _run이 차지한 뒤에 오류가 나면 start()의
+# 예외 처리에서 이 값으로 자기 진행 상태만 지울 수 있다. 스레드마다
+# 따로 들고 있어 동시에 도는 작업이 서로를 건드리지 않는다.
+_ACTIVE = threading.local()
 
 # 옛 휴지통 스케줄러(run_empty_trash)는 호출처가 없어 z38에서 제거했다 (A3).
 # 기준 경로 설정(scan_trash_schedule_anchors)은 TaskTrash가 쓰므로 유지한다.
@@ -30,6 +37,11 @@ DEFAULT_MAX_WAIT_MIN = 360
 # 이 시간까지 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
 TRASH_VFS_TIMEOUT_KEY = 'trash_vfs_timeout_min'
 DEFAULT_VFS_TIMEOUT_MIN = 360
+# 스캔·비우기 대기 기한 설정 키(분) — shyni job이 끝나기를 이 시간까지
+# 기다린다. 기한이 됐을 때 shyni에서 job이 아직 진행 중이면 이 시간만큼
+# 기한을 연장하며 계속 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
+TRASH_SCAN_TIMEOUT_KEY = 'trash_scan_timeout_min'
+DEFAULT_SCAN_TIMEOUT_MIN = 360
 # 가장 최근 시작 실패 — 작업 관리 배너가 읽는다 (주기적 스캔과 같은 구조).
 TRASH_START_ERROR_KEY = 'trash_last_start_error'
 # 시작 실패 기록 보관 기한(초) — 이보다 오래된 오류는 배너에 띄우지 않는다.
@@ -178,33 +190,73 @@ def get_trash_jobs():
     return []
 
 
-def get_trash_current():
-    raw = P.ModelSetting.get(TRASH_CURRENT_KEY)
-    if raw:
-        try:
-            cur = json.loads(raw)
-            if isinstance(cur, dict):
-                return cur
-        except Exception:
-            pass
-    return None
+def _parse_trash_currents(raw):
+    """진행 상태 저장값 → 목록. 구 형식(객체 하나)이면 목록으로 감싸고,
+    비어 있거나 깨졌으면 빈 목록을 돌려준다. 순수 함수(하니스 검증용)."""
+    if not raw:
+        return []
+    try:
+        cur = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(cur, dict):
+        return [cur]
+    if isinstance(cur, list):
+        return [c for c in cur if isinstance(c, dict)]
+    return []
 
 
-def _set_trash_current(cur):
-    if cur is None:
-        P.ModelSetting.set(TRASH_CURRENT_KEY, '')
-    else:
-        P.ModelSetting.set(TRASH_CURRENT_KEY, json.dumps(cur, ensure_ascii=False))
+def get_trash_currents():
+    """지금 돌고 있는 휴지통 스캔 진행 상태 목록 (claim_id 순)."""
+    return _parse_trash_currents(P.ModelSetting.get(TRASH_CURRENT_KEY))
 
 
-def update_trash_current_job_idx(new_idx):
-    """진행 상태의 작업 번호를 바꾼다 — 작업 관리에서 순서를 바꿔
-    저장했을 때 진행 중인 작업의 위치를 새 목록에 맞게 고친다."""
-    cur = get_trash_current()
-    if cur is None or cur.get('job_idx') == new_idx:
+def _save_trash_currents(curs):
+    P.ModelSetting.set(TRASH_CURRENT_KEY, json.dumps(curs, ensure_ascii=False))
+
+
+def _upsert_trash_current(cur):
+    """진행 상태 한 건을 넣거나 고친다 — claim_id가 같은 항목이 있으면
+    그 자리에서 합치고(새 값이 이긴다), 없으면 뒤에 붙인다.
+    합치는 방식이라 차지할 때 넣어 둔 claimed_at 같은 값은
+    섹션이 바뀌어도 유지된다."""
+    curs = get_trash_currents()
+    claim_id = (cur or {}).get('claim_id')
+    for i, c in enumerate(curs):
+        if claim_id is not None and c.get('claim_id') == claim_id:
+            merged = dict(c)
+            merged.update(cur)
+            curs[i] = merged
+            _save_trash_currents(curs)
+            return
+    curs.append(cur)
+    _save_trash_currents(curs)
+
+
+def _remove_trash_current(claim_id):
+    """claim_id가 같은 진행 상태를 지운다. 없으면 그대로 둔다."""
+    if claim_id is None:
         return
-    cur['job_idx'] = new_idx
-    _set_trash_current(cur)
+    curs = [c for c in get_trash_currents() if c.get('claim_id') != claim_id]
+    _save_trash_currents(curs)
+
+
+def _clear_trash_currents():
+    P.ModelSetting.set(TRASH_CURRENT_KEY, '')
+
+
+def update_trash_current_job_idx(claim_id, new_idx):
+    """진행 상태의 작업 번호를 바꾼다 — 작업 관리에서 순서를 바꿔
+    저장했을 때 진행 중인 작업의 위치를 새 목록에 맞게 고친다.
+    claim_id로 그 작업의 진행 상태만 고친다."""
+    curs = get_trash_currents()
+    for cur in curs:
+        if cur.get('claim_id') == claim_id:
+            if cur.get('job_idx') == new_idx:
+                return
+            cur['job_idx'] = new_idx
+            _save_trash_currents(curs)
+            return
 
 
 def _max_wait_min():
@@ -231,6 +283,18 @@ def _vfs_timeout_sec():
     return val * 60
 
 
+def _scan_timeout_sec():
+    """스캔·비우기 대기 기한(초) — 설정값(분)을 초로 바꾼다.
+    없거나 숫자가 아니거나 0 이하면 기본 360분으로 동작한다."""
+    try:
+        val = P.ModelSetting.get_int(TRASH_SCAN_TIMEOUT_KEY)
+    except Exception:
+        val = None
+    if val is None or val <= 0:
+        return DEFAULT_SCAN_TIMEOUT_MIN * 60
+    return val * 60
+
+
 def _fmt_wait(sec):
     """대기 시간 표시 — 45초 · 12분 3초 · 6시간 5분. 순수 함수(하니스 검증용)."""
     sec = int(sec)
@@ -250,9 +314,9 @@ def _same_job_busy(name):
     """같은 이름의 작업이 이미 돌거나 기다리고 있으면 True.
     스케줄이 겹쳐 같은 작업이 두 번 도는 것을 막는다."""
     try:
-        cur = get_trash_current()
-        if cur is not None and (cur.get('job_name') or '') == (name or ''):
-            return True
+        for cur in get_trash_currents():
+            if (cur.get('job_name') or '') == (name or ''):
+                return True
     except Exception:
         pass
     try:
@@ -266,24 +330,145 @@ def _same_job_busy(name):
         return False
 
 
-def _try_claim(idx, name, mode, job_started, job_row_id, section_label='전체', action=None):
-    """차례를 차지한다 — 진행 상태를 이 작업 것으로 쓰고 다시 읽어
+# 규칙 1 — 같은 모듈 안에서 같은 라이브러리가 진행 중일 때 내는 문구.
+# 동작 종류(새로고침·스캔·새로고침 후 스캔·새로고침 후 스캔 후 비우기·
+# 비우기)와 무관하게 이 문구로 거절한다.
+LIBRARY_BUSY_MESSAGE = '현재 해당 라이브러리 작업이 진행중 입니다.'
+
+
+def _same_library_busy(first_key, exclude_claim_id=None):
+    """규칙 1 — 같은 모듈 안에서 첫 라이브러리가 이미 실행 중이면 True.
+    동작 종류와 무관하게 막는다. 대기 중인 작업은 자리를 예약하지
+    않으므로 세지 않는다 — 대기 중인 작업까지 세면 대기 중인 작업끼리
+    서로를 막아 아무도 시작하지 못한다. 자기 claim_id는 뺀다 (대기 중
+    재검사 때 자기 대기 표시 때문에 스스로 막히지 않게)."""
+    if first_key is None:
+        return False
+    try:
+        for cur in get_trash_currents():
+            if (exclude_claim_id is not None
+                    and cur.get('claim_id') == exclude_claim_id):
+                continue
+            if cur.get('stage') == 'waiting':
+                continue
+            if str(cur.get('section_key') or '') == str(first_key):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _rule1_survives(claim_id, first_key, claimed_at):
+    """규칙 1 차지 재확인 — 차지한 자리가 살아남으면 True.
+    게이트를 보고 차지하는 사이에 같은 라이브러리의 다른 작업이
+    차지했을 수 있어, 차지한 뒤에 한 번 더 확인한다. 동시에 차지한
+    작업끼리는 차지한 시각(claimed_at) 순서로 가른다 — 앞 순서가
+    자리를 갖고, 뒤 순서가 물러난다. 차지한 시각이 없는 옛 항목은
+    가장 먼저 차지한 것으로 센다. 대기 중인 항목은 세지 않는다.
+    읽기에 실패하면 True로 열어 둔다."""
+    try:
+        my_at = int(claimed_at) if claimed_at is not None else 0
+    except Exception:
+        my_at = 0
+    try:
+        curs = get_trash_currents()
+    except Exception:
+        return True
+    for cur in curs:
+        if not isinstance(cur, dict):
+            continue
+        if cur.get('claim_id') == claim_id:
+            continue
+        if cur.get('stage') == 'waiting':
+            continue
+        if str(cur.get('section_key') or '') != str(first_key):
+            continue
+        try:
+            other_at = int(cur.get('claimed_at') or 0)
+        except Exception:
+            other_at = 0
+        # 나보다 먼저 차지한 작업이 있으면 내가 물러난다. 나보다
+        # 늦게 차지한 작업은 그쪽이 나를 보고 스스로 물러난다.
+        # 같은 시각이면 claim_id 문자열 순서로 가른다.
+        if (other_at, str(cur.get('claim_id') or '')) < (my_at, str(claim_id)):
+            return False
+    return True
+
+
+def _slot_free(first_key, action, exclude_claim_id=None):
+    """이 작업이 시작할 자리가 있는지 — (자리 있음, 막는 사유).
+    규칙 1이 규칙 2보다 먼저다. 규칙 1: 같은 모듈 안에서 같은
+    라이브러리가 실행 중이면 동작 종류와 무관하게 막는다.
+    규칙 2: 스캔이 들어간 동작만 동시 스캔 수 게이트를 본다.
+    새로고침만·비우기만 하는 동작은 스캔 자리를 쓰지 않지만
+    규칙 1은 본다. 첫 라이브러리를 기준으로 검사한다 — 나중
+    라이브러리는 섹션 시작 때 가드가 다시 본다."""
+    if _same_library_busy(first_key, exclude_claim_id=exclude_claim_id):
+        return False, LIBRARY_BUSY_MESSAGE
+    if 'scan' not in str(action or ''):
+        return True, None
+    try:
+        from .mod_status import ModuleStatus
+        msg = ModuleStatus.library_gate_check(first_key)
+    except Exception as e:
+        logger.warning(f'[휴지통 스캔] 게이트 검사 실패: {e}')
+        return True, None
+    return msg is None, msg
+
+
+def _try_claim(idx, name, mode, job_started, job_row_id, claim_id,
+               section_label='전체', action=None, first_key=None):
+    """차례를 차지한다 — 진행 상태를 목록에 넣고 다시 읽어
     확인한다. 차지했으면 True.
     두 작업이 거의 동시에 차지하려는 틈을 줄이기 위해 쓰고 잠깐 쉰
     뒤에 확인한다. 확인에 실패하면 상대가 차지한 것이니 기다린다.
     section_label — 진행 상태에 표시할 라이브러리명. 대상이 1개면
-    그 이름, 여러 개면 '전체'."""
-    claim_id = (f'wait-{job_row_id}' if job_row_id
-                else f'run-{idx}-{int(time.time() * 1000)}')
-    _set_trash_current({
-        'job_idx': idx, 'job_name': name, 'section_key': '',
-        'section_title': section_label, 'stage': 'scan', 'mode': mode,
+    그 이름, 여러 개면 '전체'. first_key — 첫 라이브러리 번호.
+    차지한 시점부터 자리를 세게 진행 상태에 미리 넣어 둔다."""
+    if str(action or '').startswith('refresh'):
+        stage = 'refresh'
+    elif 'scan' in str(action or ''):
+        stage = 'scan'
+    else:
+        stage = 'empty'
+    claimed_at = int(time.time() * 1000)
+    _upsert_trash_current({
+        'job_idx': idx, 'job_name': name,
+        'section_key': str(first_key) if first_key is not None else '',
+        'section_title': section_label, 'stage': stage, 'mode': mode,
         'action': action,
         'job_started_at': job_started, 'section_started_at': _now_text(),
-        'claim_id': claim_id, 'job_row_id': job_row_id})
+        'claim_id': claim_id, 'job_row_id': job_row_id,
+        'claimed_at': claimed_at})
     time.sleep(random.uniform(0.3, 1.0))
-    cur = get_trash_current() or {}
-    return cur.get('claim_id') == claim_id
+    curs = get_trash_currents()
+    if not any(c.get('claim_id') == claim_id for c in curs):
+        return False
+    # 규칙 1 재확인 — 게이트를 보고 차지하는 사이에 같은
+    # 라이브러리의 다른 작업이 차지했을 수 있다. 스캔이 안 들어간
+    # 동작도 같은 라이브러리와 겹치면 물러난다. 동시에 차지한
+    # 작업끼리는 차지한 시각 순서로 가른다.
+    try:
+        survives1 = _rule1_survives(claim_id, first_key, claimed_at)
+    except Exception as e:
+        logger.warning(f'[휴지통 스캔] 규칙 1 재확인 실패: {e}')
+        survives1 = True
+    if not survives1:
+        _remove_trash_current(claim_id)
+        return False
+    if 'scan' in str(action or ''):
+        # 자리 재확인 — 게이트를 보고 차지하는 사이에 다른 작업이
+        # 차지했을 수 있다. 동시에 차지한 작업끼리는 차지한 시각
+        # 순서로 가른다 (앞 순서가 자리를 갖고, 뒤 순서가 물러난다).
+        try:
+            survives = ModuleStatus.claim_survives(claim_id, first_key, claimed_at)
+        except Exception as e:
+            logger.warning(f'[휴지통 스캔] 자리 재확인 실패: {e}')
+            survives = True
+        if not survives:
+            _remove_trash_current(claim_id)
+            return False
+    return True
 
 
 def _finish_job_row(row_id, status, message):
@@ -299,24 +484,41 @@ def _finish_job_row(row_id, status, message):
         logger.warning(f'[휴지통 스캔] 대기 행 정리 실패: {e}')
 
 
-def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=None):
+def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
+                   action=None, first_key=None):
     """차례를 기다렸다가 차지한다.
-    (대기 행 id 또는 None, 기다린 초 또는 None)을 돌려준다.
-    바로 시작하면 (None, 0), 기다렸다 시작하면 (행 id, 기다린 초),
-    기다리다 시간 초과하면 (None, None) — 이 때는 실패 행을 남긴다.
+    (대기 행 id 또는 None, 기다린 초 또는 None, claim_id 또는 None)을
+    돌려준다. 바로 시작하면 (None, 0, claim_id), 기다렸다 시작하면
+    (행 id, 기다린 초, claim_id), 기다리다 시간 초과하면
+    (None, None, None) — 이 때는 실패 행을 남긴다.
     작업 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
+    '지금 실행'(수동)은 기다리지 않고 자리가 없으면 바로 실패로 끝낸다.
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
-    그 이름, 여러 개면 '전체'."""
+    그 이름, 여러 개면 '전체'. first_key — 첫 라이브러리 번호."""
     from .model_trash import ModelTrashItem
-    if get_trash_current() is None and _try_claim(idx, name, mode, job_started, None, section_label, action):
-        return (None, 0)
+    claim_id = f'run-{idx}-{int(time.time() * 1000)}'
+    free, gate_msg = _slot_free(first_key, action,
+                                exclude_claim_id=claim_id)
+    if free and _try_claim(idx, name, mode, job_started, None, claim_id,
+                           section_label, action, first_key):
+        return (None, 0, claim_id)
+    if mode == 'manual':
+        fail_trash_start(name, mode,
+                         gate_msg or '이미 진행 중인 휴지통 스캔이 있어 시작하지 못했습니다.',
+                         section_label, action)
+        return (None, None, None)
     max_min = _max_wait_min()
     if max_min <= 0:
-        fail_trash_start(name, mode, '이미 진행 중인 휴지통 스캔이 있어 시작하지 못했습니다.', section_label, action)
-        return (None, None)
-    running_name = (get_trash_current() or {}).get('job_name') or ''
-    if running_name:
-        wait_msg = f'앞선 작업({running_name}) 진행 중으로 끝나면 이어서 진행합니다.'
+        fail_trash_start(name, mode,
+                         gate_msg or '이미 진행 중인 휴지통 스캔이 있어 시작하지 못했습니다.',
+                         section_label, action)
+        return (None, None, None)
+    running_names = [(c.get('job_name') or '') for c in get_trash_currents()]
+    running_names = [n for n in running_names if n]
+    if running_names:
+        shown = ', '.join(running_names[:2])
+        extra = f' 외 {len(running_names) - 2}개' if len(running_names) > 2 else ''
+        wait_msg = f'앞선 작업({shown}{extra}) 진행 중으로 끝나면 이어서 진행합니다.'
     else:
         wait_msg = '앞선 작업 진행 중으로 끝나면 이어서 진행합니다.'
     item = ModelTrashItem(name, '', section_label, mode, action)
@@ -327,13 +529,33 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
     except Exception as e:
         logger.error(f'[휴지통 스캔] 대기 행 저장 실패: {e}')
         fail_trash_start(name, mode, '대기 기록을 남기지 못했습니다.', section_label, action)
-        return (None, None)
+        return (None, None, None)
     row_id = item.id
+    # 대기 중 표시 — 작업 관리·작업 결과 목록에 '대기중' 카드가
+    # 나오게 진행 상태에도 넣어 둔다. 차지할 때 _try_claim이 같은
+    # claim_id로 덮어써 실행 중 표시로 바뀐다. 대기 중 표시는
+    # 자리를 예약하지 않는다 — 게이트 집계에서는 세지 않는다.
+    _upsert_trash_current({
+        'job_idx': idx, 'job_name': name,
+        'section_key': str(first_key) if first_key is not None else '',
+        'section_title': section_label, 'stage': 'waiting', 'mode': mode,
+        'action': action,
+        'job_started_at': job_started, 'section_started_at': _now_text(),
+        'claim_id': claim_id, 'job_row_id': row_id})
     t0 = time.time()
     deadline = t0 + max_min * 60
     while time.time() < deadline:
         time.sleep(WAIT_POLL_SEC)
-        if get_trash_current() is None and _try_claim(idx, name, mode, job_started, row_id, section_label, action):
+        # 대기 중 취소 — 카드의 취소 버튼이 먹히게 여기서도 확인한다.
+        if _trash_cancel_requested(claim_id):
+            _finish_job_row(row_id, 'cancelled', '취소 요청으로 대기를 중단했습니다.')
+            _remove_trash_current(claim_id)
+            _clear_trash_cancel(claim_id)
+            logger.info(f'[휴지통 스캔] {name}: 대기 중 취소됐습니다.')
+            return (None, None, None)
+        free, _ = _slot_free(first_key, action, exclude_claim_id=claim_id)
+        if free and _try_claim(idx, name, mode, job_started, row_id, claim_id,
+                               section_label, action, first_key):
             waited = int(time.time() - t0)
             try:
                 row = (F.db.session.query(ModelTrashItem)
@@ -345,11 +567,13 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체', action=
                     row.save()
             except Exception as e:
                 logger.warning(f'[휴지통 스캔] 대기 행 시작 기록 실패: {e}')
-            return (row_id, waited)
+            return (row_id, waited, claim_id)
     _finish_job_row(row_id, 'failed',
                     f'앞선 작업이 끝나기를 기다리다 시간 초과됐습니다. (작업 대기 {_fmt_wait(max_min * 60)})')
+    _remove_trash_current(claim_id)
+    _clear_trash_cancel(claim_id)
     logger.warning(f'[휴지통 스캔] {name}: 작업 대기 시간 초과로 시작하지 않습니다.')
-    return (None, None)
+    return (None, None, None)
 
 
 def _record_trash_start_error(job_name, reason):
@@ -409,29 +633,72 @@ def fail_trash_start(job_name, mode, reason, section_label='전체', action=None
     _record_trash_start_error(job_name, reason)
 
 
-def _trash_cancel_requested():
-    return (P.ModelSetting.get(TRASH_CANCEL_KEY) or '') == '1'
+def _trash_cancel_ids():
+    """취소 요청된 작업의 claim_id 목록. 구 형식 '1'(전부 취소)이면
+    ['*']로, 비어 있거나 깨졌으면 빈 목록으로 돌려준다."""
+    raw = P.ModelSetting.get(TRASH_CANCEL_KEY) or ''
+    if raw == '1':
+        return ['*']
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return [str(x) for x in data if x is not None]
+    return []
 
 
-def request_trash_cancel():
-    P.ModelSetting.set(TRASH_CANCEL_KEY, '1')
+def _trash_cancel_requested(claim_id=None):
+    """이 작업에 취소 요청이 들어왔으면 True. claim_id가 없으면
+    구 형식 '1'(전부 취소)일 때만 True를 돌려준다."""
+    ids = _trash_cancel_ids()
+    if '*' in ids:
+        return True
+    if claim_id is None:
+        return False
+    return str(claim_id) in ids
+
+
+def request_trash_cancel(claim_id):
+    """이 작업의 취소를 요청한다 — 다른 작업의 취소 요청은 건드리지 않는다."""
+    if claim_id is None:
+        return
+    ids = _trash_cancel_ids()
+    if '*' in ids or str(claim_id) in ids:
+        return
+    ids.append(str(claim_id))
+    P.ModelSetting.set(TRASH_CANCEL_KEY, json.dumps(ids, ensure_ascii=False))
+
+
+def _clear_trash_cancel(claim_id):
+    """끝난 작업의 취소 요청을 지운다 — 목록이 쌓이지 않게 한다."""
+    if claim_id is None:
+        return
+    ids = [x for x in _trash_cancel_ids() if x != str(claim_id)]
+    if '*' in ids:
+        return
+    P.ModelSetting.set(TRASH_CANCEL_KEY,
+                       json.dumps(ids, ensure_ascii=False) if ids else '')
 
 
 def _now_text():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def _wait_vfs(addr, jobid, timeout=None):
+def _wait_vfs(addr, jobid, timeout=None, claim_id=None):
     """rclone VFS 새로고침 job 완료를 기다린다.
     {'result': done|failed|cancelled, 'duration': 초}를 돌려준다.
     기한은 설정(휴지통 VFS 새로고침 제한 시간, 기본 360분)에서 읽는다.
-    timeout을 직접 주면 그 값(초)을 쓴다."""
+    timeout을 직접 주면 그 값(초)을 쓴다.
+    claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
     if timeout is None:
         timeout = _vfs_timeout_sec()
     t0 = time.time()
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if _trash_cancel_requested():
+        if _trash_cancel_requested(claim_id):
             return {'result': 'cancelled', 'duration': int(time.time() - t0)}
         try:
             from .mod_status import ModuleStatus
@@ -453,24 +720,65 @@ def _wait_vfs(addr, jobid, timeout=None):
     return {'result': 'failed', 'duration': int(time.time() - t0)}
 
 
-def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_SEC,
-              section_key=None):
+def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
+              section_key=None, claim_id=None):
     """shyni job 완료를 기다린다 (스캔·비우기 공통).
     {'result': done|failed|cancelled|not_found, 'job': job 응답 또는 None,
      'duration': 초, 'cancel_message': 취소 시 이력 문구(있을 때만)}를
-    돌려준다. job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3). 폴링 중
-    일시적 오류는 재시도하고 연속 3회 실패 시에만 실패로 확정한다.
+    돌려준다. timeout — None이면 설정 trash_scan_timeout_min에서 읽는다
+    (기본 360분). 기한이 됐을 때 shyni에서 job이 아직 진행 중이면 기한을
+    연장하며 계속 기다린다. job 조회에서 404를 받으면 즉시 실패로 끝낸다
+    (W3). 폴링 중 일시적 오류는 재시도하고 연속 3회 실패 시에만 실패로
+    확정한다.
     section_key가 있으면 60초마다 스캔 진행률을 현황에 기록한다 (스캔
     job만 — 비우기 job은 section_key를 넘기지 않는다). 스캔 job은 취소
     요청이 오면 shyni 스캔도 함께 취소하고 확인한다 (Step5-1). 비우기
     job은 취소할 수 없어 플래그가 있어도 끝까지 기다린다 — 플래그는
-    남아 있어 비우기가 끝난 뒤 다음 라이브러리는 멈춘다."""
+    남아 있어 비우기가 끝난 뒤 다음 라이브러리는 멈춘다.
+    claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
     t0 = time.time()
+    if timeout is None:
+        timeout = _scan_timeout_sec()
     deadline = time.time() + timeout
     fail_count = 0
     poll_count = 0
-    while time.time() < deadline:
-        if section_key is not None and _trash_cancel_requested():
+    while True:
+        if time.time() >= deadline:
+            # 기한 도달 — job을 한 번 더 조회해 연장 여부를 정한다.
+            # shyni에서 아직 진행 중이면 기한을 연장하고 계속
+            # 기다린다. job이 끝났으면 그 결과를 그대로 쓴다.
+            job = _fetch_compat_job(url, token, job_id)
+            if isinstance(job, dict):
+                fail_count = 0
+                outcome, _msg = _scan_poll_outcome(200, job)
+                if outcome == 'done':
+                    return {'result': 'done', 'job': job,
+                            'duration': int(time.time() - t0)}
+                if outcome == 'failed':
+                    return {'result': 'failed', 'job': job,
+                            'duration': int(time.time() - t0)}
+                if outcome == 'cancelled':
+                    return {'result': 'cancelled', 'job': job,
+                            'duration': int(time.time() - t0),
+                            'cancel_message': '스캔이 취소됐습니다.'}
+                deadline = time.time() + timeout
+                label = ('휴지통 스캔' if section_key is not None
+                         else '휴지통 비우기')
+                logger.info(
+                    f"{label}: shyni에서 아직 진행 중이라 기한을 "
+                    f"{_fmt_wait(timeout)} 연장합니다 (job {job_id})")
+                continue
+            if job == 'not_found':
+                return {'result': 'not_found', 'job': None,
+                        'duration': int(time.time() - t0)}
+            # 조회 실패 — 연속 실패 로직으로 처리한다. 아직 기준에
+            # 못 미치면 잠깐 뒤에 다시 확인한다.
+            fail_count += 1
+            if fail_count >= POLL_FAIL_MAX:
+                return {'result': 'failed', 'job': None,
+                        'duration': int(time.time() - t0)}
+            deadline = time.time() + poll_sec
+        if section_key is not None and _trash_cancel_requested(claim_id):
             # 스캔 job — shyni 스캔도 함께 취소하고 확인한다 (Step5-1).
             cres = _cancel_shyni_scan(url, token, job_id, section_key)
             cjob = cres.get('job') or {}
@@ -532,13 +840,14 @@ def _wait_job(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, poll_sec=SCAN_POLL_S
         if section_key and poll_count % max(1, int(60 / max(poll_sec, 1))) == 0:
             _record_scan_progress(section_key)
         time.sleep(poll_sec)
-    return {'result': 'failed', 'job': None, 'duration': int(time.time() - t0)}
 
 
-def _wait_scan(url, token, job_id, timeout=WAIT_TIMEOUT_SEC, section_key=None):
-    """shyni 스캔 job 완료를 기다린다 — _wait_job과 같은 결과를 돌려준다."""
+def _wait_scan(url, token, job_id, timeout=None, section_key=None,
+               claim_id=None):
+    """shyni 스캔 job 완료를 기다린다 — _wait_job과 같은 결과를 돌려준다.
+    timeout — None이면 설정 trash_scan_timeout_min에서 읽는다(기본 360분)."""
     return _wait_job(url, token, job_id, timeout=timeout, poll_sec=SCAN_POLL_SEC,
-                     section_key=section_key)
+                     section_key=section_key, claim_id=claim_id)
 
 
 def _send_folder_scan(url, token, key, folder, seq):
@@ -559,12 +868,13 @@ def _send_folder_scan(url, token, key, folder, seq):
     return str(job_id) if job_id else None
 
 
-def _refresh_folder_vfs(key, folder, name):
+def _refresh_folder_vfs(key, folder, name, claim_id=None):
     """폴더 하나 VFS 새로고침.
     {'result': done|failed|cancelled, 'duration': 초, 'error': 사유}를
     돌려준다. 라이브러리 전체를 한 번에 새로고침하던 기존 방식과 같은
     RC 호출을 폴더 단위로 한다. jobid가 안 오면 동기 응답의 result를
-    직접 판정한다 (선택 실행의 _refresh_ok와 같은 기준)."""
+    직접 판정한다 (선택 실행의 _refresh_ok와 같은 기준).
+    claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
     from .mod_status import ModuleStatus
     addr, remote = ModuleStatus._rc_target(folder)
     if not addr:
@@ -596,7 +906,7 @@ def _refresh_folder_vfs(key, folder, name):
             'started_at': started, 'finished_at': None,
             'status': 'running', 'source': 'trash',
             'job_name': name}, label='휴지통 스캔')
-        w = _wait_vfs(addr, jobid)
+        w = _wait_vfs(addr, jobid, claim_id=claim_id)
         _write_status(key, 'vfs', {
             'job': jobid, 'path': folder,
             'started_at': started, 'finished_at': _now_text(),
@@ -632,15 +942,15 @@ def _refresh_folder_vfs(key, folder, name):
             'duration': int(time.time() - t0), 'error': error}
 
 
-def _compute_skip_reason(key):
+def _compute_skip_reason(key, claim_id=None):
     """이 섹션을 건너뛸 사유 — None이면 진행한다.
     라이브러리 동시 스캔 수 게이트와 같은 목록(대시보드·주기적·
     휴지통 스캔)으로 판정한다. 스캔 큐(폴더 단위)는 세지 않는다.
-    자기 작업의 진행 상태는 빼고 센다. 목록을 읽지 못하면
+    자기 작업의 진행 상태만 빼고 센다. 목록을 읽지 못하면
     게이트와 마찬가지로 막지 않고 진행한다.
     섹션 시작 시마다 다시 읽는다."""
     try:
-        running = ModuleStatus.running_library_scans(exclude_source='trash')
+        running = ModuleStatus.running_library_scans(exclude_claim_id=claim_id)
         running_keys = [k for k, _ in running]
     except Exception as e:
         running_keys = []
@@ -656,7 +966,9 @@ class TaskTrash:
     수행한다. 비우기는 스캔이 끝난 뒤 섹션 비우기 1회로 수행한다
     (폴더별 비우기 API는 없다). 새로 없어진 파일을 찾는 전체 스캔은
     주기적 스캔이 담당한다. 진행 상태는 ModelSetting trash_current에
-    기록해 화면이 공유하고, 취소는 trash_cancel 플래그로 요청받는다.
+    목록으로 기록해 화면이 공유한다. 여러 작업이 설정한 '라이브러리
+    동시 스캔 수'까지 함께 돌 수 있다. 취소는 trash_cancel에 claim_id
+    목록으로 요청받는다.
     완료된 스캔의 집계와 비운 개수는 이력 행에 남기고, 진행 상황은
     대시보드 섹션 상태(status_sec_N)에도 수동 작업과 같은 모양으로
     기록한다.
@@ -668,13 +980,21 @@ class TaskTrash:
             try:
                 TaskTrash._run(idx, mode)
             except Exception as e:
+                # _run이 차지한 뒤의 오류면 자기 진행 상태만 지운다 —
+                # 다른 작업의 진행 상태는 건드리지 않는다. 차지하기
+                # 전이면 _ACTIVE가 비어 있어 아무것도 지우지 않는다.
                 logger.error(f'휴지통 주기 작업 실행 실패: {e}')
                 logger.error(traceback.format_exc())
-                try:
-                    row_id = (get_trash_current() or {}).get('job_row_id')
-                except Exception:
-                    row_id = None
-                _set_trash_current(None)
+                claim_id = getattr(_ACTIVE, 'claim_id', None)
+                row_id = getattr(_ACTIVE, 'job_row_id', None)
+                _ACTIVE.claim_id = None
+                _ACTIVE.job_row_id = None
+                if claim_id is not None:
+                    try:
+                        _remove_trash_current(claim_id)
+                        _clear_trash_cancel(claim_id)
+                    except Exception:
+                        pass
                 if row_id:
                     # 기다렸다 시작한 작업이면 대기 행을 실패로 끝낸다 —
                     # fail_trash_start로 또 행을 만들면 두 개가 된다.
@@ -714,6 +1034,8 @@ class TaskTrash:
     def _run(idx, mode):
         from .model_trash import ModelTrashItem
         from .mod_status import ModuleStatus
+        _ACTIVE.claim_id = None
+        _ACTIVE.job_row_id = None
         jobs = get_trash_jobs()
         if idx < 0 or idx >= len(jobs):
             logger.warning(f'[휴지통 스캔] 없는 작업 번호: {idx}')
@@ -729,7 +1051,6 @@ class TaskTrash:
         steps = ACTION_STEPS.get(action, ['empty'])
         if action not in ACTION_STEPS:
             action = 'empty'
-        P.ModelSetting.set(TRASH_CANCEL_KEY, '')
         job_started = _now_text()
         logger.info(f'[휴지통 스캔] 시작: {name} ({ACTION_LABEL.get(action, action)}, {mode})')
 
@@ -767,14 +1088,20 @@ class TaskTrash:
 
         # 앞선 작업이 돌고 있으면 기다렸다가 차례가 되면 실행한다.
         # 기다리다 시간 초과하면 _wait_for_turn이 실패 행을 남긴다.
-        job_row_id, _waited = _wait_for_turn(idx, name, mode, job_started, job_label, action)
+        # 자리 검사는 첫 라이브러리 기준으로 한다 — 나중 라이브러리는
+        # 섹션 시작 때 가드가 다시 본다.
+        job_row_id, _waited, claim_id = _wait_for_turn(
+            idx, name, mode, job_started, job_label, action,
+            first_key=targets[0]['key'])
         if _waited is None:
             return
+        _ACTIVE.claim_id = claim_id
+        _ACTIVE.job_row_id = job_row_id
 
         for sec in targets:
             key = str(sec['key'])
             title = sec.get('title') or key
-            if _trash_cancel_requested():
+            if _trash_cancel_requested(claim_id):
                 item = ModelTrashItem(name, key, title, mode, action)
                 item.finish('cancelled', '취소 요청으로 실행하지 않았습니다.')
                 continue
@@ -782,7 +1109,7 @@ class TaskTrash:
             # 비우기만은 스캔과 충돌하지 않아 가드에서 뺀다. 가드는 섹션
             # 시작 시마다 다시 읽는다 (W5).
             guard_applies = 'scan' in steps
-            skip_reason = _compute_skip_reason(key) if guard_applies else None
+            skip_reason = _compute_skip_reason(key, claim_id) if guard_applies else None
             if skip_reason is not None:
                 item = ModelTrashItem(name, key, title, mode, action)
                 item.finish('skipped', skip_reason)
@@ -857,7 +1184,7 @@ class TaskTrash:
                 else:
                     target_groups = db_support.group_append_paths(target_files)
                 for step in steps:
-                    if _trash_cancel_requested():
+                    if _trash_cancel_requested(claim_id):
                         status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                         break
                     if step == 'empty' and (vfs_failed_folders or scan_failed_folders):
@@ -867,12 +1194,13 @@ class TaskTrash:
                         logger.info(f'[휴지통 스캔] 비우기 생략: 실패한 폴더가 있음 '
                                     f'(VFS {vfs_failed_folders}개 · 스캔 {scan_failed_folders}개)')
                         continue
-                    _set_trash_current({
+                    _upsert_trash_current({
                         'job_idx': idx, 'job_name': name, 'section_key': key,
                         'section_title': title,
                         'stage': step, 'job_started_at': job_started,
                         'section_started_at': _now_text(),
-                        'mode': mode, 'action': action, 'job_row_id': job_row_id})
+                        'mode': mode, 'action': action, 'job_row_id': job_row_id,
+                        'claim_id': claim_id})
                     try:
                         if step == 'refresh':
                             # 폴더별 VFS 새로고침 — 하나가 실패해도
@@ -881,11 +1209,11 @@ class TaskTrash:
                             file_exists = {}
                             vfs_total = 0
                             for grp in target_groups:
-                                if _trash_cancel_requested():
+                                if _trash_cancel_requested(claim_id):
                                     status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                                     break
                                 folder = grp['folder']
-                                w = _refresh_folder_vfs(key, folder, name)
+                                w = _refresh_folder_vfs(key, folder, name, claim_id)
                                 vfs_total += w['duration']
                                 if w['result'] == 'cancelled':
                                     status, message = 'cancelled', '취소 요청으로 중단했습니다.'
@@ -929,7 +1257,7 @@ class TaskTrash:
                             # 검사할 필요가 없다.
                             if scan_folders:
                                 gate_msg = ModuleStatus.library_gate_check(
-                                    key, exclude_source='trash')
+                                    key, exclude_claim_id=claim_id)
                                 if gate_msg:
                                     status, message = 'failed', gate_msg
                                     break
@@ -937,7 +1265,7 @@ class TaskTrash:
                             scan_total = 0
                             first_scan_error = ''
                             for seq, grp in enumerate(scan_folders):
-                                if _trash_cancel_requested():
+                                if _trash_cancel_requested(claim_id):
                                     status, message = 'cancelled', '취소 요청으로 중단했습니다.'
                                     break
                                 folder = grp['folder']
@@ -977,10 +1305,16 @@ class TaskTrash:
                                     'started_at': scan_started, 'finished_at': None,
                                     'status': 'running', 'source': 'trash',
                                     'job_name': name}, label='휴지통 스캔')
-                                cur = get_trash_current() or {}
-                                cur['scan_job'] = job_id
-                                _set_trash_current(cur)
-                                w = _wait_scan(url, token, job_id, section_key=key)
+                                cur = None
+                                for c in get_trash_currents():
+                                    if c.get('claim_id') == claim_id:
+                                        cur = c
+                                        break
+                                if cur is not None:
+                                    cur['scan_job'] = job_id
+                                    _upsert_trash_current(cur)
+                                w = _wait_scan(url, token, job_id, section_key=key,
+                                               claim_id=claim_id)
                                 scan_total += w['duration']
                                 job_stats = (w.get('job') or {}).get('stats') or {}
                                 summary = scan_summary_text(job_stats)
@@ -1220,9 +1554,12 @@ class TaskTrash:
         # 지우면 지운 틈에 다른 작업이 비어 있다고 보고 시작해버린다.
         # (주기적 스캔은 처음부터 끝날 때만 지운다.)
         if job_row_id is not None:
-            if _trash_cancel_requested():
+            if _trash_cancel_requested(claim_id):
                 _finish_job_row(job_row_id, 'cancelled', '취소 요청으로 중단했습니다.')
             else:
                 _finish_job_row(job_row_id, 'done', '완료됐습니다.')
-        _set_trash_current(None)
+        _remove_trash_current(claim_id)
+        _clear_trash_cancel(claim_id)
+        _ACTIVE.claim_id = None
+        _ACTIVE.job_row_id = None
         logger.info(f'[휴지통 스캔] 종료: {name}')

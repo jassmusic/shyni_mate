@@ -5,21 +5,17 @@
   <div class="row show-grid">
     <span class="col-md-12">
       <strong>세션</strong>
-      <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
-        <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
-        <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
-          <label style="font-weight:normal; font-size:12.5px; margin:0">주기
-            <input type="number" id="refreshMinInput" min="1" max="120" value="{{ '30' if (arg['status_auto_refresh_min'] or '30') == '0' else arg['status_auto_refresh_min'] }}" style="width:52px; height:26px; display:inline-block; padding:2px 6px; font-size:12.5px" class="form-control"> 분
-          </label>
-        </span>
-        <button type="button" class="btn btn-primary" id="refreshSaveBtn" style="padding:2px 10px; font-size:12.5px">저장</button>
-        <button type="button" class="btn btn-info" id="sessionsRefreshBtn" style="padding:2px 10px; font-size:12.5px">새로고침</button>
-      </span>
     </span>
   </div>
+  <div id="sessions_progress_wrap" style="display:none; margin:2px 0 10px 0">
+    <div style="height:8px; background:#edf2f7; border-radius:4px; overflow:hidden"><div id="sessions_progress_bar" style="height:100%; width:0%; background:#3182ce; transition:width .4s ease"></div></div>
+    <div id="sessions_progress_text" style="font-size:12px; color:#888; margin-top:3px">불러오는 중… 0%</div>
+  </div>
   <div class="row show-grid">
-    <span class="col-md-12" style="font-size:12px; color:#aaa; text-align:right">
-      주기는 1~120분으로 저장할 수 있습니다.
+    <span class="col-md-12">
+      <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
+        <button type="button" class="btn btn-info" id="sessionsRefreshBtn" style="padding:2px 10px; font-size:12.5px">새로고침</button>
+      </span>
     </span>
   </div>
 </div>
@@ -39,15 +35,43 @@ function setupTimer(min) {
   if (min > 0) refreshTimer = setInterval(load_sessions, min * 60000);
 }
 
-function applyRefreshUI(min) {
-  if (min == 0) {
-    $('#refreshUseCheck').prop('checked', false);
-    $('#refreshMinWrap').hide();
-  } else {
-    $('#refreshUseCheck').prop('checked', true);
-    $('#refreshMinWrap').show();
-    $('#refreshMinInput').val(min);
-  }
+// 진행률 가로바 — 대시보드·건강도와 같은 모양과 동작
+var sessionsLoadStartAt = null;
+var sessionsProgressValue = 0;
+var sessionsProgressTimer = null;
+var sessionsProgressDoneOnce = false;
+
+function fmtElapsed(ms) {
+  var s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + '초';
+  return Math.floor(s / 60) + '분 ' + Math.round(s % 60) + '초';
+}
+
+function paintSessionsProgress() {
+  $('#sessions_progress_wrap').show();
+  $('#sessions_progress_bar').css('width', sessionsProgressValue + '%');
+  $('#sessions_progress_text').text('세션 목록 불러오는 중… ' + sessionsProgressValue + '%');
+}
+function startSessionsCreep(cap) {
+  if (sessionsProgressTimer) clearInterval(sessionsProgressTimer);
+  sessionsProgressTimer = setInterval(function () {
+    if (sessionsProgressValue < cap) {
+      sessionsProgressValue = Math.min(cap, sessionsProgressValue + Math.max(1, Math.round((cap - sessionsProgressValue) * 0.07)));
+      paintSessionsProgress();
+    }
+  }, 250);
+}
+function stopSessionsCreep() {
+  if (sessionsProgressTimer) { clearInterval(sessionsProgressTimer); sessionsProgressTimer = null; }
+}
+function finishSessionsProgress() {
+  stopSessionsCreep();
+  sessionsProgressValue = 100;
+  $('#sessions_progress_wrap').show();
+  $('#sessions_progress_bar').css('width', '100%');
+  var el = sessionsLoadStartAt ? fmtElapsed(Date.now() - sessionsLoadStartAt) : '';
+  $('#sessions_progress_text').text('불러오기 완료' + (el ? ' · 소요시간 ' + el : ''));
+  sessionsProgressDoneOnce = true;
 }
 
 function esc(s) {
@@ -65,8 +89,14 @@ function fmtTime(iso) {
          (h < 10 ? '0' + h : h) + ':' + (min < 10 ? '0' + min : min);
 }
 
-function load_sessions() {
-  $('#sessions_msg_div').show().text('세션 목록을 불러오는 중입니다. 잠시만 기다려 주세요.');
+function load_sessions(force) {
+  sessionsLoadStartAt = Date.now();
+  if (force || !sessionsProgressDoneOnce) {
+    sessionsProgressValue = 0;
+    paintSessionsProgress();
+    startSessionsCreep(90);
+  }
+  $('#sessions_msg_div').hide();
   $('#sessions_div').hide();
   $.ajax({
     global: false,
@@ -75,14 +105,16 @@ function load_sessions() {
     timeout: 30000,
     success: function (ret) {
       if (ret.ret != 'success') {
+        stopSessionsCreep();
+        $('#sessions_progress_wrap').hide();
         $('#sessions_msg_div').show().text(ret.msg || '세션 목록을 불러오지 못했습니다.');
         return;
       }
       if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
-        applyRefreshUI(ret.refresh_min);
         setupTimer(ret.refresh_min);
       }
       if (ret.relay_off) {
+        finishSessionsProgress();
         $('#sessions_msg_div').hide();
         $('#sessions_div').html(
           '<div style="border:1px solid #bee5eb; background:#e8f6f8; border-radius:6px; padding:16px; text-align:center; color:#0c5460">' +
@@ -93,9 +125,11 @@ function load_sessions() {
       }
       var list = ret.sessions || [];
       if (!list.length) {
+        finishSessionsProgress();
         $('#sessions_msg_div').show().text('로그인 중인 세션이 없습니다.');
         return;
       }
+      finishSessionsProgress();
       $('#sessions_msg_div').hide();
       var str = '<div style="font-size:12px; color:#888; margin-bottom:8px">로그인 중인 기기 ' + list.length + '개 · 마지막 활동 순</div>';
       str += '<div style="overflow-x:auto"><table class="table table-striped" style="font-size:13px"><thead><tr><th>사용자</th><th>기기</th><th>앱</th><th style="white-space:nowrap">마지막 활동</th><th style="white-space:nowrap">로그인</th></tr></thead><tbody>';
@@ -114,37 +148,15 @@ function load_sessions() {
       $('#sessions_div').html(str).show();
     },
     error: function () {
+      stopSessionsCreep();
+      $('#sessions_progress_wrap').hide();
       $('#sessions_msg_div').show().text('세션 목록을 불러오지 못했습니다.');
     }
   });
 }
 
 $(document).ready(function() {
-  $('#sessionsRefreshBtn').on('click', load_sessions);
-  $('#refreshUseCheck').on('change', function(){
-    $('#refreshMinWrap').toggle(this.checked);
-  });
-  $('#refreshSaveBtn').on('click', function(){
-    var use = $('#refreshUseCheck').is(':checked');
-    var min = parseInt($('#refreshMinInput').val(), 10);
-    if (use && !(min >= 1 && min <= 120)) { alert('주기는 1~120분으로 입력해 주세요.'); return; }
-    $.ajax({
-      global: false,
-      type: 'POST',
-      url: API_BASE + 'set_refresh',
-      data: {min: use ? min : 0},
-      success: function (ret) {
-        if (window.notify) notify(ret.msg, ret.ret == 'success' ? 'success' : 'error');
-        else alert(ret.msg);
-        if (ret.ret == 'success') {
-          currentRefreshMin = use ? min : 0;
-          applyRefreshUI(currentRefreshMin);
-          setupTimer(currentRefreshMin);
-        }
-      },
-      error: function () { alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.'); }
-    });
-  });
+  $('#sessionsRefreshBtn').on('click', function() { load_sessions(true); });
   var initMin = parseInt("{{ arg['status_auto_refresh_min'] or '30' }}", 10);
   if (isNaN(initMin)) initMin = 1;
   currentRefreshMin = initMin;

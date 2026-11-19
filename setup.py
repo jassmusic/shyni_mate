@@ -62,6 +62,7 @@ setting = {
                 'name': '메타',
                 'list': [
                     {'uri': 'list', 'name': '메타'},
+                    {'uri': 'manual', 'name': '매뉴얼'},
                 ]
             },
             {

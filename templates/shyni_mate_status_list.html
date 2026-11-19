@@ -14,20 +14,8 @@
   <div class="row show-grid">
     <span class="col-md-12">
       <span style="float:right; display:flex; align-items:center; gap:6px; white-space:nowrap">
-        <label style="font-weight:normal; font-size:12.5px; margin:0"><input type="checkbox" id="refreshUseCheck"{% if (arg['status_auto_refresh_min'] or '30') != '0' %} checked{% endif %}> 자동 업데이트</label>
-        <span id="refreshMinWrap"{% if (arg['status_auto_refresh_min'] or '30') == '0' %} style="display:none"{% endif %}>
-          <label style="font-weight:normal; font-size:12.5px; margin:0">주기
-            <input type="number" id="refreshMinInput" min="1" max="120" value="{{ '30' if (arg['status_auto_refresh_min'] or '30') == '0' else arg['status_auto_refresh_min'] }}" style="width:52px; height:26px; display:inline-block; padding:2px 6px; font-size:12.5px" class="form-control"> 분
-          </label>
-        </span>
-        <button type="button" class="btn btn-primary" id="refreshSaveBtn" style="padding:2px 10px; font-size:12.5px">저장</button>
         <button type="button" class="btn btn-info" id="statusRefreshBtn" style="padding:2px 10px; font-size:12.5px">새로고침</button>
       </span>
-    </span>
-  </div>
-  <div class="row show-grid">
-    <span class="col-md-12" style="font-size:12px; color:#aaa; text-align:right">
-      주기는 1~120분으로 저장할 수 있습니다.
     </span>
   </div>
 </div>
@@ -56,7 +44,7 @@
 <div id="server_card_div" style="margin-bottom:16px">
   <div style="border:1px solid #ddd; border-radius:6px; padding:12px 14px; color:#888">서버 정보를 불러오는 중입니다.</div>
 </div>
-<div id="lib_head_div" style="margin-bottom:6px; display:flex; justify-content:space-between; align-items:center"><span><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></g></svg>라이브러리 정보</strong> <span id="lib_db_basis" style="font-size:12px; color:#888; display:none">Shyni 데이터베이스 기준</span></span><span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888; margin-left:auto; margin-right:10px">표시 <button type="button" id="lib_show_btn" class="btn btn-default" style="height:26px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="lib_show_panel" style="display:none; position:absolute; right:0; top:30px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="lib_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="lib_show_all" checked> 전체</label><span id="lib_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span><label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 <select id="status_lib_sort" onchange="setStatusLibSort(this.value)" style="display:inline-block; width:auto; height:26px; padding:2px 6px; font-size:12px; vertical-align:middle"><option value="default">기본</option><option value="name">이름</option><option value="nometa">메타</option><option value="media">미디어</option><option value="trash">휴지통</option></select></label></div>
+<div id="lib_head_div" style="margin-bottom:6px; display:flex; justify-content:space-between; align-items:center"><div><strong><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px; margin-right:6px"><g transform="translate(0 1.92) scale(1 0.84)"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></g></svg>라이브러리 정보</strong><div id="lib_db_basis" style="font-size:12px; color:#888; white-space:nowrap; display:none">Shyni 데이터베이스 기준</div></div><span style="position:relative; display:inline-block; white-space:nowrap; font-size:12px; color:#888; margin-left:auto; margin-right:10px">표시 <button type="button" id="lib_show_btn" class="btn btn-default" style="height:26px; padding:2px 8px; font-size:12px; vertical-align:middle">전체 ▾</button><span id="lib_show_panel" style="display:none; position:absolute; right:0; top:30px; z-index:30; background:#fff; border:1px solid #cbd5e0; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.13); padding:8px 10px; min-width:215px; text-align:left; color:#2d3748"><input type="text" id="lib_show_search" class="form-control" placeholder="라이브러리 검색" style="height:26px; font-size:12.5px; padding:2px 8px; margin-bottom:6px"><label style="display:flex; gap:7px; align-items:center; font-size:13px; font-weight:600; padding:3px 2px; border-bottom:1px solid #edf2f7; margin:0 0 4px 0; cursor:pointer"><input type="checkbox" id="lib_show_all" checked> 전체</label><span id="lib_show_rows" style="display:block; max-height:280px; overflow-y:auto"></span></span></span><label style="font-size:12px; color:#888; font-weight:normal; margin:0; white-space:nowrap">정렬 <select id="status_lib_sort" onchange="setStatusLibSort(this.value)" style="display:inline-block; width:auto; height:26px; padding:2px 6px; font-size:12px; vertical-align:middle"><option value="default">기본</option><option value="name">이름</option><option value="nometa">메타</option><option value="media">미디어</option><option value="trash">휴지통</option></select></label></div>
 <div id="type_counts_div" style="font-size:13px; color:#555; margin-bottom:8px; display:flex; align-items:baseline"><span id="type_counts_txt"></span><span id="info_ago" style="color:#aaa; margin-left:auto"></span></div>
 <div id="status_list_div">
   <div style="padding:24px 4px; color:#888">대시보드를 불러오는 중입니다. 잠시만 기다려 주세요.</div>
@@ -149,17 +137,6 @@ function setupTimer(min) {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
   currentRefreshMin = min;
   if (min > 0) refreshTimer = setInterval(load_list, min * 60000);
-}
-
-function applyRefreshUI(min) {
-  if (min == 0) {
-    $('#refreshUseCheck').prop('checked', false);
-    $('#refreshMinWrap').hide();
-  } else {
-    $('#refreshUseCheck').prop('checked', true);
-    $('#refreshMinWrap').show();
-    $('#refreshMinInput').val(min);
-  }
 }
 
 function fmt(t) {
@@ -355,8 +332,15 @@ function stateLineHtml(st) {
     if (mtTxt) statusEntries.push({t: (mt.finished_at || mt.started_at || ''), status: mt.status, txt: mtTxt});
   }
   statusEntries.sort(function (a, b) { return a.t < b.t ? -1 : (a.t > b.t ? 1 : 0); });
-  return statusEntries.map(function (e, idx) {
-    var latest = idx == statusEntries.length - 1;
+  // 최근 작업은 최근 2개만 보여 준다 — 진행 중인 건 따로 있어도 항상 포함한다.
+  // (네 슬롯이 다 차면 4개까지 나와 카드가 너무 길어진다 — 2026-11-20 사용자 지적)
+  var shownEntries = statusEntries.slice(-2);
+  statusEntries.forEach(function (e) {
+    if ((e.status == 'running' || e.status == 'requested') && shownEntries.indexOf(e) < 0) shownEntries.push(e);
+  });
+  shownEntries.sort(function (a, b) { return a.t < b.t ? -1 : (a.t > b.t ? 1 : 0); });
+  return shownEntries.map(function (e, idx) {
+    var latest = idx == shownEntries.length - 1;
     var color = '#999';
     if (latest) {
       if (e.status == 'running' || e.status == 'requested' || e.status == 'done') color = '#2b6cb0';
@@ -377,6 +361,15 @@ function fmtAgo(ts) {
   if (sec < 3600) return '(' + Math.floor(sec / 60) + '분 전)';
   if (sec < 86400) return '(' + Math.floor(sec / 3600) + '시간 전)';
   return '(' + Math.floor(sec / 86400) + '일 전)';
+}
+
+// 서버가 보낸 'YYYY-MM-DD HH:MM:SS' 기준 시각을 경과 표시로 바꾼다.
+// 파싱이 안 되면 빈 문자열 — 그 경우 기존 절대 시각 표시로 넘어간다.
+function fmtCachedAgo(s) {
+  if (!s) return '';
+  var d = new Date(String(s).replace(' ', 'T'));
+  if (isNaN(d.getTime())) return '';
+  return fmtAgo(Math.floor(d.getTime() / 1000));
 }
 
 // 항목 수 줄 오른쪽 끝 (N초 전) — 정보를 마지막으로 불러온 시각 기준
@@ -585,6 +578,9 @@ $("body").on('click', '.folder-toggle', function () {
 
 function render(data, logFiles, periodicCurrent, trashCurrent) {
   lastStatusArgs = [data, logFiles, periodicCurrent, trashCurrent];
+  // 진행 중 작업은 목록이다 — 낡은 복사본의 단일 객체도 목록으로 감싼다.
+  if (!Array.isArray(periodicCurrent)) periodicCurrent = periodicCurrent ? [periodicCurrent] : [];
+  if (!Array.isArray(trashCurrent)) trashCurrent = trashCurrent ? [trashCurrent] : [];
   window.__stateKeys = (data || []).map(function (x) { return x.key; });
   stateKnownRunning = (data || []).some(function (x) { var t = x.state || {}; return (t.vfs && t.vfs.status == 'running') || (t.scan && (t.scan.status == 'running' || t.scan.status == 'requested')) || (t.meta && t.meta.status == 'running'); });
   buildShowPanel(data || []);
@@ -594,14 +590,22 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
   for (var i in sortedData) {
     var s = sortedData[i];
     var st = s.state || {};
-    var hl = periodicCurrent && String(periodicCurrent.section_key) === String(s.key);
-    var hlTrash = trashCurrent && String(trashCurrent.section_key) === String(s.key);
+    var hlCur = null;
+    for (var pc = 0; pc < periodicCurrent.length; pc++) {
+      if (String(periodicCurrent[pc].section_key) === String(s.key)) { hlCur = periodicCurrent[pc]; break; }
+    }
+    var hlTrashCur = null;
+    for (var tc = 0; tc < trashCurrent.length; tc++) {
+      if (String(trashCurrent[tc].section_key) === String(s.key)) { hlTrashCur = trashCurrent[tc]; break; }
+    }
+    var hl = !!hlCur;
+    var hlTrash = !!hlTrashCur;
     var running = (st.vfs && st.vfs.status == 'running') || (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) || (st.meta && st.meta.status == 'running') || (st.trash && st.trash.status == 'running') || hl || hlTrash;
     // 취소 대상 — 서버(sub='cancel')와 같은 우선순위 (주기적 → 휴지통 → 메타 → 새로고침 → 스캔 → 비우기).
     // 'empty'는 비우기 중이라 취소 불가 — 버튼을 비활성화한다.
     var cancelKind = null;
     if (hl) cancelKind = 'periodic';
-    else if (hlTrash) cancelKind = (trashCurrent.stage == 'empty') ? 'empty' : 'trash';
+    else if (hlTrash) cancelKind = (hlTrashCur.stage == 'empty') ? 'empty' : 'trash';
     else if (st.meta && st.meta.status == 'running') cancelKind = 'meta';
     else if (st.vfs && st.vfs.status == 'running') cancelKind = 'vfs';
     else if (st.scan && (st.scan.status == 'running' || st.scan.status == 'requested')) cancelKind = 'scan';
@@ -615,11 +619,11 @@ function render(data, logFiles, periodicCurrent, trashCurrent) {
     var CARD_TYPE_LABELS = {'movie': '영화', 'show': '쇼', 'artist': '음악', 'book': '도서', 'photo': '사진'};
     str += '<div>' + (CARD_TYPE_ICONS[s.type] ? smIcon(CARD_TYPE_ICONS[s.type], null, 18) : '') + (CARD_TYPE_LABELS[s.type] ? '<span style="display:inline-block; background:#edf2f7; color:#4a5568; border-radius:8px; padding:1px 8px; font-size:11px; margin-right:6px; vertical-align:middle">' + CARD_TYPE_LABELS[s.type] + '</span>' : '') + '<strong style="font-size:16px">' + s.title + '</strong>';
     if (hl) {
-      var stageTxt = periodicCurrent.stage == 'vfs' ? '새로고침 중' : '스캔 중';
+      var stageTxt = hlCur.stage == 'waiting' ? '대기중' : (hlCur.stage == 'vfs' ? '새로고침 중' : '스캔 중');
       str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">주기적 스캔 · ' + stageTxt + '</span>';
     }
     if (hlTrash) {
-      var trashStageTxt = {'refresh': '새로고침 중', 'scan': '스캔 중', 'empty': '비우는 중'}[trashCurrent.stage] || '진행 중';
+      var trashStageTxt = {'refresh': '새로고침 중', 'scan': '스캔 중', 'empty': '비우는 중', 'waiting': '대기중'}[hlTrashCur.stage] || '진행 중';
       str += ' <span style="background:#2b6cb0; color:#fff; font-size:11px; padding:2px 8px; border-radius:9px; vertical-align:middle">휴지통 스캔 · ' + trashStageTxt + '</span>';
     }
     str += '</div>';
@@ -758,7 +762,10 @@ function finishProgress(ret) {
   $('#load_progress_bar').css('width', '100%');
   var el = loadStartAt ? fmtElapsed(Date.now() - loadStartAt) : '';
   var txt = '불러오기 완료' + (el ? ' · 소요시간 ' + el : '');
-  if (ret && ret.from_cache) txt += ' · ' + (ret.cached_at || '') + ' 기준';
+  if (ret && ret.from_cache) {
+    var ca = fmtCachedAgo(ret.cached_at);
+    txt += ca ? ' · ' + ca : (ret.cached_at ? ' · ' + ret.cached_at + ' 기준' : '');
+  }
   $('#load_progress_text').text(txt);
   progressDoneOnce = true;
 }
@@ -1012,6 +1019,8 @@ function requestDashboardCancel(btn) {
 }
 function checkCancelPending(data, periodicCurrent, trashCurrent) {
   if (!cancelPending) return;
+  if (!Array.isArray(periodicCurrent)) periodicCurrent = periodicCurrent ? [periodicCurrent] : [];
+  if (!Array.isArray(trashCurrent)) trashCurrent = trashCurrent ? [trashCurrent] : [];
   if (cancelPollTimer) { clearTimeout(cancelPollTimer); cancelPollTimer = null; }
   if (Date.now() - cancelPending.at > 180000) {
     // 3분이 지나도 확인이 안 되면 대기만 푼다 (작업 자체는 서버에서 진행 중일 수 있다)
@@ -1029,8 +1038,12 @@ function checkCancelPending(data, periodicCurrent, trashCurrent) {
         (st.meta && st.meta.status == 'running') ||
         (st.trash && st.trash.status == 'running')) stillRunning = true;
   });
-  if (periodicCurrent && String(periodicCurrent.section_key) === key) stillRunning = true;
-  if (trashCurrent && String(trashCurrent.section_key) === key) stillRunning = true;
+  for (var pc = 0; pc < periodicCurrent.length; pc++) {
+    if (String(periodicCurrent[pc].section_key) === key) stillRunning = true;
+  }
+  for (var tc = 0; tc < trashCurrent.length; tc++) {
+    if (String(trashCurrent[tc].section_key) === key) stillRunning = true;
+  }
   if (!stillRunning) {
     cancelPending = null;
     showMsg({ret: 'success', msg: '작업이 취소되었습니다.'});
@@ -1079,7 +1092,6 @@ function load_list(force, quiet) {
           $('#type_counts_txt').html('');
           $('#status_list_div').html('<div style="padding:24px 4px; color:#888">대시보드를 보기 위해 설정에서 정보를 입력해 주세요.</div>');
           if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
-            applyRefreshUI(ret.refresh_min);
             setupTimer(ret.refresh_min);
           }
           return;
@@ -1096,7 +1108,6 @@ function load_list(force, quiet) {
           startListPoll();
           if (ret.db_loading) startDbPoll();
           if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
-            applyRefreshUI(ret.refresh_min);
             setupTimer(ret.refresh_min);
           }
           return;
@@ -1141,7 +1152,6 @@ function load_list(force, quiet) {
         renderTypeCounts(ret.type_counts);
         renderServer(ret.server, ret.storage);
         if (ret.refresh_min !== undefined && ret.refresh_min !== currentRefreshMin) {
-          applyRefreshUI(ret.refresh_min);
           setupTimer(ret.refresh_min);
         }
       }
@@ -1172,29 +1182,6 @@ $(document).ready(function () {
     $('#btn_guide_arrow').text(open ? '▸ 펼치기' : '▾ 접기');
   });
   $('#statusRefreshBtn').off('click').on('click', function () { load_list(true); });
-  $('#refreshUseCheck').off('change').on('change', function () {
-    $('#refreshMinWrap').toggle($(this).is(':checked'));
-  });
-  $('#refreshSaveBtn').off('click').on('click', function () {
-    var v;
-    if (!$('#refreshUseCheck').is(':checked')) {
-      v = 0;
-    } else {
-      v = parseInt($('#refreshMinInput').val(), 10);
-      if (isNaN(v) || v < 1 || v > 120) { showMsg({ret: 'fail', msg: '1~120 사이의 분 값을 입력해 주세요.'}); return; }
-    }
-    $.ajax({
-      global: false,
-      type: 'POST',
-      url: API_BASE + 'set_refresh',
-      data: {min: v},
-      success: function (ret) {
-        showMsg(ret);
-        if (ret.ret == 'success') { applyRefreshUI(v); setupTimer(v); }
-      },
-      error: function () { showMsg({ret: 'fail', msg: '저장에 실패했습니다. 잠시 후 다시 시도해 주세요.'}); }
-    });
-  });
   $(document).off('click', '.status-act').on('click', '.status-act', function () {
     var btn = $(this);
     if (btn.data('act') == 'meta_refresh') {

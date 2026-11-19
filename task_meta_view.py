@@ -17,10 +17,18 @@ Relay가 꺼져 있으면 계산하지 않고 화면에 안내만 보여 준다.
   (cancel: 조회 중 취소 요청, cancelled: 취소로 끝난 계산)
 - meta_view_cache : {'libs': {라이브러리키: {'at', 'data'}}} — 라이브러리별
   캐시를 전부 보관한다 (휴지통과 같은 방식).
+- meta_view_cache_index : {'라이브러리키': {'at', 'v', 'total', 'summary',
+  'is_folder', 'main_label'}} — 캐시 요약 인덱스. 시각·형식·목록 확인은
+  이 작은 값만 읽어 21MB 본 캐시를 파싱하지 않는다. summary는 계산 결과가
+  이미 들고 있는 메타 개수 요약(total·missing_any·no_code·no_summary·
+  no_year·no_thumb·no_meta)으로, 전체 현황이 상세와 같은 출처·같은 시점의
+  숫자를 보여 주게 한다 (2026-11-20 출처 통일). write_cache/clear_cache가
+  본 캐시와 함께 갱신하고, 없으면 첫 읽기 때 본 캐시에서 1회 만들어 저장한다.
 - meta_bulk_state : 전체 조회 진행 상태.
 
-자동 갱신 주기(base_meta_refresh_hours, 기본 12시간)가 지난 캐시는
-오래된 것으로 보고 다시 계산한다. 0이면 열 때마다 새로 조회한다.
+캐시는 자동으로 다시 계산하지 않는다 — 사용자가 오래됐다고 판단하면
+최신으로 조회(한 라이브러리)나 모두 조회(전체)로 직접 새로고침한다
+(2026-11-20 사용자 결정). 상세를 열 때는 저장된 캐시를 그대로 보여 준다.
 """
 import json
 import threading
@@ -34,19 +42,12 @@ logger = P.logger
 STATE_KEY = 'meta_view_state'
 BULK_KEY = 'meta_bulk_state'
 CACHE_KEY = 'meta_view_cache'
+INDEX_KEY = 'meta_view_cache_index'
 WATCH_INTERVAL = 2
 REQUEST_EXPIRE = 15 * 60
 # 계산 중(busy)인 채로 이 시간이 지나면 중단된 것으로 본다 — 계산 도중
 # ff가 재시작되면 busy가 남아 이후 조회가 전부 막히는 것을 막는다.
 BUSY_EXPIRE = 10 * 60
-
-
-def refresh_hours():
-    """메타 목록 자동 갱신 주기(시간) — 기본 12시간, 0이면 매번 새로 조회."""
-    try:
-        return int(P.ModelSetting.get('base_meta_refresh_hours') or 12)
-    except Exception:
-        return 12
 
 
 def read_state():
@@ -92,18 +93,96 @@ def _cache_libs():
     return {}
 
 
+def _build_index(libs):
+    """{라이브러리키: {'at', 'data'}}에서 요약 인덱스를 만든다 —
+    시각·형식·작품 수와 메타 개수 요약·라이브러리 표시 정보를 뽑는다.
+    요약은 계산 결과가 이미 들고 있는 summary를 그대로 옮긴다 (항목을
+    다시 세지 않는다)."""
+    out = {}
+    for k, v in (libs or {}).items():
+        if not isinstance(v, dict):
+            continue
+        data = v.get('data') if isinstance(v.get('data'), dict) else {}
+        items = data.get('items')
+        summary = data.get('summary')
+        if not isinstance(summary, dict):
+            summary = None
+        out[str(k)] = {
+            'at': v.get('at') or 0,
+            'v': data.get('v'),
+            'total': len(items) if isinstance(items, list) else 0,
+            'summary': summary,
+            'is_folder': bool(data.get('is_folder')),
+            'main_label': data.get('main_label') or '미디어',
+        }
+    return out
+
+
+def _save_index(index):
+    try:
+        P.ModelSetting.set(INDEX_KEY, json.dumps(index, ensure_ascii=False))
+        return True
+    except Exception as e:
+        logger.warning(f'[Meta] 메타 조회 인덱스 저장 실패: {e}')
+        return False
+
+
+def _drop_index():
+    """인덱스를 지운다 — 본 캐시와 어긋났을 때 다음 읽기에서
+    다시 만들게 한다."""
+    try:
+        P.ModelSetting.set(INDEX_KEY, '')
+    except Exception:
+        pass
+
+
+def read_index():
+    """요약 인덱스 {라이브러리키: {'at', 'v', 'total', 'summary',
+    'is_folder', 'main_label'}} — 본 캐시(21MB)를 파싱하지 않고
+    시각·형식·목록·개수 요약만 확인한다. 인덱스가 없으면 본 캐시를
+    1회 파싱해 만들어 저장한다 (마이그레이션, 최초 1회만 느림).
+    요약이 없는 옛 인덱스도 본 캐시에서 다시 만든다."""
+    try:
+        raw = P.ModelSetting.get(INDEX_KEY)
+        if raw:
+            index = json.loads(raw)
+            if isinstance(index, dict):
+                index = {k: v for k, v in index.items()
+                         if isinstance(v, dict)}
+                if index:
+                    # 'summary' 키가 없는 옛 인덱스는 본 캐시에서 다시 만든다.
+                    # 키만 보면 되니 요약이 없는(아주 옛 형식의) 캐시가 있어도
+                    # 매번 다시 만들지 않는다.
+                    if all('summary' in v for v in index.values()):
+                        return index
+    except Exception:
+        pass
+    # 인덱스가 없거나 비어 있으면 본 캐시에서 다시 만든다.
+    # 본 캐시도 비어 있으면 빈 인덱스를 저장해 둔다.
+    index = _build_index(_cache_libs())
+    _save_index(index)
+    return index
+
+
 def write_cache(lib_id, data):
     """조회 결과 캐시를 저장한다 — 성공 여부를 돌려준다 (실패하면
-    compute_view가 완료 표시 대신 오류 상태를 남긴다)."""
+    compute_view가 완료 표시 대신 오류 상태를 남긴다).
+    요약 인덱스도 본 캐시와 함께 갱신한다 (본 캐시 먼저, 인덱스 나중 —
+    사이에 읽히면 낡은 인덱스가 보여 잠깐 다시 계산할 뿐, 데이터가
+    어긋나지는 않는다)."""
     libs = _cache_libs()
     libs[str(lib_id)] = {'at': time.time(), 'data': data}
     try:
         P.ModelSetting.set(CACHE_KEY, json.dumps({'libs': libs},
                                                  ensure_ascii=False))
-        return True
     except Exception as e:
         logger.warning(f'[Meta] 메타 조회 캐시 저장 실패: {e}')
         return False
+    if not _save_index(_build_index(libs)):
+        # 인덱스 저장에 실패하면 지워 둔다 — 다음 읽기에서 본 캐시로
+        # 다시 만들어 어긋남이 남지 않게 한다.
+        _drop_index()
+    return True
 
 
 def cached_data(lib_id):
@@ -114,27 +193,21 @@ def cached_data(lib_id):
 
 
 def cache_libs():
-    return list(_cache_libs().keys())
+    return list(read_index().keys())
 
 
 def cache_times():
     """라이브러리별 캐시 저장 시각 {키: epoch} — '캐시 데이터 기준' 표시용."""
-    return {k: (v.get('at') or 0) for k, v in _cache_libs().items()}
+    return {k: (v.get('at') or 0) for k, v in read_index().items()}
 
 
-def is_cache_fresh(lib_id):
-    """캐시가 있고 자동 갱신 주기 안에 들면 True. 주기가 0이면 항상 False.
-    이전 행 형식(폴더명 없음, v 없음) 캐시는 오래된 것으로 보고 다시
-    계산한다 — 다음 조회 때 새 형식으로 채워진다."""
-    entry = _cache_libs().get(str(lib_id))
-    if not isinstance(entry, dict) or not isinstance(entry.get('data'), dict):
-        return False
-    if entry['data'].get('v') != db_support.META_VIEW_FORMAT:
-        return False
-    hours = refresh_hours()
-    if hours <= 0:
-        return False
-    return time.time() - (entry.get('at') or 0) <= hours * 3600
+def cache_state():
+    """meta_state 응답용 — 인덱스 1회 읽기로 목록·시각을 함께 돌려준다."""
+    index = read_index()
+    return {
+        'libs': list(index.keys()),
+        'times': {k: (v.get('at') or 0) for k, v in index.items()},
+    }
 
 
 def clear_cache(lib_id=None):
@@ -143,6 +216,8 @@ def clear_cache(lib_id=None):
             P.ModelSetting.set(CACHE_KEY, '')
         except Exception as e:
             logger.warning(f'[Meta] 메타 조회 캐시 지우기 실패: {e}')
+            return
+        _drop_index()
         return
     libs = _cache_libs()
     if str(lib_id) in libs:
@@ -152,6 +227,9 @@ def clear_cache(lib_id=None):
                                                      ensure_ascii=False))
         except Exception as e:
             logger.warning(f'[Meta] 메타 조회 캐시 지우기 실패: {e}')
+            return
+        if not _save_index(_build_index(libs)):
+            _drop_index()
 
 
 def request_view(lib_id, force=False):
@@ -160,11 +238,12 @@ def request_view(lib_id, force=False):
     이미 계산 중이면 그 상태를 그대로 돌려주고, 같은 라이브러리의 요청이
     접수만 된 채 15분이 지나면 워커 무응답으로 보고 다시 요청할 수 있게 한다.
     다른 라이브러리의 요청이 대기 중이면 덮어쓰지 않고 거부한다.
-    단, 주기 안에 든 캐시가 있는데 force('최신으로 조회')가 아니면 계산을
-    시작하지 않는다 — 화면은 캐시를 보여 준다. force이거나 캐시가
-    오래됐을 때만 다시 계산한다.
+    단, 저장된 캐시가 있는데 force('최신으로 조회')가 아니면 계산을
+    시작하지 않는다 — 화면은 캐시를 보여 준다. 캐시 나이는 보지 않는다.
+    오래됐다고 판단하면 사용자가 최신으로 조회나 모두 조회로 직접
+    새로고침한다 (2026-11-20 사용자 결정).
     """
-    if not force and is_cache_fresh(lib_id):
+    if not force and str(lib_id) in read_index():
         return {'lib': lib_id, 'from_cache': True}
     state = read_state()
     if state.get('busy'):
