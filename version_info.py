@@ -11,13 +11,17 @@ GitHub 최신 버전은 raw.githubusercontent.com에서 info.json을 읽어 온�
 """
 
 import json
+import logging
 import os
 import threading
 import time
 
+_log = logging.getLogger(__name__)
+
 try:
-    from urllib.request import urlopen
+    from urllib.request import Request, urlopen
 except Exception:  # pragma: no cover
+    Request = None
     urlopen = None
 
 
@@ -138,3 +142,136 @@ def refresh_github_version_async():
             return
         _github_cache['fetching'] = True
     threading.Thread(target=_refresh_github_version, daemon=True).start()
+
+
+# ---------- shyni GHCR 최신 버전 ----------
+
+GHCR_REGISTRY = 'ghcr.io'
+GHCR_REPO = 'kihyyo/shyni'
+GHCR_TAG = 'beta'
+GHCR_TOKEN_URL = (
+    'https://ghcr.io/token?service=ghcr.io'
+    '&scope=repository:kihyyo/shyni:pull')
+GHCR_MANIFEST_URL = 'https://ghcr.io/v2/kihyyo/shyni/manifests/beta'
+GHCR_BLOB_URL = 'https://ghcr.io/v2/kihyyo/shyni/blobs/'
+GHCR_CHECK_TTL_SEC = 3600  # 1시간
+GHCR_CHECK_TIMEOUT_SEC = 10
+_GHCR_RETRY_AFTER_FAIL_SEC = 600  # 실패하면 10분 뒤에 다시 시도
+_GHCR_ACCEPT = (
+    'application/vnd.oci.image.index.v1+json, '
+    'application/vnd.oci.image.manifest.v1+json, '
+    'application/vnd.docker.distribution.manifest.v2+json')
+
+
+def _ghcr_get(url, headers, timeout=GHCR_CHECK_TIMEOUT_SEC):
+    """GHCR에 GET 요청을 보내고 JSON을 돌려준다. 실패하면 예외."""
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=timeout) as res:
+        if res.status != 200:
+            raise RuntimeError(f'GHCR HTTP {res.status}')
+        return json.load(res)
+
+
+def fetch_ghcr_latest(token):
+    """GHCR에서 shyni beta 이미지의 최신 버전·git SHA를 읽는다.
+
+    토큰이 없거나 실패하면 None. 성공하면
+    {'version': '0.3.0-beta.14', 'git_sha': 'f7f93e1f...'}를 돌려준다.
+    beta 태그는 멀티 아키텍처 인덱스라 첫 번째 매니페스트를 쓴다
+    — git SHA는 아키텍처와 무관하게 같은 빌드 값이다.
+    """
+    if not token or Request is None or urlopen is None:
+        return None
+    try:
+        import base64
+        auth = base64.b64encode(
+            ('shyni-pull:' + token).encode()).decode()
+        # 1. 레지스트리 토큰 발급
+        reg = _ghcr_get(
+            GHCR_TOKEN_URL, {'Authorization': 'Basic ' + auth})
+        reg_token = (reg or {}).get('token')
+        if not reg_token:
+            return None
+        hdr = {'Authorization': 'Bearer ' + reg_token}
+        # 2. beta 매니페스트 (인덱스면 첫 항목의 매니페스트로 다시 읽는다)
+        manifest = _ghcr_get(
+            GHCR_MANIFEST_URL, dict(hdr, Accept=_GHCR_ACCEPT))
+        media_type = (manifest or {}).get('mediaType', '')
+        if 'index' in media_type or 'manifest.list' in media_type:
+            manifests = (manifest or {}).get('manifests') or []
+            if not manifests:
+                return None
+            digest = manifests[0].get('digest')
+            if not digest:
+                return None
+            manifest = _ghcr_get(
+                GHCR_MANIFEST_URL.rsplit('/', 1)[0] + '/' + digest,
+                dict(hdr, Accept=_GHCR_ACCEPT))
+        cfg_digest = ((manifest or {}).get('config') or {}).get('digest')
+        if not cfg_digest:
+            return None
+        # 3. 설정 블롭에서 이미지 라벨을 읽는다
+        config = _ghcr_get(GHCR_BLOB_URL + cfg_digest, hdr)
+        labels = ((config or {}).get('config') or {}).get('Labels') or {}
+        version = labels.get('org.opencontainers.image.version') or ''
+        git_sha = labels.get('org.opencontainers.image.revision') or ''
+        created = (config or {}).get('created') or ''
+        build_date = str(created)[:10] if created else ''
+        if not version and not git_sha:
+            return None
+        return {'version': str(version).strip(),
+                'git_sha': str(git_sha).strip(),
+                'build_date': build_date}
+    except Exception:
+        return None
+
+
+_ghcr_lock = threading.Lock()
+_ghcr_cache = {'latest': None, 'checked_at': 0.0, 'fetching': False,
+               'token': None}
+
+
+def _refresh_ghcr_latest(token):
+    """GHCR 최신 버전을 동기적으로 읽어 캐시를 채운다. 스레드 안에서만 쓴다."""
+    try:
+        latest = fetch_ghcr_latest(token)
+    except Exception as e:
+        latest = None
+        _log.debug(f'[GHCR] fetch exception: {e}')
+    with _ghcr_lock:
+        _ghcr_cache['fetching'] = False
+        if latest:
+            _ghcr_cache['latest'] = latest
+            _ghcr_cache['checked_at'] = time.time()
+            _ghcr_cache['token'] = token
+            _log.debug(f"[GHCR] fetched: {latest.get('version')} "
+                       f"{(latest.get('git_sha') or '')[:7]}")
+        else:
+            # 실패하면 다음 시도를 10분 뒤로 미룬다.
+            _ghcr_cache['checked_at'] = (
+                time.time() - GHCR_CHECK_TTL_SEC
+                + _GHCR_RETRY_AFTER_FAIL_SEC)
+            _log.debug('[GHCR] fetch failed (None)')
+
+
+def get_ghcr_latest(token):
+    """캐시된 GHCR 최신 버전을 돌려준다. 토큰이 없으면 None.
+    캐시가 오래됐거나 토큰이 바뀌었으면 백그라운드로 새로 읽어 온다.
+    이 함수는 네트워크를 기다리지 않는다."""
+    if not token:
+        return None
+    now = time.time()
+    with _ghcr_lock:
+        stale = ((now - _ghcr_cache['checked_at']) >= GHCR_CHECK_TTL_SEC
+                 or _ghcr_cache['token'] != token)
+        fetching = _ghcr_cache['fetching']
+        latest = _ghcr_cache['latest']
+        if stale and not fetching:
+            _ghcr_cache['fetching'] = True
+            need_fetch = True
+        else:
+            need_fetch = False
+    if need_fetch:
+        threading.Thread(target=_refresh_ghcr_latest, args=(token,),
+                         daemon=True).start()
+    return latest

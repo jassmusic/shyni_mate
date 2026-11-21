@@ -25,6 +25,9 @@ class ModuleBase(PluginModuleBase):
             f'{self.name}_shyni_admin_id' : '',
             f'{self.name}_shyni_admin_pw' : '',
             f'{self.name}_shyni_session_token' : '',
+            # GHCR 토큰 — 대시보드에 shyni 최신 버전을 표시할 때 쓴다.
+            # 비어 있으면 최신 버전 표시를 하지 않는다.
+            f'{self.name}_ghcr_token' : '',
             f'{self.name}_shyni_log_path' : '',
             f'{self.name}_shyni_data_path' : '',
             # 고급 설정 — PostgreSQL Relay (배포 기본값은 표준값을 넣고 비밀번호만 비워 둔다)

@@ -30,6 +30,8 @@
   {{ macros.setting_buttons([['shyni_admin_test_btn', '관리자 로그인 테스트']], left='관리자 로그인 테스트', desc=['입력하신 아이디와 비밀번호로 shyni 로그인이 되는지, 저장하시기 전에 미리 확인해 보실 수 있습니다.']) }}
   {{ macros.m_hr() }}
   {{ macros.setting_input_text_and_buttons('base_shyni_data_path', 'shyni 데이터 폴더', [['select_base_shyni_data_path_btn', '경로 선택']], value=arg['base_shyni_data_path'], desc=['대시보드의 shyni 서버 정보 카드에서 데이터 용량을 계산할 때 씁니다.', '경로는 이 플러그인이 실행되는 컨테이너 안에서 본 shyni data 폴더입니다.']) }}
+  {{ macros.m_hr() }}
+  {{ macros.setting_input_text('base_ghcr_token', 'shyni GHCR 토큰', value=arg['base_ghcr_token'], type='password', desc=['shyni 최신 버전을 확인할 때 쓰는 GHCR 토큰을 입력해 주세요.', '입력하면 대시보드의 shyni 서버 카드에 최신 버전이 표시됩니다.']) }}
 {{ macros.m_tab_content_end() }}
 
 {{ macros.m_tab_content_start('etc', false) }}
@@ -65,7 +67,7 @@ $("body").on('click', '#select_base_shyni_data_path_btn', function(e){
 
 $(document).ready(function(){
   // 토큰·비밀번호 칸 보기/숨기기
-  $('#base_shyni_token, #base_shyni_admin_pw').each(function(){
+  $('#base_shyni_token, #base_shyni_admin_pw, #base_ghcr_token').each(function(){
     var $input = $(this);
     var $btn = $('<button type="button" class="btn btn-sm btn-outline-secondary" style="margin-left:6px">보기</button>');
     $btn.on('click', function(){

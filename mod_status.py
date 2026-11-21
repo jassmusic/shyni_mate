@@ -11,6 +11,7 @@ import requests
 from .setup import *
 from .shyni_backend import ShyniBackend
 from .task_status import TaskStatus
+from .version_info import get_ghcr_latest
 
 name = 'status'
 logger = P.logger
@@ -67,15 +68,79 @@ class ModuleStatus(PluginModuleBase):
 
     # ---------- shyni 서버 정보 (헬스체크·용량) ----------
     @staticmethod
+    def _ghcr_latest_for(server_data):
+        """캐시된 GHCR 최신 버전을 서버 정보에 붙일 형태로 만든다.
+        토큰이 없거나 아직 조회 전이면 None. 네트워크를 기다리지 않는다.
+        대시보드는 저장된 복사본을 보여 주므로, 최신 버전 표시는
+        복사본을 만든 워커가 아니라 요청 때마다 웹에서 붙인다."""
+        if not server_data:
+            return None
+        try:
+            token = P.ModelSetting.get('base_ghcr_token')
+            latest = get_ghcr_latest(token) if token else None
+            logger.debug(f'[Status] GHCR token: '
+                         f'{"yes len=" + str(len(token)) if token else "no"}, '
+                         f'latest: {bool(latest)}')
+            if not latest:
+                return None
+            running_version = (server_data.get('version') or '').strip()
+            latest_version = (latest.get('version') or '').strip()
+            running_sha = (server_data.get('git_sha') or '').strip()
+            latest_sha = (latest.get('git_sha') or '').strip()
+            # 버전은 같아도 빌드(SHA)가 다를 수 있다 — SHA를 먼저 본다.
+            if running_sha and latest_sha:
+                if running_sha == latest_sha:
+                    status = 'latest'
+                elif running_version and running_version == latest_version:
+                    status = 'new_build'
+                else:
+                    status = 'new_version'
+            elif running_version and running_version == latest_version:
+                status = 'latest'
+            else:
+                status = 'new_version'
+            logger.debug(f'[Status] GHCR latest attached: '
+                         f'{latest_version} {status}')
+            return {
+                'version': latest_version,
+                'git_sha': latest_sha,
+                'build_date': (latest.get('build_date') or '').strip(),
+                'status': status,
+            }
+        except Exception as e:
+            logger.debug(f'[Status] GHCR latest failed: {e}')
+            return None
+
+    @staticmethod
+    def _server_with_latest(server_data):
+        """저장된 서버 정보 복사본에 최신 버전 표시를 붙여 돌려준다.
+        복사본 자체는 건드리지 않는다 (원본 캐시가 오염되지 않게)."""
+        if not server_data:
+            return None
+        server = dict(server_data)
+        latest_info = ModuleStatus._ghcr_latest_for(server)
+        if latest_info:
+            server['latest'] = latest_info
+        else:
+            server.pop('latest', None)
+        return server
+
+    @staticmethod
     def _health():
-        """GET /health/ready — 인증 없이 버전과 구성 요소 상태를 알려준다."""
+        """GET /health/ready — 인증 없이 버전과 구성 요소 상태를 알려준다.
+        GHCR 토큰이 있으면 최신 버전도 함께 붙인다 (캐시 사용, 페이지
+        렌더링을 기다리지 않는다)."""
         url, _ = ShyniBackend.get_config()
         if not url:
             return None
         try:
             res = requests.get(f'{url}/health/ready', timeout=5)
             if res.status_code == 200:
-                return res.json()
+                data = res.json()
+                latest_info = ModuleStatus._ghcr_latest_for(data)
+                if latest_info:
+                    data['latest'] = latest_info
+                return data
         except Exception:
             pass
         return None
@@ -1548,7 +1613,12 @@ class ModuleStatus(PluginModuleBase):
                             'health': health,
                             'from_cache': from_cache,
                             'cached_at': base.get('cached_at'),
-                            'server': base['server'],
+                            # 최신 버전 표시는 복사본이 아니라 그 자리에서 붙인다 —
+                            # 복사본은 워커가 최대 30분 전에 만든 것이라, 토큰을
+                            # 새로 넣었거나 새 빌드가 나와도 다음 재구축까지
+                            # 라벨이 안 뜨는 문제가 생긴다. GHCR 조회는 캐시를
+                            # 쓰고 네트워크를 기다리지 않아 웹을 멈추지 않는다.
+                            'server': self._server_with_latest(base['server']),
                             # 용량은 캐시가 아니라 그 자리에서 다시 읽는다 —
                             # 캐시(60분 TTL)에는 측정 중 표시가 안 남고 측정한
                             # 새 값도 안 들어 있어, 동그라미가 금방 멈추고

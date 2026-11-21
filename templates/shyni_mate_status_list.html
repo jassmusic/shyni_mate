@@ -218,6 +218,14 @@ function fmtBytes(n) {
   return (i == 0 ? v : v.toFixed(1)) + ' ' + units[i];
 }
 
+// 빌드 날짜를 '26.11/11 형식으로 짧게 만든다 (ISO 날짜·날짜 문자열 둘 다 받음)
+function fmtBuildDate(iso) {
+  if (!iso) return '-';
+  var d = String(iso).substring(0, 10);
+  if (d.length < 10) return d;
+  return "'" + d.substring(2, 4) + '.' + d.substring(5, 7) + '/' + d.substring(8, 10);
+}
+
 // 아이콘은 프레임워크 폰트(FA 4.7)에 없는 모양이 있어 SVG를 직접 심는다
 function smIcon(name, color, size) {
   var P = {
@@ -245,13 +253,48 @@ function renderServer(server, storage) {
     str += ' <span style="float:right; color:#c0392b; font-size:12px">응답 없음</span></div>';
     str += '<div style="font-size:12px; color:#888; flex:1; display:flex; flex-direction:column; justify-content:center">서버 상태를 확인하지 못했습니다. shyni가 실행 중인지, 기본 설정의 주소가 맞는지 확인해 주세요.</div>';
   } else {
+    // 최신 버전 라벨 — 제목 옆에 붙인다 (줄을 늘리지 않는다)
+    if (server.latest) {
+      if (server.latest.status == 'latest') str += '<span style="display:inline-block; font-size:11px; font-weight:normal; color:#276749; background:#c6f6d5; border-radius:10px; padding:1px 8px; margin-left:8px; vertical-align:2px">최신버전</span>';
+      else str += '<span style="display:inline-block; font-size:11px; font-weight:normal; color:#9c4221; background:#fed7aa; border-radius:10px; padding:1px 8px; margin-left:8px; vertical-align:2px">업데이트 필요</span>';
+    }
     var checks = server.checks || {};
     var bad = Object.keys(checks).filter(function (k) { return !checks[k] || checks[k].status != 'ok'; });
     var okAll = server.status == 'ready' && bad.length == 0;
     str += ' <span style="float:right; color:' + (okAll ? '#2f855a' : '#b7791f') + '; font-size:12px">' + (okAll ? '정상' : '확인 필요') + '</span></div>';
     str += '<div style="font-size:13px; line-height:1.9; flex:1; display:flex; flex-direction:column; justify-content:center">';
-    str += '<div>버전 <strong>' + (server.version || '-') + '</strong>' + (server.channel ? ' <span style="color:#888">(' + server.channel + ')</span>' : '') + '</div>';
-    if (server.build_date || server.git_sha) str += '<div>빌드 <strong>' + (server.build_date ? String(server.build_date).substring(0, 10) : '-') + '</strong>' + (server.git_sha ? ' <span style="color:#888">(<span style="font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px">' + String(server.git_sha).substring(0, 8) + '</span>)</span>' : '') + '</div>';
+    // 새 버전이 있으면 채널을 빼고 최신 버전을 이어 붙인다 (한 줄 안에 들게)
+    str += '<div>버전 <strong>' + (server.version || '-') + '</strong>' + ((server.latest && server.latest.status == 'new_version') ? '' : (server.channel ? ' <span style="color:#888">(' + server.channel + ')</span>' : ''));
+    if (server.latest && server.latest.status == 'new_version') str += ' <span style="color:#9c4221">→ <strong>' + (server.latest.version || '-') + '</strong></span>';
+    str += '</div>';
+    // 빌드 줄 — 날짜는 '26.11/11 형식으로 짧게 표시한다.
+    // 업데이트가 있으면 최신 날짜·SHA를 화살표로 이어 붙인다.
+    // 날짜가 같으면 날짜를 반복하지 않고 SHA만 화살표로 이어 붙인다.
+    if (server.build_date || server.git_sha) {
+      var runDate = fmtBuildDate(server.build_date);
+      var runSha = server.git_sha ? String(server.git_sha).substring(0, 7) : '';
+      var monoSpan = function (sha) { return '<span style="font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px">' + sha + '</span>'; };
+      var hasUpdate = server.latest && server.latest.status != 'latest' && server.latest.git_sha;
+      var latestSha = hasUpdate ? String(server.latest.git_sha).substring(0, 7) : '';
+      var latestDate = hasUpdate ? fmtBuildDate(server.latest.build_date) : '-';
+      var sameDate = hasUpdate && latestDate != '-' && latestDate == runDate;
+      var dateLine = '<div>빌드 <strong>' + runDate + '</strong>';
+      if (runSha) {
+        dateLine += ' <span style="color:#888">(' + monoSpan(runSha);
+        if (sameDate) dateLine += ' <span style="color:#9c4221">→ ' + monoSpan(latestSha) + '</span>';
+        dateLine += ')</span>';
+      }
+      if (hasUpdate && !sameDate) {
+        if (latestDate != '-') {
+          dateLine += ' <span style="color:#9c4221">→ <strong>' + latestDate + '</strong> <span style="color:#888">(' + monoSpan(latestSha) + ')</span></span>';
+        } else {
+          // 최신 날짜를 모르면 SHA만 화살표로
+          dateLine += ' <span style="color:#9c4221">→ <span style="color:#888">(' + monoSpan(latestSha) + ')</span></span>';
+        }
+      }
+      dateLine += '</div>';
+      str += dateLine;
+    }
     var compDefs = [['postgres', 'DB'], ['redis', '캐시'], ['meilisearch', '검색']];
     var chips = [];
     for (var ci = 0; ci < compDefs.length; ci++) {
