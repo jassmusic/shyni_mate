@@ -44,10 +44,12 @@
 <a class="sm-toc-item" href="#s1" data-section="s1">SHYNI SCAN</a>
 <a class="sm-toc-item" href="#s2" data-section="s2">동작 방식</a>
 <a class="sm-toc-item" href="#s3" data-section="s3">상태 의미</a>
-<a class="sm-toc-item" href="#s4" data-section="s4">rclone vfs/refresh 연동</a>
-<a class="sm-toc-item" href="#s5" data-section="s5">휴지통</a>
-<a class="sm-toc-item" href="#s6" data-section="s6">웹훅 (Discord 중계)</a>
-<a class="sm-toc-item" href="#s7" data-section="s7">설정</a>
+<a class="sm-toc-item" href="#s4" data-section="s4">완료와 라이브러리 등록</a>
+<a class="sm-toc-item" href="#s5" data-section="s5">리셋과 재시도</a>
+<a class="sm-toc-item" href="#s6" data-section="s6">rclone vfs/refresh 연동</a>
+<a class="sm-toc-item" href="#s7" data-section="s7">휴지통</a>
+<a class="sm-toc-item" href="#s8" data-section="s8">웹훅 (Discord 중계)</a>
+<a class="sm-toc-item" href="#s9" data-section="s9">설정</a>
 </div>
 <div class="sm-sidebar-foot">
 <button id="sm-show-all-btn" type="button">전체 보기</button>
@@ -129,6 +131,22 @@
 </ul>
 </section>
 <section class="sm-doc-section" id="s4">
+<h2>완료와 라이브러리 등록</h2>
+<p>스캔이 완료됐다고 해서 앨범이 라이브러리에 등록된 것은 아닙니다. shyni가 스캔 작업을 끝냈다고 답하면 메이트는 완료로 처리하지만, 등록은 별개입니다.</p>
+<p>스캔은 끝났는데 파일이 없거나 메타 추출이 안 돼서 등록이 안 될 수 있습니다. 이런 경우 완료 건수와 라이브러리 실제 앨범 수가 맞지 않습니다.</p>
+<p>메이트는 완료 처리할 때 경로로 앨범을 한 번 더 조회합니다. 못 찾으면 목록에 '메타 정보 없음'으로 표시합니다. 그래도 상태는 완료로 찍힙니다.</p>
+<p>빠진 앨범을 채우려면 주기적 스캔을 돌리면 됩니다. 주기적 스캔은 라이브러리 전체를 훑어서 디스크에 있는데 라이브러리에 없는 앨범을 찾아 등록합니다.</p>
+</section>
+<section class="sm-doc-section" id="s5">
+<h2>리셋과 재시도</h2>
+<p>실패한 항목을 다시 처리하려면 리셋하거나 재시도합니다.</p>
+<ul>
+<li><strong>리셋</strong>: 항목을 처음 받은 상태로 되돌립니다. 스캔 기록·VFS 완료 여부·메타 정보가 전부 지워지고, 파일체크부터 다시 시작합니다. Shyni 연동이 꺼져 있어도 리셋한 항목은 전송됩니다.</li>
+<li><strong>재시도</strong>: 항목을 READY 상태로 되돌립니다. 리셋보다 가볍고, 기존 기록은 유지됩니다.</li>
+</ul>
+<p>목록에서 항목을 골라 리셋·재시도를 실행할 수 있습니다. 실행 중인 항목은 건너뜁니다.</p>
+</section>
+<section class="sm-doc-section" id="s6">
 <h2>rclone vfs/refresh 연동</h2>
 <p>스캔 경로가 규칙에 매칭되면 rc addr에 호출하여 vfs/refresh를 수행합니다.</p>
 <ul>
@@ -137,7 +155,7 @@
 <li>rclone 플러그인이 설치되어 있어야 합니다 (rclone 실행 파일 경로를 그 설정에서 읽습니다).</li>
 </ul>
 </section>
-<section class="sm-doc-section" id="s5">
+<section class="sm-doc-section" id="s7">
 <h2>휴지통</h2>
 <p>shyni 스캔에서 찾지 못한 파일은 휴지통으로 표시됩니다 (shyni 데이터베이스 기준).</p>
 <ul>
@@ -152,7 +170,7 @@
 <li>주기적 스캔과 휴지통 스캔의 실행 이력은 30개 단위 목록으로 볼 수 있고, 오래된 이력은 각 설정에서 정한 삭제 기간(기본값 30일) 기준으로 지웁니다. 자동 삭제를 켜 두면 기간이 지난 이력이 자동으로 삭제됩니다.</li>
 </ul>
 </section>
-<section class="sm-doc-section" id="s6">
+<section class="sm-doc-section" id="s8">
 <h2>웹훅 (Discord 중계)</h2>
 <p>shyni 웹훅을 SHYNI MATE가 대신 받아 Discord로 보기 좋게 바꿔 보냅니다.</p>
 <ul>
@@ -161,7 +179,7 @@
 <li>재생 알림은 받을 이벤트(재생 · 일시정지 · 이어 재생 · 정지 · 재생 완료)를 골라 받을 수 있고, 라이브러리명 · 제목 · 앨범 · 재생 방식 · 재생 기기를 한 줄씩 표시합니다. 표지 이미지도 함께 표시됩니다.</li>
 </ul>
 </section>
-<section class="sm-doc-section" id="s7">
+<section class="sm-doc-section" id="s9">
 <h2>설정</h2>
 <ul>
 <li>기본 설정: shyni 주소 / shyni 토큰 (연결 테스트 버튼으로 라이브러리 조회 확인 가능). 기타 탭에는 라이브러리 동시 스캔 수(기본값 2)가 있습니다.</li>
