@@ -295,6 +295,28 @@ def api_trash_file_paths(library_id):
     return [it.get('file_path') or '' for it in items if it.get('file_path')]
 
 
+def api_trash_file_entries(library_id):
+    """휴지통 파일 목록 + 상태별 경과 (API). 실패하면 None.
+    [{'p': 경로, 's': 'missing'|'trashed', 'd': 경과일}]"""
+    from datetime import datetime, timezone
+    from . import db_support
+    items = api_trash_list(library_id)
+    if items is None:
+        return None
+    now = datetime.now(timezone.utc)
+    out = []
+    for it in items:
+        path = it.get('file_path') or ''
+        if not path:
+            continue
+        st = (it.get('status') or '').strip() or None
+        out.append({'p': path, 's': st,
+                    'd': db_support.trash_age_days(
+                        st, it.get('missing_since'), it.get('deleted_at'),
+                        now)})
+    return out
+
+
 def api_trash_counts(library_ids):
     """라이브러리별 휴지통 파일 수 {library_id: count} (API).
     한 라이브러리라도 실패하면 None (전체 실패로 보고 Relay 폴백)."""

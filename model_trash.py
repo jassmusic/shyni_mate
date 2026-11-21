@@ -20,6 +20,29 @@ def action_label(action):
         return None
 
 
+def _norm_file_entries(raw):
+    """파일 목록 JSON을 항목 dict 목록으로 푼다.
+    문자열(옛 형식, 경로만)은 경과 정보 없이, dict는
+    {'p': 경로, 's': 상태, 'd': 일수} 그대로 둔다.
+    파싱 실패·목록 아님은 None."""
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    out = []
+    for e in data:
+        if isinstance(e, dict):
+            out.append({'p': e.get('p') or e.get('path') or '',
+                        's': e.get('s'), 'd': e.get('d')})
+        elif isinstance(e, str):
+            out.append({'p': e, 's': None, 'd': None})
+    return out
+
+
 class ModelTrashItem(ModelBase):
     """휴지통 주기 작업 실행 이력."""
     P = P
@@ -57,7 +80,9 @@ class ModelTrashItem(ModelBase):
     append_count = db.Column(db.Integer)   # 추가 파일 전체 수(저장 상한을 넘으면 파일 수보다 크다)
     stat_folders = db.Column(db.Text)      # JSON 배열(job stats의 폴더별 results[])
     emptied_count = db.Column(db.Integer)  # 비우기 단계에서 비운 파일 수
-    emptied_files = db.Column(db.Text)     # JSON 배열(비우기 직전 휴지통 파일 경로, 최대 1,000개)
+    emptied_files = db.Column(db.Text)     # JSON 배열(실제로 비운 파일 항목, 최대 1,000개)
+    retained_count = db.Column(db.Integer)  # 비우기 단계에서 보관 기간이 남아 남은 파일 수
+    retained_files = db.Column(db.Text)    # JSON 배열(비운 뒤에도 남은 휴지통 파일 항목, 최대 1,000개)
     target_files = db.Column(db.Text)      # JSON 배열(실행 전 휴지통 파일 경로, 최대 1,000개)
     restored_files = db.Column(db.Text)    # JSON 배열(스캔으로 복원된 휴지통 파일 경로, 최대 1,000개)
     vfs_results = db.Column(db.Text)       # JSON 객체(폴더 경로 → {'ok': bool, 'error': str})
@@ -149,6 +174,7 @@ class ModelTrashItem(ModelBase):
             'append_count': r.append_count,
             'has_append': bool(r.append_files),
             'emptied_count': r.emptied_count,
+            'retained_count': r.retained_count,
             'has_target_files': bool(r.target_files),
         }
 
@@ -243,28 +269,28 @@ class ModelTrashItem(ModelBase):
                     groups = db_support.group_append_paths(files)
                 except Exception:
                     groups = []
-            # 비운 파일 목록 — 추가 파일과 같은 묶음 방식이다.
-            try:
-                e_files = json.loads(r.emptied_files) if r.emptied_files else None
-                if e_files is not None and not isinstance(e_files, list):
-                    e_files = None
-            except Exception:
-                e_files = None
+            # 비운 파일 목록 — 비우기 전/후 비교로 가려낸 실제 비운 파일.
+            # 옛 행은 비우기 전 목록(경로만)이 들어 있다.
+            e_files = _norm_file_entries(r.emptied_files)
             e_groups = []
             if e_files:
                 try:
                     from . import db_support
-                    e_groups = db_support.group_append_paths(e_files)
+                    e_groups = db_support.group_file_entries(e_files)
                 except Exception:
                     e_groups = []
+            # 보관 기간이 남아 남은 파일 목록 — 비운 뒤에도 휴지통에 남은 것.
+            rt_files = _norm_file_entries(r.retained_files)
+            rt_groups = []
+            if rt_files:
+                try:
+                    from . import db_support
+                    rt_groups = db_support.group_file_entries(rt_files)
+                except Exception:
+                    rt_groups = []
             # 대상 파일 목록 — 실행 전 휴지통 파일 경로. 폴더 묶음에
             # 폴더별 VFS 새로고침 결과를 붙인다.
-            try:
-                t_files = json.loads(r.target_files) if r.target_files else None
-                if t_files is not None and not isinstance(t_files, list):
-                    t_files = None
-            except Exception:
-                t_files = None
+            t_files = _norm_file_entries(r.target_files)
             try:
                 vfs_map = json.loads(r.vfs_results) if r.vfs_results else {}
                 if not isinstance(vfs_map, dict):
@@ -287,7 +313,7 @@ class ModelTrashItem(ModelBase):
             if t_files:
                 try:
                     from . import db_support
-                    t_groups = db_support.group_append_paths(t_files)
+                    t_groups = db_support.group_file_entries(t_files)
                     for grp in t_groups:
                         v = vfs_map.get(grp['folder'])
                         if isinstance(v, dict):
@@ -300,17 +326,12 @@ class ModelTrashItem(ModelBase):
                 except Exception:
                     t_groups = []
             # 복원된 파일 목록 — 스캔 전/후 목록 비교로 가려낸 것.
-            try:
-                r_files = json.loads(r.restored_files) if r.restored_files else None
-                if r_files is not None and not isinstance(r_files, list):
-                    r_files = None
-            except Exception:
-                r_files = None
+            r_files = _norm_file_entries(r.restored_files)
             r_groups = []
             if r_files:
                 try:
                     from . import db_support
-                    r_groups = db_support.group_append_paths(r_files)
+                    r_groups = db_support.group_file_entries(r_files)
                 except Exception:
                     r_groups = []
             out['stat_folders'] = folders
@@ -324,6 +345,11 @@ class ModelTrashItem(ModelBase):
             out['emptied_truncated'] = bool(
                 r.emptied_count is not None and e_files is not None
                 and len(e_files) < r.emptied_count)
+            out['retained_groups'] = rt_groups
+            out['retained_total'] = len(rt_files) if rt_files is not None else None
+            out['retained_truncated'] = bool(
+                r.retained_count is not None and rt_files is not None
+                and len(rt_files) < r.retained_count)
             out['target_groups'] = t_groups
             out['file_exists'] = exists_map
             out['target_total'] = len(t_files) if t_files is not None else None

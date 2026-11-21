@@ -410,6 +410,13 @@ function folderStatLine(f) {
   return esc(folder) + (bits.length ? ' — ' + bits.join(' · ') : '');
 }
 
+// 그룹 안 파일 항목 — 문자열(옛 형식)이면 이름만, 객체면 이름과
+// 경과 라벨('missing 3일'·'trashed 2일')을 함께 돌려준다.
+function fileName(f) {
+  if (f && typeof f === 'object') return {name: f.name || '', label: f.label || ''};
+  return {name: f || '', label: ''};
+}
+
 function renderDetail(d) {
   var str = '<div style="font-size:13px; line-height:1.8">';
   // 상세 첫 줄 — 목록에서 줄인 초 단위 시각·전체 작업명을 보완한다.
@@ -445,6 +452,8 @@ function renderDetail(d) {
   str += '<div><strong>소요</strong> — ' + steps.join(' · ') + '</div>';
   // 비운 개수
   if (d.emptied_count != null) str += '<div><strong>비운 개수</strong> — ' + d.emptied_count + '개</div>';
+  // 보관 기간이 남아 남은 개수 — 비우기 단계가 없었던 행·옛 행에는 없다.
+  if (d.retained_count != null && d.retained_count) str += '<div><strong>보관 기간 남음</strong> — ' + d.retained_count + '개</div>';
   // 작업 단위 행(대기 행·시작 실패 행)은 라이브러리별 결과가 없다 —
   // 집계·폴더·추가 파일 대신 위 행을 보라는 안내만 보여준다.
   // (목록은 최신순이라 라이브러리별 행이 작업 단위 행보다 위에 있다.)
@@ -528,9 +537,11 @@ function renderDetail(d) {
         if (grp.scan_ok === false && grp.scan_error) str += '<div style="color:#888; font-size:12px; padding-left:14px">' + esc(grp.scan_error) + '</div>';
         str += '<div class="target-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
         for (var f = 0; f < grp.files.length; f++) {
-          var fp = grp.folder + '/' + grp.files[f];
+          var tf = fileName(grp.files[f]);
+          var fp = grp.folder + '/' + tf.name;
           var fe = d.file_exists ? d.file_exists[fp] : undefined;
-          str += '<div>' + esc(grp.files[f]);
+          str += '<div>' + esc(tf.name);
+          if (tf.label) str += ' <span style="color:#888">· ' + esc(tf.label) + '</span>';
           if (fe === true) str += ' <span style="color:#2f855a">· 파일 있음</span>';
           else if (fe === false) str += ' <span style="color:#888">· 파일 없음</span>';
           str += '</div>';
@@ -556,7 +567,10 @@ function renderDetail(d) {
         str += '<li><a href="#" class="restored-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
         str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
         str += '<div class="restored-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
-        for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
+        for (var f = 0; f < grp.files.length; f++) {
+          var rf = fileName(grp.files[f]);
+          str += '<div>' + esc(rf.name) + (rf.label ? ' <span style="color:#888">· ' + esc(rf.label) + '</span>' : '') + '</div>';
+        }
         str += '</div></li>';
       }
       str += '</ul>';
@@ -582,7 +596,37 @@ function renderDetail(d) {
         str += '<li><a href="#" class="emptied-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
         str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
         str += '<div class="emptied-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
-        for (var f = 0; f < grp.files.length; f++) str += '<div>' + esc(grp.files[f]) + '</div>';
+        for (var f = 0; f < grp.files.length; f++) {
+          var ef = fileName(grp.files[f]);
+          str += '<div>' + esc(ef.name) + (ef.label ? ' <span style="color:#888">· ' + esc(ef.label) + '</span>' : '') + '</div>';
+        }
+        str += '</div></li>';
+      }
+      str += '</ul>';
+    }
+    str += '</div>';
+  }
+  // 보관 기간이 남아 남은 파일 — 비운 뒤에도 휴지통에 남은 것.
+  // 비우기 단계가 없었던 행·옛 행에는 보관 개수가 없어 표시하지 않는다.
+  if (d.retained_count != null) {
+    str += '<div style="margin-top:6px"><strong>보관 기간이 남아 남은 파일</strong> ';
+    if (d.retained_total == null) {
+      str += '<span style="color:#888">Relay가 꺼져 있으면 파일 목록을 볼 수 없습니다.</span>';
+    } else if (!d.retained_total) {
+      str += '<span style="color:#888">없습니다.</span>';
+    } else {
+      str += '<span style="color:#888">전체 ' + d.retained_count + '개' + (d.retained_truncated ? ' (외 ' + (d.retained_count - d.retained_total) + '개 더 있음)' : '') + '</span>';
+      var ngroups = d.retained_groups || [];
+      str += '<ul style="margin:2px 0; padding-left:18px">';
+      for (var g = 0; g < ngroups.length; g++) {
+        var grp = ngroups[g];
+        str += '<li><a href="#" class="retained-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
+        str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';
+        str += '<div class="retained-group-files" data-gidx="' + g + '" data-id="' + d.id + '" style="display:none; padding-left:14px; color:#555">';
+        for (var f = 0; f < grp.files.length; f++) {
+          var nf = fileName(grp.files[f]);
+          str += '<div>' + esc(nf.name) + (nf.label ? ' <span style="color:#888">· ' + esc(nf.label) + '</span>' : '') + '</div>';
+        }
         str += '</div></li>';
       }
       str += '</ul>';
@@ -740,6 +784,13 @@ $(document).ready(function () {
     var gidx = $(this).data('gidx');
     var id = $(this).data('id');
     $('.restored-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
+  });
+  $(document).off('click', '.retained-group-toggle').on('click', '.retained-group-toggle', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var gidx = $(this).data('gidx');
+    var id = $(this).data('id');
+    $('.retained-group-files[data-gidx="' + gidx + '"][data-id="' + id + '"]').toggle();
   });
 
   // 누락이 있으면 휴지통으로 — 대시보드 '휴지통 상세'와 같은 이동 방식이다.

@@ -73,6 +73,33 @@ def _trash_file_paths(key):
         logger.warning(f'[휴지통 스캔] 휴지통 목록 Relay 읽기 실패: {e}')
     return None
 
+
+def _trash_file_entries(key):
+    """휴지통 파일 목록 + 상태별 경과 — 관리자 API 우선, Relay 폴백.
+    [{'p': 경로, 's': 'missing'|'trashed', 'd': 경과일}].
+    둘 다 안 되면 None. 항목 형식을 못 읽으면 경로만 읽어
+    상태·일수 없이 돌려준다 (옛 shyni 대비)."""
+    try:
+        from . import shyni_admin
+        entries = shyni_admin.api_trash_file_entries(key)
+        if entries is not None:
+            return entries
+    except Exception as e:
+        logger.warning(f'[휴지통 스캔] 휴지통 목록 API 읽기 실패: {e}')
+    try:
+        from . import db_support
+        if db_support.db_ready():
+            return db_support.trash_file_entries(key)
+    except Exception as e:
+        logger.warning(f'[휴지통 스캔] 휴지통 목록 Relay 읽기 실패: {e}')
+    try:
+        paths = _trash_file_paths(key)
+        if paths is not None:
+            return [{'p': p, 's': None, 'd': None} for p in paths]
+    except Exception:
+        pass
+    return None
+
 ACTION_LABEL = {
     'refresh': '새로고침',
     'scan': '스캔',
@@ -120,11 +147,13 @@ def _sum_scan_stats(stats_list):
 
 def _trash_done_message(action, target_count, restored, emptied_count,
                         vfs_failed, scan_failed, empty_skipped,
-                        folder_count, remaining):
+                        folder_count, remaining, retained=None):
     """완료 메시지 조립 — 순수 함수(하니스 검증용).
     숫자는 전부 파일 수. restored가 None이면 복원 여부를 확인하지
     못한 것이고, emptied_count가 None이면 비운 개수를 job stats에서
-    읽지 못한 것이다 (그 경우 remaining으로 대체한다)."""
+    읽지 못한 것이다 (그 경우 remaining으로 대체한다).
+    retained(보관 기간이 남아 남은 수)가 있으면 선택 비우기와 같은
+    문구('N개는 보관 기간이 남아 남음')를 함께 붙인다."""
     bits = []
     if action == 'refresh':
         bits.append(f'휴지통 파일 {target_count}개 새로고침')
@@ -148,6 +177,8 @@ def _trash_done_message(action, target_count, restored, emptied_count,
                            else remaining)
                 if emptied is not None:
                     bits.append(f'{emptied}개 비움')
+                if retained:
+                    bits.append(f'{retained}개는 보관 기간이 남아 남음')
         if vfs_failed:
             bits.append(f'VFS {vfs_failed}개 폴더 실패')
         if scan_failed:
@@ -157,6 +188,8 @@ def _trash_done_message(action, target_count, restored, emptied_count,
                    else target_count)
         if emptied is not None:
             bits.append(f'휴지통 파일 {emptied}개 비움')
+        if retained:
+            bits.append(f'{retained}개는 보관 기간이 남아 남음')
     if not bits:
         return '작업 완료'
     return '작업 완료 (' + ' · '.join(bits) + ')'
@@ -1136,10 +1169,15 @@ class TaskTrash:
             scan_job_ids = []
             scan_stats_list = []
             emptied_count = None
-            emptied_files = None
+            retained_count = None
+            emptied_entries = None
+            retained_entries = None
+            pre_entries = None
             # 휴지통 항목 대상 수행 — 실행 전에 목록을 읽어 둔다.
             # target_files가 None이면 목록을 모른다는 뜻이다.
+            # target_entries는 상태·경과를 함께 가진 목록(이력 표시용).
             target_files = None
+            target_entries = None
             target_groups = []
             restored_files = None
             restored_count = None
@@ -1160,13 +1198,16 @@ class TaskTrash:
                 from . import db_support
                 list_error = None
                 try:
-                    target_files = _trash_file_paths(key)
-                    if target_files is None:
+                    target_entries = _trash_file_entries(key)
+                    if target_entries is None:
                         list_error = 'read_failed'
+                    else:
+                        target_files = [e['p'] for e in target_entries]
                 except Exception as e:
                     logger.warning(f'[휴지통 스캔] 휴지통 목록 읽기 실패: {e}')
                     list_error = 'read_failed'
                     target_files = None
+                    target_entries = None
                 if target_files is None:
                     if len(steps) == 1 and steps[0] == 'empty':
                         pass
@@ -1373,12 +1414,12 @@ class TaskTrash:
                             # 스캔 단계가 있었다면 스캔이 끝난 뒤라, 스캔에서
                             # 복원된 파일은 빠지고 여전히 없는 것만 남는다.
                             try:
-                                emptied_files = _trash_file_paths(key)
-                                if emptied_files is None:
+                                pre_entries = _trash_file_entries(key)
+                                if pre_entries is None:
                                     logger.info('[휴지통 스캔] 휴지통 목록을 읽지 못해 비운 파일 목록을 저장하지 않습니다.')
                             except Exception as e:
                                 logger.warning(f'[휴지통 스캔] 비우기 전 휴지통 목록 읽기 실패: {e}')
-                                emptied_files = None
+                                pre_entries = None
                             empty_started = _now_text()
                             _write_status(key, 'trash', {
                                 'job': None, 'mode': action,
@@ -1437,19 +1478,52 @@ class TaskTrash:
                                     break
                                 estat = (w.get('job') or {}).get('stats') or {}
                                 emptied_count = _stat_int(estat.get('removed_parts'))
+                                retained_count = _stat_int(estat.get('retained_parts'))
+                                # 실제로 비운 파일은 비우기 전/후 목록 비교로
+                                # 가린다 — 비우기 전 목록을 그대로 '비운 파일'로
+                                # 두면 보관 기간이 남아 남은 파일까지 비운 것으로
+                                # 보인다 (2026-11-20 '방송중' 건: 비움 0개인데
+                                # 목록 2개). 비운 뒤 목록이 곧 남은 파일이다.
+                                try:
+                                    post_entries = _trash_file_entries(key)
+                                except Exception as e:
+                                    logger.warning(f'[휴지통 스캔] 비우기 후 휴지통 목록 읽기 실패: {e}')
+                                    post_entries = None
+                                if pre_entries is not None and post_entries is not None:
+                                    post_paths = {e['p'] for e in post_entries}
+                                    emptied_entries = [e for e in pre_entries
+                                                       if e['p'] not in post_paths]
+                                    retained_entries = post_entries
+                                    if emptied_count is None:
+                                        emptied_count = len(emptied_entries)
+                                    if retained_count is None:
+                                        retained_count = len(retained_entries)
+                                elif pre_entries is not None:
+                                    # 비운 뒤 목록을 못 읽으면 비우기 전 목록을
+                                    # 그대로 둔다 (옛 동작).
+                                    emptied_entries = pre_entries
+                                    retained_entries = None
+                                else:
+                                    emptied_entries = None
+                                    retained_entries = None
                             trash_entry = {
                                 'job': empty_job_id, 'mode': action,
                                 'started_at': empty_started, 'finished_at': _now_text(),
                                 'status': 'done', 'source': 'trash',
                                 'job_name': name}
                             if emptied_count is not None:
-                                trash_entry['summary'] = f'{emptied_count}개 비움'
+                                summary = f'{emptied_count}개 비움'
+                                if retained_count:
+                                    summary += f' · 보관 기간 남음 {retained_count}개'
+                                trash_entry['summary'] = summary
                             _write_status(key, 'trash', trash_entry, label='휴지통 스캔')
-                            # 비우기에 성공했으니 이 라이브러리 휴지통은 0개 —
-                            # 개수 캐시에 바로 반영한다.
+                            # 비우기에 성공했으니 휴지통은 보관 기간이 남아
+                            # 남은 수만큼 — 개수 캐시에 바로 반영한다
+                            # (남은 게 없으면 0개, 수를 모르면 옛 동작대로 0개).
                             try:
                                 from .task_status import set_trash_count
-                                set_trash_count(key, 0)
+                                set_trash_count(key, retained_count
+                                                if retained_count is not None else 0)
                             except Exception as e:
                                 logger.warning(f'[휴지통 스캔] 휴지통 개수 캐시 반영 실패: {e}')
                             # 휴지통 개수가 바뀌므로 현황·건강도 개수 캐시를 새로 읽어 둔다
@@ -1506,10 +1580,17 @@ class TaskTrash:
                 if target_count is not None:
                     item.stat_total = target_count
             item.emptied_count = emptied_count
-            if emptied_files is not None:
-                item.emptied_files = json.dumps(emptied_files[:TRASH_FILES_MAX],
+            item.retained_count = retained_count
+            if emptied_entries is not None:
+                item.emptied_files = json.dumps(emptied_entries[:TRASH_FILES_MAX],
                                                 ensure_ascii=False)
-            if target_files is not None:
+            if retained_entries is not None:
+                item.retained_files = json.dumps(retained_entries[:TRASH_FILES_MAX],
+                                                 ensure_ascii=False)
+            if target_entries is not None:
+                item.target_files = json.dumps(target_entries[:TRASH_FILES_MAX],
+                                               ensure_ascii=False)
+            elif target_files is not None:
                 item.target_files = json.dumps(target_files[:TRASH_FILES_MAX],
                                                ensure_ascii=False)
             if restored_files is not None:
@@ -1525,7 +1606,7 @@ class TaskTrash:
                 done_msg = _trash_done_message(
                     action, target_count, eff_restored, emptied_count,
                     vfs_failed_folders, scan_failed_folders, empty_skipped,
-                    len(target_groups), eff_remaining)
+                    len(target_groups), eff_remaining, retained_count)
                 message = done_msg
                 item.finish('done', done_msg)
             else:

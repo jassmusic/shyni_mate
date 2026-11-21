@@ -819,6 +819,90 @@ def trash_file_paths(library_id):
         conn.close()
 
 
+def _parse_dt(value):
+    """ISO 시각 문자열을 datetime으로 바꾼다. 실패하면 None."""
+    from datetime import datetime
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        text = str(value).strip()
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def trash_age_days(status, missing_since, deleted_at, now=None):
+    """휴지통 파일의 상태별 경과일 — 순수 함수(하니스 검증용).
+    missing은 missing_since(없으면 deleted_at), trashed는 deleted_at 기준.
+    보관 기간 판정이 deleted_at 기준이라 trashed도 deleted_at으로 센다.
+    시각이 없거나 못 읽으면 None. naive 시각은 UTC로 본다
+    (trash_groups·trash_compute_via_api와 같은 기준)."""
+    from datetime import datetime, timezone
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if status == 'missing':
+        dt = missing_since or deleted_at
+    elif status == 'trashed':
+        dt = deleted_at
+    else:
+        dt = deleted_at or missing_since
+    dt = _parse_dt(dt)
+    if dt is None:
+        return None
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        days = (now - dt).days
+        return days if days >= 0 else 0
+    except Exception:
+        return None
+
+
+def trash_age_label(status, days):
+    """상태별 경과 표시 — 'missing 3일'·'trashed 2일'.
+    일수를 모르면 상태만, 상태도 모르면 빈 문자열."""
+    if not status:
+        return ''
+    if days is None:
+        return str(status)
+    try:
+        return f'{status} {int(days)}일'
+    except Exception:
+        return str(status)
+
+
+def trash_file_entries(library_id):
+    """휴지통 파일 목록 + 상태별 경과 (Relay).
+    [{'p': 경로, 's': 'missing'|'trashed', 'd': 경과일}] — 오래 들어간 것부터.
+    trash_file_paths와 같은 범위(deleted_at NOT NULL).
+    DB를 못 읽으면 예외를 던진다."""
+    from datetime import datetime, timezone
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT file_path, status, missing_since, deleted_at
+            FROM media_parts
+            WHERE library_id=%s AND deleted_at IS NOT NULL
+            ORDER BY deleted_at NULLS LAST, file_path
+        """, (int(library_id),))
+        now = datetime.now(timezone.utc)
+        out = []
+        for r in cur.fetchall():
+            if not r[0]:
+                continue
+            st = (r[1] or '').strip() or None
+            out.append({'p': r[0], 's': st,
+                        'd': trash_age_days(st, r[2], r[3], now)})
+        return out
+    finally:
+        conn.close()
+
+
 def _trash_root(item_id, items, main_type):
     """항목에서 작품(main) 단위까지 올라간다. 못 찾으면 자기 자신을 돌려준다."""
     cur = items.get(item_id)
@@ -1214,6 +1298,37 @@ def group_append_paths(paths):
     out = []
     for folder in sorted(groups):
         files = sorted(groups[folder])
+        out.append({'folder': folder,
+                    'name': os.path.basename(folder) or folder,
+                    'count': len(files), 'files': files})
+    return out
+
+
+def group_file_entries(entries):
+    """파일 항목을 폴더 단위로 묶는다 — group_append_paths와 같은 묶음에
+    파일별 경과 라벨을 함께 싣는다.
+    항목은 문자열(옛 형식, 라벨 없음) 또는 {'p': 경로, 's': 상태, 'd': 일수}.
+    반환: [{'folder': 폴더 전체 경로, 'name': 폴더 이름,
+            'count': 파일 수,
+            'files': [{'name': 파일 이름, 'label': 'missing 3일'...}]}]
+    (폴더 이름순, 파일 이름순) — 순수 함수(하니스 검증용)."""
+    import os
+    groups = {}
+    for e in entries or []:
+        if isinstance(e, dict):
+            p = e.get('p') or e.get('path') or ''
+            label = trash_age_label(e.get('s'), e.get('d'))
+        else:
+            p = e or ''
+            label = ''
+        if not p:
+            continue
+        folder = p.rsplit('/', 1)[0] if '/' in p else ''
+        groups.setdefault(folder, []).append(
+            {'name': os.path.basename(p) or p, 'label': label})
+    out = []
+    for folder in sorted(groups):
+        files = sorted(groups[folder], key=lambda f: f['name'])
         out.append({'folder': folder,
                     'name': os.path.basename(folder) or folder,
                     'count': len(files), 'files': files})

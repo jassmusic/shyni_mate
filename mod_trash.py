@@ -128,6 +128,8 @@ class ModuleTrash(PluginModuleBase):
                         ('append_files', 'TEXT'), ('append_count', 'INTEGER'),
                         ('stat_folders', 'TEXT'), ('emptied_count', 'INTEGER'),
                         ('emptied_files', 'TEXT'),
+                        ('retained_count', 'INTEGER'),
+                        ('retained_files', 'TEXT'),
                         ('target_files', 'TEXT'), ('restored_files', 'TEXT'),
                         ('vfs_results', 'TEXT'),
                         ('scan_results', 'TEXT'),
