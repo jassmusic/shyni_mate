@@ -52,6 +52,7 @@ class ModelPeriodicItem(ModelBase):
     stat_registered = db.Column(db.Integer)
     stat_failed = db.Column(db.Integer)
     vfs_duration = db.Column(db.Integer)   # 초 (VFS 새로고침 단계 소요)
+    vfs_job_id = db.Column(db.String)      # rclone 새로고침 job id (이력 상세에 표시)
     scan_duration = db.Column(db.Integer)  # 초 (스캔 단계 소요)
     append_files = db.Column(db.Text)      # JSON 배열(추가 파일 경로, 최대 1,000개)
     append_count = db.Column(db.Integer)   # 추가 파일 전체 수(저장 상한을 넘으면 파일 수보다 크다)
@@ -147,6 +148,7 @@ class ModelPeriodicItem(ModelBase):
             'stat_registered': r.stat_registered,
             'stat_failed': r.stat_failed,
             'vfs_duration': r.vfs_duration,
+            'vfs_job_id': r.vfs_job_id,
             'scan_duration': r.scan_duration,
             'append_count': r.append_count,
             'has_append': bool(r.append_files),

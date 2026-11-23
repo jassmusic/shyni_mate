@@ -64,7 +64,8 @@ class ModulePeriodic(PluginModuleBase):
                         ('stat_new', 'INTEGER'), ('stat_missing', 'INTEGER'),
                         ('stat_updated', 'INTEGER'), ('stat_restored', 'INTEGER'),
                         ('stat_registered', 'INTEGER'), ('stat_failed', 'INTEGER'),
-                        ('vfs_duration', 'INTEGER'), ('scan_duration', 'INTEGER'),
+                        ('vfs_duration', 'INTEGER'), ('vfs_job_id', 'VARCHAR'),
+                        ('scan_duration', 'INTEGER'),
                         ('append_files', 'TEXT'), ('append_count', 'INTEGER'),
                         ('stat_folders', 'TEXT'), ('wait_seconds', 'INTEGER'),
                     ]

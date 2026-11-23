@@ -938,6 +938,27 @@ def _clear_cancel(claim_id):
                        json.dumps(ids, ensure_ascii=False) if ids else '')
 
 
+def _vfs_resume_decision(job):
+    """VFS 복구 판정 — rclone job/status 조회 결과 → 갈래와 사유.
+    순수 함수(하니스 검증용).
+    - finished=false → 'poll': 아직 돌고 있으니 그 job을 이어서 기다린다.
+    - finished=true, error 없음 → 'done': 끝났으니 완료로 기록하고 스캔으로 간다.
+    - finished=true, error 있음 → 'restart': 새로고침이 실패했으니 처음부터 다시 건다.
+    - 'not_found' → 'restart': 끝난 뒤 기록이 만료됐을 수 있고, 따뜻한
+      캐시에서 다시 걸면 금방 끝나니(0.1초 실측) 처음부터 다시 건다.
+    - 그 외(조회 실패) → 'restart': 다시 걸면 돌고 있는 작업을 빌려 타거나
+      따뜻한 캐시를 걷으니 안전하다."""
+    if job == 'not_found':
+        return 'restart', 'VFS 새로고침 작업 기록이 없어 처음부터 다시 새로고침합니다.'
+    if not isinstance(job, dict):
+        return 'restart', 'VFS 새로고침 작업 확인에 실패해 처음부터 다시 새로고침합니다.'
+    if not job.get('finished'):
+        return 'poll', 'VFS 새로고침이 아직 진행 중이라 이어서 기다립니다.'
+    if job.get('error'):
+        return 'restart', f"VFS 새로고침이 실패했습니다: {job['error']}"
+    return 'done', 'VFS 새로고침이 완료됐습니다.'
+
+
 class TaskPeriodic:
     """주기적 스캔 실행 — 선택한 섹션을 하나씩 순차로 처리한다.
 
@@ -1165,6 +1186,10 @@ class TaskPeriodic:
                         'started_at': vfs_started, 'finished_at': None,
                         'status': 'running', 'source': 'periodic',
                         'job_name': job_name})
+                    # rclone 작업 번호를 이력 행에도 남긴다 — 이력 상세에서
+                    # 새로고침 job id를 볼 수 있다.
+                    item.vfs_job_id = str(vfs_jobid)
+                    item.save()
 
                 vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job)
                 vfs_duration = vres['duration']
@@ -1312,9 +1337,38 @@ class TaskPeriodic:
             except Exception:
                 pass
         deadline = time.time() + _vfs_timeout_sec()
+        return TaskPeriodic._poll_vfs_job(addr, jobid, t0, deadline,
+                                          claim_id=cur.get('claim_id'),
+                                          title=sec.get('title') or '')
+
+    @staticmethod
+    def _query_vfs_job(addr, jobid):
+        """rclone VFS 새로고침 job 한 번 조회 — 결과 dict를 돌려주고,
+        기록이 없으면 'not_found', 그 외 조회 실패면 None을 돌려준다."""
+        try:
+            return ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
+        except requests.HTTPError as e:
+            body = ''
+            try:
+                body = e.response.text if e.response is not None else ''
+            except Exception:
+                body = ''
+            if 'not found' in body:
+                return 'not_found'
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _poll_vfs_job(addr, jobid, t0, deadline, claim_id=None, title=''):
+        """실행 중인 rclone VFS 새로고침 job이 끝날 때까지 기다린다.
+        _do_vfs(새로 건 경우)와 VFS 단계 복구(이미 돌고 있는 경우)가 함께 쓴다.
+        {'status': done|failed|cancelled, 'message', 'duration': 초,
+         'jobid': rclone job id}를 돌려준다. 폴링 중 일시적 오류는
+        재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7)."""
         fail_count = 0
         while time.time() < deadline:
-            if _cancel_requested(cur.get('claim_id')):
+            if _cancel_requested(claim_id):
                 try:
                     ModuleStatus._rc(addr, 'job/stop', {'jobid': jobid})
                 except Exception as e:
@@ -1354,7 +1408,7 @@ class TaskPeriodic:
                     return {'status': 'failed',
                             'message': f"VFS 새로고침 실패: {job['error']}",
                             'duration': int(time.time() - t0), 'jobid': jobid}
-                logger.info(f"주기적 스캔: {sec.get('title')} VFS 새로고침 완료 (job {jobid})")
+                logger.info(f"주기적 스캔: {title} VFS 새로고침 완료 (job {jobid})")
                 return {'status': 'done', 'message': 'VFS 새로고침이 완료됐습니다.',
                         'duration': int(time.time() - t0), 'jobid': jobid}
             time.sleep(VFS_POLL_SEC)
@@ -1534,7 +1588,8 @@ class TaskPeriodic:
 
     @F.celery.task
     def resume(item_id):
-        """재시작 복구 — 스캔 중이던 이력의 완료 확인을 이어서 한다."""
+        """재시작 복구 — 스캔 중이던 이력은 완료 확인을 이어서 하고,
+        VFS 단계에서 멈춘 이력은 새로고침부터 이어서 한다 (0.9.9g)."""
         with F.app.app_context():
             try:
                 TaskPeriodic._resume(item_id)
@@ -1561,8 +1616,8 @@ class TaskPeriodic:
         job_id = item.shyni_job_id
         key = item.section_key
         if not job_id:
-            item.finish('failed', '스캔 작업 번호가 없어 복구할 수 없습니다.')
-            _clear_resume_current(item_id)
+            # VFS 단계에서 멈춘 이력 — 0.9.9g부터 VFS 새로고침도 복구한다.
+            TaskPeriodic._resume_vfs(item, key)
             return
         pre_max_id = None
         for cur in get_currents():
@@ -1665,12 +1720,291 @@ class TaskPeriodic:
         _clear_resume_current(item_id)
 
     @staticmethod
-    def resume_running(start_celery):
-        """플러그인 로드 시 스캔 중이던 이력을 찾아 완료 확인을 이어서 한다.
+    def _resume_vfs(item, key):
+        """VFS 단계 복구 — 새로고침 job id로 rclone을 조회해 갈래를 정한다.
+        1) job id 없음 → 처음부터 다시 새로고침
+        2) job id 있음 → 조회
+           2-1) 기록 없음 → 처음부터 다시 새로고침
+                (따뜻한 캐시에서 다시 걸면 금방 끝나니까 상관없다)
+           2-2) finished=false → 그 job을 이어서 기다린다
+           2-3) finished=true → 확인한 시점에 완료된 걸로 기록하고 스캔으로 간다
+           (finished=true + error → 새로고침 실패라 처음부터 다시 새로고침)
+        새로고침이 끝나면 스캔을 전송하고 완료까지 기다린다 (새로고침만
+        동작이면 스캔 없이 끝낸다). 스캔을 보내지 않는 동작이면
+        새로고침 단계를 건너뛰고 바로 스캔으로 간다."""
+        item_id = item.id
+        claim_id = f'resume-{item_id}'
+        job_name = item.job_name or ''
+        kind, use_vfs = periodic_action_to_kind_use_vfs(item.action)
+        vfs_only = kind == 'vfs'
+        # 진행 상태가 복구용으로 남아 있는지 확인하고, 없으면 만든다.
+        cur = None
+        for c in get_currents():
+            if str(c.get('resume_item_id')) == str(item_id):
+                cur = c
+                break
+        if cur is None:
+            cur = {
+                'job_name': job_name,
+                'section_key': str(key),
+                'section_title': item.section_title or '',
+                'stage': 'vfs' if use_vfs else 'scan',
+                'mode': item.mode or '',
+                'job_started_at': (item.start_time.strftime('%Y-%m-%d %H:%M:%S')
+                                   if item.start_time else ''),
+                'section_started_at': (item.start_time.strftime('%Y-%m-%d %H:%M:%S')
+                                       if item.start_time else ''),
+                'resume_item_id': item_id,
+                'claim_id': claim_id,
+                'action': item.action,
+            }
+            _upsert_current(cur)
+        # 라이브러리가 아직 있는지 확인한다 — 없으면 복구할 수 없다.
+        sections, err = ModuleStatus._sections()
+        if err:
+            item.finish('failed', f'라이브러리 목록 조회 실패: {err}')
+            _clear_resume_current(item_id)
+            return
+        sec_map = {str(s['key']): s for s in (sections or [])}
+        sec = sec_map.get(str(key))
+        if sec is None:
+            item.finish('failed', '선택한 라이브러리를 shyni에서 찾지 못했습니다. '
+                                  '라이브러리가 삭제됐거나 이름이 바뀌었는지 확인해 주세요.')
+            _clear_resume_current(item_id)
+            return
+        title = sec.get('title') or item.section_title or ''
+        vfs_duration = None
+        scan_duration = None
+        try:
+            if use_vfs:
+                # 현황 슬롯에서 VFS job id와 시작 시각을 읽는다 — 재시작
+                # 후에도 슬롯에 남아 있다 (대시보드 정리도 job id는 지우지 않는다).
+                try:
+                    st = ModuleStatus._get_state(int(key))
+                    vfs_slot = st.get('vfs') or {}
+                except Exception:
+                    vfs_slot = {}
+                jobid = vfs_slot.get('job')
+                vfs_started = vfs_slot.get('started_at')
+                addr, _remote = ModuleStatus._rc_target(sec.get('path', ''))
+                branch = 'restart'
+                branch_msg = 'VFS 새로고침 작업 번호가 없어 처음부터 다시 새로고침합니다.'
+                if jobid is not None and addr:
+                    branch, branch_msg = _vfs_resume_decision(
+                        TaskPeriodic._query_vfs_job(addr, jobid))
+                logger.info(f'[주기적 스캔 복구] {title} VFS 판정: {branch} — {branch_msg}')
+                if branch == 'done':
+                    # 확인한 시점에 완료된 걸로 기록하고 스캔으로 간다.
+                    vfs_duration = ModuleStatus._slot_seconds(vfs_started, _now_text())
+                    _write_status(key, 'vfs', {
+                        'job': jobid, 'path': sec.get('path', ''),
+                        'started_at': vfs_started, 'finished_at': _now_text(),
+                        'status': 'done', 'source': 'periodic',
+                        'job_name': job_name})
+                    item.vfs_job_id = str(jobid)
+                    item.vfs_duration = vfs_duration
+                    item.save()
+                elif branch == 'poll':
+                    # 기한은 원래 시작한 시각 기준으로 잰다 — 복구할 때마다
+                    # 새로 주면 제한이 의미가 없어진다.
+                    try:
+                        started_ts = datetime.strptime(
+                            vfs_started or '', '%Y-%m-%d %H:%M:%S').timestamp()
+                    except Exception:
+                        started_ts = None
+                    if started_ts:
+                        deadline = started_ts + _vfs_timeout_sec()
+                    else:
+                        deadline = time.time() + _vfs_timeout_sec()
+                    cur['vfs_job'] = jobid
+                    _upsert_current(cur)
+                    # 이력 행에도 rclone 작업 번호를 남긴다 — 복구 후
+                    # 이력 상세에서 새로고침 job id를 볼 수 있다.
+                    item.vfs_job_id = str(jobid)
+                    item.save()
+                    t0 = time.time()
+                    vres = TaskPeriodic._poll_vfs_job(
+                        addr, jobid, t0, deadline, claim_id=claim_id, title=title)
+                    # 소요는 원래 시작부터 끝까지로 본다.
+                    if started_ts:
+                        vfs_duration = max(0, int(time.time() - started_ts))
+                    else:
+                        vfs_duration = vres['duration']
+                    vfs_status = {'done': 'done', 'failed': 'failed',
+                                  'cancelled': 'cancelled'}.get(vres['status'], 'failed')
+                    _write_status(key, 'vfs', {
+                        'job': jobid, 'path': sec.get('path', ''),
+                        'started_at': vfs_started, 'finished_at': _now_text(),
+                        'status': vfs_status, 'source': 'periodic',
+                        'job_name': job_name})
+                    if vres['status'] != 'done':
+                        item.vfs_duration = vfs_duration
+                        if vres['status'] == 'cancelled':
+                            item.finish('cancelled', vres['message'])
+                        else:
+                            item.finish('failed', vres['message'])
+                        _clear_resume_current(item_id)
+                        return
+                else:  # restart — 처음부터 다시 새로고침
+                    vfs_started = _now_text()
+                    _write_status(key, 'vfs', {
+                        'job': None, 'path': sec.get('path', ''),
+                        'started_at': vfs_started, 'finished_at': None,
+                        'status': 'running', 'source': 'periodic',
+                        'job_name': job_name})
 
-        스캔 전송까지 끝난 이력(작업 번호가 이력 행에 있음)만 복구한다.
-        VFS 단계에서 멈춘 이력은 복구하지 않는다 — 다음 실행 때 VFS부터
-        다시 하면 된다. 여러 작업이 함께 돌고 있었다면 그만큼 복구한다.
+                    def _on_vfs_job(vfs_jobid):
+                        _write_status(key, 'vfs', {
+                            'job': vfs_jobid, 'path': sec.get('path', ''),
+                            'started_at': vfs_started, 'finished_at': None,
+                            'status': 'running', 'source': 'periodic',
+                            'job_name': job_name})
+                        # rclone 작업 번호를 이력 행에도 남긴다 — 이력 상세에서
+                        # 새로고침 job id를 볼 수 있다.
+                        item.vfs_job_id = str(vfs_jobid)
+                        item.save()
+
+                    vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job)
+                    vfs_duration = vres['duration']
+                    vfs_status = {'done': 'done', 'failed': 'failed',
+                                  'cancelled': 'cancelled'}.get(vres['status'], 'failed')
+                    _write_status(key, 'vfs', {
+                        'job': vres.get('jobid'), 'path': sec.get('path', ''),
+                        'started_at': vfs_started, 'finished_at': _now_text(),
+                        'status': vfs_status, 'source': 'periodic',
+                        'job_name': job_name})
+                    if vres['status'] != 'done':
+                        item.vfs_duration = vfs_duration
+                        if vres['status'] == 'cancelled':
+                            item.finish('cancelled', vres['message'])
+                        else:
+                            item.finish('failed', vres['message'])
+                        _clear_resume_current(item_id)
+                        return
+                if vfs_only:
+                    item.vfs_duration = vfs_duration
+                    item.finish('done', 'VFS 새로고침이 완료됐습니다.')
+                    _clear_resume_current(item_id)
+                    return
+                item.vfs_duration = vfs_duration
+                item.save()
+                cur['stage'] = 'scan'
+                _upsert_current(cur)
+            # 스캔 시작 전 MAX(media_parts.id)를 기록해 둔다 —
+            # 추가 파일 목록 2차 방법(전후 비교)용 기준점이다.
+            pre_max_id = None
+            try:
+                from . import db_support
+                if db_support.db_ready():
+                    pre_max_id = db_support.parts_max_id()
+            except Exception as e:
+                logger.warning(f'[주기적 스캔 복구] 추가 파일 기준점 기록 실패: {e}')
+            if pre_max_id is not None:
+                cur['pre_max_id'] = pre_max_id
+                _upsert_current(cur)
+            # 라이브러리 동시 스캔 수 게이트 — 같은 라이브러리가 스캔
+            # 중이거나 상한까지 돌고 있으면 이 섹션은 실패로 끝낸다
+            # (기다리지 않는다). 자기 작업의 진행 상태만 빼고 센다.
+            gate_msg = ModuleStatus.library_gate_check(
+                key, exclude_claim_id=claim_id)
+            if gate_msg:
+                item.finish('failed', gate_msg)
+                _clear_resume_current(item_id)
+                return
+            scan_started = _now_text()
+            _write_status(key, 'scan', {
+                'job': None, 'path': sec.get('path', ''),
+                'started_at': scan_started, 'finished_at': None,
+                'status': 'running', 'source': 'periodic',
+                'job_name': job_name})
+
+            def _on_scan_job(scan_jobid):
+                cur['scan_job'] = scan_jobid
+                _upsert_current(cur)
+                # shyni 작업 번호를 이력 행에도 남긴다 — 재시작 후
+                # 복구가 이 번호로 스캔 완료를 이어서 확인할 수 있다.
+                item.shyni_job_id = scan_jobid
+                item.save()
+                _write_status(key, 'scan', {
+                    'job': scan_jobid, 'path': sec.get('path', ''),
+                    'started_at': scan_started, 'finished_at': None,
+                    'status': 'running', 'source': 'periodic',
+                    'job_name': job_name})
+
+            sres = TaskPeriodic._do_scan(sec, claim_id, on_job_id=_on_scan_job)
+            scan_duration = sres['duration']
+            job_id = sres.get('job_id')
+            stats = sres.get('stats')
+            relay_total = book_relay_total(stats, key)
+            summary = scan_summary_text(stats, relay_total)
+            scan_entry = {
+                'job': job_id, 'path': sec.get('path', ''),
+                'started_at': scan_started, 'finished_at': _now_text(),
+                'status': {'done': 'done', 'failed': 'failed',
+                           'cancelled': 'cancelled'}.get(sres['status'], 'failed'),
+                'source': 'periodic', 'job_name': job_name}
+            if summary:
+                scan_entry['summary'] = summary
+            _write_status(key, 'scan', scan_entry)
+            if sres['status'] == 'cancelled':
+                apply_scan_result(item, job_id, stats, vfs_duration,
+                                  scan_duration, pre_max_id, key,
+                                  relay_total=relay_total)
+                item.finish('cancelled', sres['message'])
+                _clear_resume_current(item_id)
+                return
+            if sres['status'] == 'done':
+                apply_scan_result(item, job_id, stats, vfs_duration,
+                                  scan_duration, pre_max_id, key,
+                                  relay_total=relay_total)
+                msg = sres['message']
+                if summary:
+                    msg = f'{msg} ({summary})'
+                item.finish('done', msg)
+                try:
+                    from .task_trash_view import clear_cache
+                    clear_cache(key)
+                except Exception as e:
+                    logger.warning(f'[주기적 스캔 복구] 휴지통 상세 캐시 정리 실패: {e}')
+                try:
+                    from .task_status import mark_trash_counts_stale
+                    mark_trash_counts_stale()
+                except Exception as e:
+                    logger.warning(f'[주기적 스캔 복구] 휴지통 개수 캐시 표시 실패: {e}')
+                try:
+                    from .task_status import request_stats
+                    request_stats()
+                except Exception as e:
+                    logger.warning(f'[주기적 스캔 복구] 통계 재계산 요청 실패: {e}')
+                _clear_resume_current(item_id)
+                logger.info(f'주기적 스캔 복구 완료: {item.section_title}')
+                return
+            apply_scan_result(item, job_id, stats, vfs_duration,
+                              scan_duration, pre_max_id, key,
+                              relay_total=relay_total)
+            item.finish('failed', sres['message'])
+            _clear_resume_current(item_id)
+        except Exception as e:
+            logger.error(f'주기적 스캔 VFS 복구 실패: {e}')
+            logger.error(traceback.format_exc())
+            try:
+                item.vfs_duration = vfs_duration
+                item.scan_duration = scan_duration
+            except Exception:
+                pass
+            item.finish('failed', str(e))
+            TaskPeriodic._fail_running_status(key, job_name)
+            _clear_resume_current(item_id)
+
+    @staticmethod
+    def resume_running(start_celery):
+        """플러그인 로드 시 실행 중이던 이력을 찾아 이어서 한다.
+
+        스캔 전송까지 끝난 이력(작업 번호가 이력 행에 있음)은 스캔 완료
+        확인을 이어서 하고, VFS 단계에서 멈춘 이력(작업 번호 없음)은
+        0.9.9g부터 VFS 새로고침부터 복구한다 — 새로고침 job id로
+        rclone을 조회해 이어서 기다리거나 처음부터 다시 건다.
+        여러 작업이 함께 돌고 있었다면 그만큼 복구한다.
         복구를 시작했으면 True, 복구할 게 없으면 False."""
         with F.app.app_context():
             try:
@@ -1693,6 +2027,21 @@ class TaskPeriodic:
                         'action': row.action,
                         'section_started': (row.start_time.strftime('%Y-%m-%d %H:%M:%S')
                                             if row.start_time else ''),
+                        'stage': 'scan',
+                    })
+                else:
+                    # VFS 단계에서 멈춘 이력 — 스캔을 아직 보내지 않았다.
+                    targets.append({
+                        'item_id': row.id,
+                        'job_id': None,
+                        'job_name': row.job_name or '',
+                        'section_key': str(row.section_key),
+                        'section_title': row.section_title or '',
+                        'mode': row.mode or '',
+                        'action': row.action,
+                        'section_started': (row.start_time.strftime('%Y-%m-%d %H:%M:%S')
+                                            if row.start_time else ''),
+                        'stage': 'vfs',
                     })
             if not targets:
                 return False
@@ -1716,7 +2065,7 @@ class TaskPeriodic:
                     'job_name': t['job_name'],
                     'section_key': t['section_key'],
                     'section_title': t['section_title'],
-                    'stage': 'scan',
+                    'stage': t.get('stage', 'scan'),
                     'mode': t['mode'],
                     'job_started_at': prev.get('job_started_at') or t['section_started'],
                     'section_started_at': t['section_started'],
@@ -1731,8 +2080,12 @@ class TaskPeriodic:
         except Exception as e:
             logger.error(f'[주기적 스캔 복구] 진행 상태 기록 실패: {e}')
         for t in targets:
-            logger.info(f"[주기적 스캔 복구] {t['section_title']} "
-                        f"스캔(job {t['job_id']}) 완료 확인을 이어서 합니다.")
+            if t.get('job_id'):
+                logger.info(f"[주기적 스캔 복구] {t['section_title']} "
+                            f"스캔(job {t['job_id']}) 완료 확인을 이어서 합니다.")
+            else:
+                logger.info(f"[주기적 스캔 복구] {t['section_title']} "
+                            f"VFS 단계부터 이어서 합니다.")
             item_id = t['item_id']
 
             def _launch(item_id=item_id):
