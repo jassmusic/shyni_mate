@@ -49,6 +49,8 @@
 
       {{ macros.setting_checkbox('scan_io_yield_use', '디스크가 바쁠 때 스캔 양보', value=arg['scan_io_yield_use'], desc=['디스크 대기가 높으면 새 스캔 전송을 한 주기 미룹니다. 이미 전송된 스캔의 확인은 계속됩니다.', '웹 화면이 느려지는 순간에 스캔이 디스크를 더 붙잡지 않게 해 줍니다.']) }}
       {{ macros.setting_input_int('scan_io_yield_threshold', '디스크 양보 임계값', min=1, max=100, value=arg['scan_io_yield_threshold'], desc=['기본값 40% · 단위: %', '디스크 대기(pressure full avg10)가 이 값 이상이면 새 스캔 전송을 한 주기 미룹니다. 낮게 두면 더 일찍 양보하고, 높게 두면 더 오래 버팁니다.', '디스크가 자주 바빠서 웹이 느려지면 낮춰 보세요. 반대로 스캔이 자주 멈춘다면 높여 보세요.']) }}
+      {{ macros.m_hr() }}
+
       {{ macros.setting_checkbox('scan_mem_yield_use', '메모리가 부족할 때 스캔 양보', value=arg['scan_mem_yield_use'], desc=['스왑 사용량이 많으면 새 스캔 전송을 한 주기 미룹니다. 이미 전송된 스캔의 확인은 계속됩니다.', '메모리가 부족해 스왑을 많이 쓰면 분석이 느려져 실패가 늘어납니다. 그 전에 전송을 미뤄 두는 겁니다.']) }}
       {{ macros.setting_input_int('scan_mem_yield_threshold', '메모리 양보 임계값', min=512, max=4096, value=arg['scan_mem_yield_threshold'], desc=['기본값 2048MB · 단위: MB', '스왑 사용량이 이 값 이상이면 새 스캔 전송을 한 주기 미룹니다. 낮게 두면 더 일찍 양보하고, 높게 두면 더 오래 버팁니다.', '스왑이 자주 차서 분석이 실패한다면 낮춰 보세요. 반대로 스캔이 자주 멈춘다면 높여 보세요.']) }}
       {{ macros.m_hr() }}
