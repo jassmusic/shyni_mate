@@ -49,6 +49,9 @@ class ModuleScan(PluginModuleBase):
             f"{self.name}_vfs_change_rule": "/mnt/gds2/GDRIVE|/GDRIVE|172.17.0.1:5574",
             f"{self.name}_shyni_use": "True",
             f"{self.name}_io_yield_use": "True",
+            f"{self.name}_io_yield_threshold": "40",
+            f"{self.name}_mem_yield_use": "False",
+            f"{self.name}_mem_yield_threshold": "2048",
             f"{self.name}_shyni_path_rule": "",
             f"{self.name}_trash_schedule_anchors": "",
         }

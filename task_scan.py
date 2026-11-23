@@ -19,10 +19,17 @@ class Task:
     # 다시 시작한다. 감시 자체는 가벼운 확인만 하므로 자주 돌릴 필요가 없다
     WATCH_INTERVAL = 60
 
-    # 디스크 양보 임계값 — /proc/pressure/io의 full avg10(%)이 이 값 이상이면
+    # 디스크 양보 임계값 기본값 — /proc/pressure/io의 full avg10(%)이 이 값 이상이면
     # 신규 전송을 한 주기 미룬다. FF 웹이 10초 넘게 늦어졌던 사고 때 실측이
     # 60%였고, 평소 스캔 부하에서는 그 아래에 머무는 값으로 잡았다.
-    IO_YIELD_THRESHOLD = 40.0
+    # 실제 값은 설정(scan_io_yield_threshold)에서 읽는다. 기본값 40.
+    IO_YIELD_THRESHOLD_DEFAULT = 40.0
+
+    # 메모리 양보 임계값 기본값 (MB) — 스왑 사용량이 이 값 이상이면 신규 전송을
+    # 한 주기 미룬다. 2026-11-22 실측: 스왑 2.1GB에서 실패가 시작되고
+    # 2.7GB에서 분석이 멈춰 201건이 ANALYZE_TIMEOUT으로 실패했다.
+    # 실제 값은 설정(scan_mem_yield_threshold)에서 읽는다. 기본값 2048.
+    MEM_YIELD_THRESHOLD_DEFAULT = 2048
 
     @staticmethod
     def _io_pressure_full_avg10():
@@ -41,6 +48,29 @@ class Task:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _swap_used_mb():
+        """스왑 사용량(MB) — /proc/meminfo의 SwapTotal - SwapFree.
+
+        스왑이 늘어난다는 건 메모리가 부족해 디스크를 쓰고 있다는 뜻이다.
+        컨테이너 안에서 읽어도 호스트 전체 값이다 (meminfo는 네임스페이스로
+        나뉘지 않는다). 읽지 못하면 None."""
+        try:
+            total = free = None
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if line.startswith('SwapTotal:'):
+                        total = int(line.split()[1])  # kB
+                    elif line.startswith('SwapFree:'):
+                        free = int(line.split()[1])  # kB
+                    if total is not None and free is not None:
+                        break
+            if total is None or free is None:
+                return None
+            return (total - free) / 1024.0
+        except Exception:
+            return None
 
     @staticmethod
     def _ensure_filecheck_thread():
@@ -175,10 +205,19 @@ class Task:
                 # 디스크 양보 판단은 주기당 한 번만 한다 — 켜져 있을 때만 읽는다
                 io_pressure = (Task._io_pressure_full_avg10()
                                if P.ModelSetting.get_bool('scan_io_yield_use') else None)
-                io_yield = io_pressure is not None and io_pressure >= Task.IO_YIELD_THRESHOLD
+                io_threshold = P.ModelSetting.get_int('scan_io_yield_threshold') or Task.IO_YIELD_THRESHOLD_DEFAULT
+                io_yield = io_pressure is not None and io_pressure >= io_threshold
                 if io_yield:
                     logger.info(f'[Scan] 디스크 대기가 높아 신규 전송을 한 주기 미룹니다 '
-                                f'(io pressure full avg10={io_pressure:.0f}%)')
+                                f'(io pressure full avg10={io_pressure:.0f}% >= {io_threshold:.0f}%)')
+                # 메모리 양보 판단도 주기당 한 번만 한다 — 켜져 있을 때만 읽는다
+                swap_used = (Task._swap_used_mb()
+                             if P.ModelSetting.get_bool('scan_mem_yield_use') else None)
+                mem_threshold = P.ModelSetting.get_int('scan_mem_yield_threshold') or Task.MEM_YIELD_THRESHOLD_DEFAULT
+                mem_yield = swap_used is not None and swap_used >= mem_threshold
+                if mem_yield:
+                    logger.info(f'[Scan] 스왑 사용량이 많아 신규 전송을 한 주기 미룹니다 '
+                                f'(swap 사용량={swap_used:.0f}MB >= {mem_threshold}MB)')
                 for item in items:
                     dirty = False
                     try:
@@ -212,6 +251,11 @@ class Task:
                         # 게이트 대기와 마찬가지로 파일체크 횟수는 올리지 않고,
                         # 이미 전송된 항목의 확정과 probe 이어지는 데이터는 막지 않는다.
                         if io_yield and not hold_send and not continuation:
+                            continue
+                        # 메모리 양보 — 스왑 사용량이 많으면 신규 전송만 한 주기 미룬다.
+                        # 디스크 양보와 독립으로 동작하며, 같은 방식으로 확정과
+                        # probe 이어지는 데이터는 막지 않는다.
+                        if mem_yield and not hold_send and not continuation:
                             continue
                         # 여기서부터 항목이 실제로 바뀌므로 이번 주기 끝에 저장한다.
                         # 게이트·보류로 건너뛴 항목까지 매주기 전부 저장하면 쓰기

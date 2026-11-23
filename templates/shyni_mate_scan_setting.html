@@ -48,6 +48,11 @@
       {{ macros.m_hr() }}
 
       {{ macros.setting_checkbox('scan_io_yield_use', '디스크가 바쁠 때 스캔 양보', value=arg['scan_io_yield_use'], desc=['디스크 대기가 높으면 새 스캔 전송을 한 주기 미룹니다. 이미 전송된 스캔의 확인은 계속됩니다.', '웹 화면이 느려지는 순간에 스캔이 디스크를 더 붙잡지 않게 해 줍니다.']) }}
+      {{ macros.setting_input_int('scan_io_yield_threshold', '디스크 양보 임계값', min=1, max=100, value=arg['scan_io_yield_threshold'], desc=['기본값 40% · 단위: %', '디스크 대기(pressure full avg10)가 이 값 이상이면 새 스캔 전송을 한 주기 미룹니다. 낮게 두면 더 일찍 양보하고, 높게 두면 더 오래 버팁니다.', '디스크가 자주 바빠서 웹이 느려지면 낮춰 보세요. 반대로 스캔이 자주 멈춘다면 높여 보세요.']) }}
+      {{ macros.setting_checkbox('scan_mem_yield_use', '메모리가 부족할 때 스캔 양보', value=arg['scan_mem_yield_use'], desc=['스왑 사용량이 많으면 새 스캔 전송을 한 주기 미룹니다. 이미 전송된 스캔의 확인은 계속됩니다.', '메모리가 부족해 스왑을 많이 쓰면 분석이 느려져 실패가 늘어납니다. 그 전에 전송을 미뤄 두는 겁니다.']) }}
+      {{ macros.setting_input_int('scan_mem_yield_threshold', '메모리 양보 임계값', min=512, max=4096, value=arg['scan_mem_yield_threshold'], desc=['기본값 2048MB · 단위: MB', '스왑 사용량이 이 값 이상이면 새 스캔 전송을 한 주기 미룹니다. 낮게 두면 더 일찍 양보하고, 높게 두면 더 오래 버팁니다.', '스왑이 자주 차서 분석이 실패한다면 낮춰 보세요. 반대로 스캔이 자주 멈춘다면 높여 보세요.']) }}
+      {{ macros.m_hr() }}
+
       {{ macros.setting_input_int('scan_probe_timeout_sec', '반영 여부 확인 제한 시간', value=arg['scan_probe_timeout_sec'], desc=['기본값 60초 · 단위: 초', '반영 여부 확인은 리셋한 항목을 다시 처리할 때만 전송 전에 합니다. 일반 항목은 확인 없이 바로 전송합니다.', '이미 라이브러리에 반영돼 있는지 shyni에 확인하는 조회가 끝날 때까지 기다리는 최대 시간입니다. 이 조회는 환경에 따라 수십 초 이상 걸릴 수 있습니다.']) }}
       {{ macros.setting_input_int('scan_analyze_wait_min', 'analyze 대기 시간', value=arg['scan_analyze_wait_min'], desc=['기본값 5분 · 단위: 분', '스캔 중 상태로 이 시간 이상 머물러 있는 항목은 정체로 보고 동시 스캔 수에서 제외합니다. 정체된 스캔 하나가 전체 큐를 막는 것을 방지합니다.', '제외된 항목의 상태는 바뀌지 않으며, shyni가 스캔을 끝내면 정상적으로 완료 처리됩니다. 0으로 두면 이 기능을 끕니다.']) }}
       {{ macros.setting_input_int('scan_analyze_fail_min', 'analyze 후 대기 시간', value=arg['scan_analyze_fail_min'], desc=['기본값 60분 · 단위: 분', '스캔이 시작된 뒤 이 시간 이상 끝나지 않는 항목은 실패로 확정합니다. analyze 단계에서 멈춘 스캔이 분석중으로 계속 쌓이는 것을 방지합니다.', '실패로 확정된 항목은 shyni에서 나중에 끝나도 실패로 남습니다. 다시 처리하려면 스캔 목록에서 리셋해 주세요. 0으로 두면 이 기능을 끕니다.']) }}
