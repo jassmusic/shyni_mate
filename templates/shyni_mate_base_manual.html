@@ -42,10 +42,11 @@
 <h1>shyni_mate 매뉴얼</h1>
 <div class="sm-toc">
 <a class="sm-toc-item" href="#s1" data-section="s1">소개</a>
-<a class="sm-toc-item" href="#s2" data-section="s2">설치</a>
-<a class="sm-toc-item" href="#s3" data-section="s3">기능</a>
-<a class="sm-toc-item" href="#s4" data-section="s4">shyni 최신 버전 확인</a>
-<a class="sm-toc-item" href="#s5" data-section="s5">라이선스</a>
+<a class="sm-toc-item" href="#s2" data-section="s2">필요한 것</a>
+<a class="sm-toc-item" href="#s3" data-section="s3">설치</a>
+<a class="sm-toc-item" href="#s4" data-section="s4">기능</a>
+<a class="sm-toc-item" href="#s5" data-section="s5">shyni 최신 버전 확인</a>
+<a class="sm-toc-item" href="#s6" data-section="s6">라이선스</a>
 </div>
 <div class="sm-sidebar-foot">
 <button id="sm-show-all-btn" type="button">전체 보기</button>
@@ -55,29 +56,41 @@
 
 <section class="sm-doc-section" id="s1">
 <h2>소개</h2>
-<p>shyni 전용 스캔 매니저.</p>
-<p>수신 항목을 정해진 수만큼 동시 처리한다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인 순서로 진행하며, VFS 새로고침은 여부를 선택할 수 있다. 동시 스캔 수는 설정으로 조절한다 (기본 2).</p>
+<p>shyni 미디어 서버를 위한 스캔 매니저입니다.</p>
+<p>새 파일이 들어오면 shyni에 스캔을 요청하고, 끝날 때까지 지켜보다가 결과를 알려줍니다. rclone 마운트를 쓰고 있다면, 스캔 전에 VFS 캐시를 먼저 새로고침해서 shyni가 새 파일을 바로 찾을 수 있게 해줍니다.</p>
+<p>한 번에 몇 개까지 스캔할지는 설정에서 정할 수 있습니다 (기본 2개).</p>
 </section>
 <section class="sm-doc-section" id="s2">
-<h2>설치</h2>
-<ol>
-<li>SHYNI MATE → 설정에서 shyni 주소와 토큰을 입력하고 저장한다.</li>
-<li>스캔 → 설정에서 동시 스캔 수, VFS 새로고침 규칙, 샤이니 경로 매핑을 확인한다.</li>
-<li>shyni 최신 버전을 대시보드에서 보려면 설정 &gt; shyni 연결의 GHCR 토큰 칸에 토큰을 입력한다. 자세한 내용은 'shyni 최신 버전 확인' 절을 봐 주세요.</li>
-</ol>
-</section>
-<section class="sm-doc-section" id="s3">
-<h2>기능</h2>
+<h2>필요한 것</h2>
 <ul>
-<li>모드: ADD, <code>REMOVE_FILE</code>, <code>REMOVE_FOLDER</code>, REFRESH</li>
-<li>스캔 전송 전 rclone VFS 새로고침 (사용 여부 선택 가능, 규칙 기반 경로 변환)</li>
-<li>shyni job 폴링으로 완료/실패 확정, 완료 시 콜백 통지</li>
-<li>탐색 페이지에서 우클릭으로 새로고침·스캔 실행</li>
-<li>대시보드 탭: 라이브러리별 VFS 새로고침·스캔 실행과 상태 표시</li>
-<li>shyni 최신 버전 표시: GHCR에서 최신 버전을 확인해 대시보드에 표시한다 (GHCR 토큰 필요)</li>
+<li>FlaskFarm (FF)</li>
+<li>shyni 서버</li>
+<li>rclone (VFS 새로고침을 쓸 때)</li>
+<li>스캔 목록을 받아오려면 gds_tool 포크 버전이 필요합니다</li>
 </ul>
 </section>
+<section class="sm-doc-section" id="s3">
+<h2>설치</h2>
+<ol>
+<li>SHYNI MATE → 설정에서 shyni 주소와 토큰을 입력하고 저장합니다.</li>
+<li>스캔 → 설정에서 동시 스캔 수, VFS 새로고침 규칙, shyni 경로 매핑을 확인합니다.</li>
+<li>shyni 최신 버전을 대시보드에서 보려면 설정 &gt; shyni 연결의 GHCR 토큰 칸에 토큰을 입력합니다. 자세한 내용은 'shyni 최신 버전 확인' 절을 봐 주세요.</li>
+</ol>
+</section>
 <section class="sm-doc-section" id="s4">
+<h2>기능</h2>
+<ul>
+<li><strong>스캔 목록 처리</strong>: 들어온 항목을 순서대로 처리합니다. 추가(ADD), 파일 삭제(<code>REMOVE_FILE</code>), 폴더 삭제(<code>REMOVE_FOLDER</code>), 새로고침(REFRESH)을 지원합니다.</li>
+<li><strong>VFS 새로고침</strong>: 스캔 전에 rclone VFS 캐시를 새로고침합니다. 쓸지 말지 선택할 수 있고, 경로 변환 규칙을 정할 수 있습니다.</li>
+<li><strong>완료 확인</strong>: shyni 작업을 주기적으로 확인해서 완료·실패를 확정하고, 끝나면 콜백으로 알려줍니다.</li>
+<li><strong>주기적 스캔</strong>: 라이브러리를 정해진 시간에 자동으로 스캔합니다.</li>
+<li><strong>휴지통 스캔</strong>: shyni 휴지통을 비웁니다.</li>
+<li><strong>탐색 페이지</strong>: 파일 탐색에서 우클릭으로 새로고침·스캔을 바로 실행할 수 있습니다.</li>
+<li><strong>대시보드</strong>: 라이브러리별로 VFS 새로고침·스캔을 실행하고 상태를 볼 수 있습니다.</li>
+<li><strong>shyni 최신 버전 표시</strong>: GHCR에서 최신 버전을 확인해 대시보드에 표시합니다 (GHCR 토큰 필요).</li>
+</ul>
+</section>
+<section class="sm-doc-section" id="s5">
 <h2>shyni 최신 버전 확인</h2>
 <p>대시보드의 shyni 서버 카드에서 지금 쓰고 있는 버전이 최신인지 확인할 수 있습니다. GHCR(깃허브 컨테이너 레지스트리)에서 shyni 최신 버전을 가져와 비교합니다.</p>
 <h3>GHCR 토큰 입력</h3>
@@ -93,7 +106,7 @@
 <p>대시보드를 열 때만 조회합니다. 결과는 1시간 동안 저장해 두고, 그 안에서는 다시 조회하지 않습니다. 조회에 실패하면 10분 뒤에 다시 시도합니다. 대시보드를 열지 않으면 조회하지 않습니다.</p>
 <p>처음 토큰을 입력한 뒤에는 대시보드를 한 번 새로고침해야 라벨이 보입니다. 첫 로딩에서는 조회가 시작만 되고, 두 번째 로딩부터 표시됩니다.</p>
 </section>
-<section class="sm-doc-section" id="s5">
+<section class="sm-doc-section" id="s6">
 <h2>라이선스</h2>
 <p>MIT — LICENSE 참조</p>
 </section>

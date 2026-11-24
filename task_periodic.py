@@ -39,13 +39,14 @@ START_ERROR_MAX_AGE_SEC = 3600
 
 STAGE_LABEL = {'vfs': 'VFS 새로고침', 'scan': '스캔'}
 
-# 스캔 폴링 실패 기준 (W7): 폴링 중 일시적 오류(연결 끊김 등)는
-# 재시도하며, 연속 3회 실패 시에만 섹션을 실패로 확정한다.
+# 폴링 실패 처리 (0.9.9h, W7 개정): 폴링 중 일시적 오류(연결 끊김 등)는
+# 원인을 로그에 남기고 계속 기다린다 — 확인 실패만으로는 실패로 확정하지
+# 않는다. 실패 확정은 shyni/rclone이 직접 실패라고 답하거나, 작업 기록이
+# 없을 때(404/not found), 또는 기한 안에 한 번도 확인이 안 됐을 때만 한다.
 # (스캔 대기 기한은 설정 periodic_scan_timeout_min에서 읽고,
 # VFS 새로고침 기한은 설정 periodic_vfs_timeout_min에서 읽는다.)
-POLL_FAIL_MAX = 3
-VFS_POLL_SEC = 5
-SCAN_POLL_SEC = 10
+VFS_POLL_SEC = 10
+SCAN_POLL_SEC = 20
 # 폴더별 결과(job stats의 results[]) 저장 상한 — 폴더가 많은 라이브러리에서도
 # 이력 한 행이 지나치게 커지지 않게 한다.
 STAT_FOLDERS_MAX = 500
@@ -209,22 +210,27 @@ CANCEL_RESULT_MESSAGE = {
 
 
 def _fetch_compat_job(url, token, job_id):
-    """compat job 1회 조회. job dict / 'not_found' / None(조회 실패)."""
+    """compat job 1회 조회. job dict / 'not_found' / None(조회 실패).
+    조회 실패 원인은 로그에 남긴다 (0.9.9h) — 다음 실패 때 원인을
+    바로 알 수 있게 한다."""
     if not job_id:
         return None
     try:
         res = requests.get(f'{url}/compat/jobs/{job_id}',
                            headers={'X-Plex-Token': token, 'Accept': 'application/json'},
                            timeout=15)
-    except Exception:
+    except Exception as e:
+        logger.warning(f'[shyni] compat job 조회 실패 (job {job_id}): {type(e).__name__}: {e}')
         return None
     if res.status_code == 404:
         return 'not_found'
     if res.status_code != 200:
+        logger.warning(f'[shyni] compat job 조회 실패 (job {job_id}): HTTP {res.status_code}')
         return None
     try:
         return res.json()
-    except Exception:
+    except Exception as e:
+        logger.warning(f'[shyni] compat job 응답 파싱 실패 (job {job_id}): {type(e).__name__}: {e}')
         return None
 
 
@@ -1320,8 +1326,8 @@ class TaskPeriodic:
         """VFS 새로고침을 걸고 완료까지 기다린다.
         {'status': done|failed|cancelled, 'message', 'duration': 초,
          'jobid': rclone job id}를 돌려준다. 기한은 설정(VFS 새로고침
-        제한 시간, 기본 360분)에서 읽고, 폴링 중 일시적 오류는 재시도하며
-        연속 3회 실패 시에만 실패로 확정한다 (W7)."""
+        제한 시간, 기본 360분)에서 읽고, 폴링 중 일시적 오류는 원인을
+        로그에 남기고 계속 기다린다 (0.9.9h)."""
         t0 = time.time()
         addr, remote = ModuleStatus._rc_target(sec.get('path', ''))
         if not addr:
@@ -1344,7 +1350,8 @@ class TaskPeriodic:
     @staticmethod
     def _query_vfs_job(addr, jobid):
         """rclone VFS 새로고침 job 한 번 조회 — 결과 dict를 돌려주고,
-        기록이 없으면 'not_found', 그 외 조회 실패면 None을 돌려준다."""
+        기록이 없으면 'not_found', 그 외 조회 실패면 None을 돌려준다.
+        조회 실패 원인은 로그에 남긴다 (0.9.9h)."""
         try:
             return ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
         except requests.HTTPError as e:
@@ -1355,8 +1362,11 @@ class TaskPeriodic:
                 body = ''
             if 'not found' in body:
                 return 'not_found'
+            code = e.response.status_code if e.response is not None else '?'
+            logger.warning(f'[주기적 스캔] VFS 새로고침 확인 실패 (job {jobid}): HTTP {code}')
             return None
-        except Exception:
+        except Exception as e:
+            logger.warning(f'[주기적 스캔] VFS 새로고침 확인 실패 (job {jobid}): {type(e).__name__}: {e}')
             return None
 
     @staticmethod
@@ -1364,10 +1374,42 @@ class TaskPeriodic:
         """실행 중인 rclone VFS 새로고침 job이 끝날 때까지 기다린다.
         _do_vfs(새로 건 경우)와 VFS 단계 복구(이미 돌고 있는 경우)가 함께 쓴다.
         {'status': done|failed|cancelled, 'message', 'duration': 초,
-         'jobid': rclone job id}를 돌려준다. 폴링 중 일시적 오류는
-        재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7)."""
-        fail_count = 0
-        while time.time() < deadline:
+         'jobid': rclone job id}를 돌려준다. 폴링 중 일시적 오류는 원인을
+        로그에 남기고 계속 기다린다 — 확인 실패만으로는 실패로 확정하지
+        않는다 (0.9.9h). 기한이 됐을 때 아직 진행 중이면 기한을 연장하고,
+        기한 안에 한 번도 확인이 안 됐을 때만 실패로 확정한다."""
+        timeout_sec = _vfs_timeout_sec()
+        last_ok = None
+        while True:
+            if time.time() >= deadline:
+                # 기한 도달 — job을 한 번 더 조회한다. 끝났으면 그 결과를
+                # 쓰고, 아직 돌고 있으면 기한을 연장한다. 확인이 안 되면
+                # 기한 내내 확인이 안 됐을 때만 실패로 확정한다 (0.9.9h).
+                job = TaskPeriodic._query_vfs_job(addr, jobid)
+                if isinstance(job, dict):
+                    last_ok = time.time()
+                    if job.get('finished'):
+                        if job.get('error'):
+                            return {'status': 'failed',
+                                    'message': f"VFS 새로고침 실패: {job['error']}",
+                                    'duration': int(time.time() - t0), 'jobid': jobid}
+                        logger.info(f"주기적 스캔: {title} VFS 새로고침 완료 (job {jobid})")
+                        return {'status': 'done', 'message': 'VFS 새로고침이 완료됐습니다.',
+                                'duration': int(time.time() - t0), 'jobid': jobid}
+                    deadline = time.time() + timeout_sec
+                    logger.info(
+                        f"주기적 스캔: {title} VFS 새로고침이 아직 진행 중이라 기한을 "
+                        f"{_fmt_wait(timeout_sec)} 연장합니다 (job {jobid})")
+                    continue
+                if job == 'not_found':
+                    return {'status': 'failed',
+                            'message': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.',
+                            'duration': int(time.time() - t0), 'jobid': jobid}
+                if last_ok is None or time.time() - last_ok >= timeout_sec:
+                    return {'status': 'failed',
+                            'message': f'VFS 새로고침 확인이 기한({_fmt_wait(timeout_sec)}) 안에 되지 않았습니다.',
+                            'duration': int(time.time() - t0), 'jobid': jobid}
+                deadline = time.time() + VFS_POLL_SEC * 6
             if _cancel_requested(claim_id):
                 try:
                     ModuleStatus._rc(addr, 'job/stop', {'jobid': jobid})
@@ -1375,34 +1417,16 @@ class TaskPeriodic:
                     logger.warning(f'[주기적 스캔] VFS 새로고침 중단 요청 실패: {e}')
                 return {'status': 'cancelled', 'message': '취소 요청으로 중단했습니다.',
                         'duration': int(time.time() - t0), 'jobid': jobid}
-            try:
-                job = ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
-            except requests.HTTPError as e:
-                body = ''
-                try:
-                    body = e.response.text if e.response is not None else ''
-                except Exception:
-                    body = ''
-                if 'not found' in body:
-                    return {'status': 'failed',
-                            'message': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.',
-                            'duration': int(time.time() - t0), 'jobid': jobid}
-                fail_count += 1
-                if fail_count >= POLL_FAIL_MAX:
-                    return {'status': 'failed',
-                            'message': f'VFS 새로고침 확인이 연속 {POLL_FAIL_MAX}회 실패했습니다.',
-                            'duration': int(time.time() - t0), 'jobid': jobid}
+            job = TaskPeriodic._query_vfs_job(addr, jobid)
+            if job == 'not_found':
+                return {'status': 'failed',
+                        'message': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.',
+                        'duration': int(time.time() - t0), 'jobid': jobid}
+            if job is None:
+                # 조회 실패 원인은 _query_vfs_job이 로그에 남겼다.
                 time.sleep(VFS_POLL_SEC)
                 continue
-            except Exception:
-                fail_count += 1
-                if fail_count >= POLL_FAIL_MAX:
-                    return {'status': 'failed',
-                            'message': f'VFS 새로고침 확인이 연속 {POLL_FAIL_MAX}회 실패했습니다.',
-                            'duration': int(time.time() - t0), 'jobid': jobid}
-                time.sleep(VFS_POLL_SEC)
-                continue
-            fail_count = 0
+            last_ok = time.time()
             if job.get('finished'):
                 if job.get('error'):
                     return {'status': 'failed',
@@ -1412,16 +1436,14 @@ class TaskPeriodic:
                 return {'status': 'done', 'message': 'VFS 새로고침이 완료됐습니다.',
                         'duration': int(time.time() - t0), 'jobid': jobid}
             time.sleep(VFS_POLL_SEC)
-        return {'status': 'failed',
-                'message': 'VFS 새로고침이 기한 안에 끝나지 않았습니다.',
-                'duration': int(time.time() - t0), 'jobid': jobid}
 
     @staticmethod
     def _do_scan(sec, claim_id=None, on_job_id=None):
         """스캔을 전송하고 완료까지 기다린다.
         {'status': done|failed|cancelled, 'message', 'job_id', 'stats',
-         'duration': 초}를 돌려준다. 6시간 기한이 있고, 폴링 중 일시적
-        오류는 재시도하며 연속 3회 실패 시에만 실패로 확정한다 (W7).
+         'duration': 초}를 돌려준다. 기한(설정 periodic_scan_timeout_min,
+        기본 360분)이 있고, 폴링 중 일시적 오류는 원인을 로그에 남기고
+        계속 기다린다 — 확인 실패만으로는 실패로 확정하지 않는다 (0.9.9h).
         job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3).
         claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
         t0 = time.time()
@@ -1454,15 +1476,17 @@ class TaskPeriodic:
         {'status': done|failed|cancelled, 'message', 'job_id', 'stats',
          'duration': 초}를 돌려준다. 기한(설정 periodic_scan_timeout_min,
         기본 360분)이 됐을 때 shyni에서 스캔이 아직 진행 중이면 기한을
-        연장하며 계속 기다리고, 폴링 중 일시적 오류는 재시도하며 연속
-        3회 실패 시에만 실패로 확정한다 (W7).
+        연장하며 계속 기다린다. 폴링 중 일시적 오류는 원인을 로그에 남기고
+        계속 기다린다 — 확인 실패만으로는 실패로 확정하지 않는다 (0.9.9h).
+        실패 확정은 shyni가 직접 failed라고 답하거나, 작업 기록이 없을 때
+        (404), 또는 기한 안에 한 번도 확인이 안 됐을 때만 한다.
         job 조회에서 404를 받으면 즉시 실패로 끝낸다 (W3).
         section_key가 있으면 60초마다 스캔 진행률을 현황에 기록한다
         (진행 표시용 — 완료 판정은 job 폴링이 계속 맡는다).
         claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
         timeout_sec = _scan_timeout_sec()
         deadline = time.time() + timeout_sec
-        fail_count = 0
+        last_ok = None
         poll_count = 0
         while True:
             if time.time() >= deadline:
@@ -1471,7 +1495,7 @@ class TaskPeriodic:
                 # 기다린다. job이 끝났으면 그 결과를 그대로 쓴다.
                 job = _fetch_compat_job(url, token, job_id)
                 if isinstance(job, dict):
-                    fail_count = 0
+                    last_ok = time.time()
                     outcome, msg = _scan_poll_outcome(200, job)
                     if outcome == 'done':
                         logger.info(f"주기적 스캔 완료 (job {job_id})")
@@ -1499,15 +1523,16 @@ class TaskPeriodic:
                             'message': '스캔 작업 기록을 찾을 수 없습니다.',
                             'job_id': job_id, 'stats': None,
                             'duration': int(time.time() - t0)}
-                # 조회 실패 — 연속 실패 로직으로 처리한다. 아직 기준에
-                # 못 미치면 잠깐 뒤에 다시 확인한다.
-                fail_count += 1
-                if fail_count >= POLL_FAIL_MAX:
+                # 조회 실패 — 기한 안에 한 번이라도 확인이 됐으면 잠깐
+                # 뒤에 다시 확인한다. 기한 내내 확인이 안 됐으면 그때
+                # 실패로 확정한다 (0.9.9h).
+                if last_ok is None or time.time() - last_ok >= timeout_sec:
                     return {'status': 'failed',
-                            'message': f'스캔 확인이 연속 {POLL_FAIL_MAX}회 실패했습니다.',
+                            'message': f'스캔 확인이 기한({_fmt_wait(timeout_sec)}) 안에 되지 않았습니다. '
+                                       'shyni 웹에서 스캔 상태를 확인해 주세요.',
                             'job_id': job_id, 'stats': None,
                             'duration': int(time.time() - t0)}
-                deadline = time.time() + SCAN_POLL_SEC
+                deadline = time.time() + SCAN_POLL_SEC * 3
             if _cancel_requested(claim_id):
                 # Step5-1 — shyni 스캔도 함께 취소하고 확인한다.
                 # job이 이미 끝났으면 그 결과를 그대로 쓴다.
@@ -1535,20 +1560,16 @@ class TaskPeriodic:
                 res = requests.get(f'{url}/compat/jobs/{job_id}',
                                    headers={'X-Plex-Token': token, 'Accept': 'application/json'},
                                    timeout=15)
-            except Exception:
-                fail_count += 1
-                if fail_count >= POLL_FAIL_MAX:
-                    return {'status': 'failed',
-                            'message': f'스캔 확인이 연속 {POLL_FAIL_MAX}회 실패했습니다.',
-                            'job_id': job_id, 'stats': None,
-                            'duration': int(time.time() - t0)}
+            except Exception as e:
+                logger.warning(f'[주기적 스캔] 스캔 확인 실패 (job {job_id}): {type(e).__name__}: {e}')
                 time.sleep(SCAN_POLL_SEC)
                 continue
             job = None
             if res.status_code == 200:
                 try:
                     job = res.json()
-                except Exception:
+                except Exception as e:
+                    logger.warning(f'[주기적 스캔] 스캔 확인 응답 파싱 실패 (job {job_id}): {type(e).__name__}: {e}')
                     job = None
             outcome, msg = _scan_poll_outcome(res.status_code, job)
             if outcome == 'not_found':
@@ -1572,24 +1593,29 @@ class TaskPeriodic:
                         'stats': (job or {}).get('stats') or {},
                         'duration': int(time.time() - t0)}
             if res.status_code != 200:
-                fail_count += 1
-                if fail_count >= POLL_FAIL_MAX:
-                    return {'status': 'failed',
-                            'message': f'스캔 확인이 연속 {POLL_FAIL_MAX}회 실패했습니다.',
-                            'job_id': job_id, 'stats': None,
-                            'duration': int(time.time() - t0)}
-            else:
-                fail_count = 0
-            # 진행률 기록 — 60초마다 (폴링 10초 × 6회).
+                logger.warning(f'[주기적 스캔] 스캔 확인 실패 (job {job_id}): HTTP {res.status_code}')
+            elif isinstance(job, dict):
+                last_ok = time.time()
+            # 진행률 기록 — 60초마다 (폴링 20초 × 3회).
             poll_count += 1
-            if section_key and poll_count % 6 == 0:
+            if section_key and poll_count % 3 == 0:
                 _record_scan_progress(section_key)
             time.sleep(SCAN_POLL_SEC)
 
     @F.celery.task
     def resume(item_id):
         """재시작 복구 — 스캔 중이던 이력은 완료 확인을 이어서 하고,
-        VFS 단계에서 멈춘 이력은 새로고침부터 이어서 한다 (0.9.9g)."""
+        VFS 단계에서 멈춘 이력은 새로고침부터 이어서 한다 (0.9.9g).
+        복구가 끝난 뒤에는 같은 작업의 남은 라이브러리부터 이어서
+        스캔한다 (0.9.9h) — 복구한 이력이 취소됐을 때는 이어서 하지
+        않는다."""
+        # 이어서 할 작업 정보 — _resume이 진행 상태를 지우기 전에 미리 읽는다.
+        cont = None
+        try:
+            with F.app.app_context():
+                cont = TaskPeriodic._resume_continuation_info(item_id)
+        except Exception as e:
+            logger.warning(f'[주기적 스캔 복구] 이어서 할 작업 정보 읽기 실패: {e}')
         with F.app.app_context():
             try:
                 TaskPeriodic._resume(item_id)
@@ -1604,6 +1630,113 @@ class TaskPeriodic:
                 except Exception:
                     pass
                 _clear_resume_current(item_id)
+            # 복구가 끝난 뒤 같은 작업의 남은 라이브러리 이어서
+            if cont is not None:
+                try:
+                    TaskPeriodic._continue_after_resume(cont)
+                except Exception as e:
+                    logger.error(f'[주기적 스캔 복구] 남은 라이브러리 이어서 하기 실패: {e}')
+                    logger.error(traceback.format_exc())
+
+    @staticmethod
+    def _resume_continuation_info(item_id):
+        """복구 뒤 이어서 할 작업 정보 — 이력 행과 복구 진행 상태에서 읽는다.
+        이어서 할 수 없으면 None을 돌려준다. _resume이 진행 상태를
+        지우기 전에 불러야 한다."""
+        item = (F.db.session.query(ModelPeriodicItem)
+                .filter(ModelPeriodicItem.id == int(item_id)).first())
+        if item is None or item.status != 'running':
+            return None
+        job_idx = None
+        job_started = None
+        for cur in get_currents():
+            if str(cur.get('resume_item_id')) == str(item_id):
+                job_idx = cur.get('job_idx')
+                job_started = cur.get('job_started_at')
+                break
+        if job_started is None and item.start_time:
+            job_started = item.start_time.strftime('%Y-%m-%d %H:%M:%S')
+        return {
+            'item_id': item_id,
+            'job_idx': job_idx,
+            'job_name': item.job_name or '',
+            'section_key': str(item.section_key),
+            'mode': item.mode or '',
+            'job_started': job_started or _now_text(),
+            'claim_id': f'resume-{item_id}',
+        }
+
+    @staticmethod
+    def _continue_after_resume(cont):
+        """복구가 끝난 뒤 같은 작업의 남은 라이브러리부터 이어서 스캔한다
+        (0.9.9h). 작업의 섹션 목록에서 복구한 라이브러리 다음부터
+        _run_section으로 실행한다. 복구한 이력이 취소됐으면 이어서 하지
+        않고, 이어서 하는 도중 취소 요청이 오면 멈춘다."""
+        # 복구한 이력의 최종 상태 — 취소됐으면 이어서 하지 않는다.
+        item = (F.db.session.query(ModelPeriodicItem)
+                .filter(ModelPeriodicItem.id == int(cont['item_id'])).first())
+        if item is not None and item.status == 'cancelled':
+            logger.info(f"[주기적 스캔 복구] {cont['job_name']}: 복구한 작업이 "
+                        '취소돼 남은 라이브러리를 이어서 하지 않습니다.')
+            return
+        jobs = get_jobs()
+        job = None
+        job_idx = cont.get('job_idx')
+        # 번호로 찾은 작업이 이름까지 맞을 때만 쓴다 — 작업 목록이
+        # 바뀌었을 수 있어 번호만 믿지 않는다.
+        if isinstance(job_idx, int) and 0 <= job_idx < len(jobs):
+            if (jobs[job_idx].get('name') or '') == (cont['job_name'] or ''):
+                job = jobs[job_idx]
+        if job is None:
+            job_idx = None
+            for i, j in enumerate(jobs):
+                if (j.get('name') or '') == (cont['job_name'] or ''):
+                    job = j
+                    job_idx = i
+                    break
+        if job is None:
+            logger.info(f"[주기적 스캔 복구] 작업({cont['job_name']})을 찾지 못해 "
+                        '남은 라이브러리를 이어서 하지 않습니다.')
+            return
+        sections = job.get('sections') or []
+        keys = [str(k) for k in sections]
+        if str(cont['section_key']) not in keys:
+            logger.info(f"[주기적 스캔 복구] {cont['job_name']}: 복구한 라이브러리가 "
+                        '작업 목록에 없어 남은 라이브러리를 이어서 하지 않습니다.')
+            return
+        remaining = sections[keys.index(str(cont['section_key'])) + 1:]
+        if not remaining:
+            return
+        sections_info, err = ModuleStatus._sections()
+        if err:
+            logger.warning(f"[주기적 스캔 복구] {cont['job_name']}: "
+                           f'섹션 조회 실패 — {err}')
+            return
+        sec_map = {str(s['key']): s for s in (sections_info or [])}
+        claim_id = cont['claim_id']
+        any_scan_done = False
+        logger.info(f"[주기적 스캔 복구] {cont['job_name']}: 남은 라이브러리 "
+                    f"{len(remaining)}개를 이어서 스캔합니다.")
+        for key in remaining:
+            if _cancel_requested(claim_id):
+                logger.info(f"[주기적 스캔 복구] {cont['job_name']}: 취소 요청으로 "
+                            '남은 라이브러리를 멈춥니다.')
+                break
+            sec = sec_map.get(str(key))
+            if sec is None:
+                continue
+            if TaskPeriodic._run_section(job, job_idx, sec, cont['mode'],
+                                         cont['job_started'], None, claim_id):
+                any_scan_done = True
+            if _cancel_requested(claim_id):
+                break
+        if any_scan_done:
+            try:
+                from .task_status import request_stats
+                request_stats()
+            except Exception as e:
+                logger.warning(f'[주기적 스캔 복구] 통계 재계산 요청 실패: {e}')
+        logger.info(f"[주기적 스캔 복구] {cont['job_name']}: 남은 라이브러리 이어서 완료")
 
     @staticmethod
     def _resume(item_id):

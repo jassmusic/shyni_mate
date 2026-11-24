@@ -25,8 +25,7 @@ def _setting_get(key):
     안에서 부르면 중첩되고 DB 연결이 풀에 반환되지 않는다 (QueuePool
     고갈 원인). 컨텍스트가 이미 있으면 현재 세션으로 직접 쿼리하고,
     없을 때만 프레임워크 방식을 쓴다. shyni_backend의 같은 이름 함수와
-    동일 — shyni_admin을 독립 모듈로 두기 위해 여기에 둔다 (Vontar에는
-    QueuePool 수정이 아직 배포되지 않아 import가 실패했음, 2026-11-17).
+    동일 — shyni_admin을 독립 모듈로 두기 위해 여기에 둔다.
     """
     try:
         import flask

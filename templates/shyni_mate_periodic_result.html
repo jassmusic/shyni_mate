@@ -188,6 +188,27 @@ function currentSignature(curs) {
   }).join(';');
 }
 
+// 진행 카드 집합 — 카드가 생기거나 사라지거나 대기에서 실행으로
+// 넘어가면 이력 목록을 다시 불러온다. 진행률 숫자만 바뀌거나
+// 단계만 바뀌는 동안에는 목록을 건드리지 않는다 — 목록의 행 상태는
+// 어차피 '실행 중' 그대로라 다시 그릴 필요가 없기 때문이다.
+// 키는 취소 대기 확인과 같은 규칙(대시보드는 'dashboard:' + 라이브러리 번호).
+function currentCardSet(curs) {
+  if (!curs || !curs.length) return [];
+  return curs.map(function (cur) {
+    var key = (cur.source == 'dashboard')
+      ? ('dashboard:' + cur.section_key) : String(cur.claim_id);
+    var cls = (cur.stage == 'waiting') ? 'waiting' : 'running';
+    return key + '|' + cls;
+  }).sort();
+}
+
+function sameCardSet(a, b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) if (a[i] != b[i]) return false;
+  return true;
+}
+
 // 카드 Slim화 — 제목은 라이브러리·단계만(작업명과 같으면 한 번만), 두 번째 줄은
 // 동작·실행 방식·시작 시각·경과 시간. 카드는 작업 시작이 빠른 순으로 정렬한다.
 function renderCurrent(curs) {
@@ -325,11 +346,19 @@ function loadCurrent() {
         $('#cancelOkDiv').html('\u2705 작업이 취소되었습니다. <button type="button" id="cancelOkClose" class="btn btn-sm btn-default" style="float:right; font-size:14px">\u2715</button><div style="clear:both"></div>');
         $('#cancelOkDiv').show();
       }
+      // 진행 카드가 생기거나 사라지면 이력 목록도 다시 불러온다 — 페이지를
+      // 열어둔 채로 스캔이 끝나면 배너만 바뀌고 목록은 '실행 중' 그대로
+      // 남는 문제를 고친다. 첫 폴링은 페이지 로드 때 이미 목록을
+      // 불러왔으니 건너뛴다. 펼쳐 둔 행은 renderHistory가
+      // expandedIds·detailCache로 그대로 다시 펼쳐 준다.
+      var cardsChanged = (currentSig !== null) &&
+        !sameCardSet(currentCardSet(currentCurs), currentCardSet(curs));
       var sig = currentSignature(curs);
       if (sig === currentSig) return;
       currentSig = sig;
       currentCurs = curs;
       renderCurrent(curs);
+      if (cardsChanged) loadHistory(histPage);
     }
   });
 }

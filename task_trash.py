@@ -47,9 +47,10 @@ TRASH_START_ERROR_KEY = 'trash_last_start_error'
 # 시작 실패 기록 보관 기한(초) — 이보다 오래된 오류는 배너에 띄우지 않는다.
 TRASH_START_ERROR_MAX_AGE_SEC = 3600
 
-# 폴링 실패 기준 (W7과 같은 기준): 일시적 오류는 재시도하고,
-# 연속 3회 실패 시에만 실패로 확정한다.
-POLL_FAIL_MAX = 3
+# 폴링 실패 처리 (0.9.9h, W7 개정): 일시적 오류는 원인을 로그에 남기고
+# 계속 기다린다 — 확인 실패만으로는 실패로 확정하지 않는다. 실패 확정은
+# shyni/rclone이 직접 실패라고 답하거나, 작업 기록이 없을 때(404/not found),
+# 또는 기한 안에 한 번도 확인이 안 됐을 때만 한다.
 VFS_POLL_SEC = 10
 SCAN_POLL_SEC = 20
 EMPTY_POLL_SEC = 10
@@ -720,37 +721,76 @@ def _now_text():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
+def _query_rc_job(addr, jobid):
+    """rclone job 1회 조회 — 결과 dict / 'not_found' / None(조회 실패).
+    조회 실패 원인은 로그에 남긴다 (0.9.9h)."""
+    try:
+        from .mod_status import ModuleStatus
+        return ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
+    except requests.HTTPError as e:
+        body = ''
+        try:
+            body = e.response.text if e.response is not None else ''
+        except Exception:
+            body = ''
+        if 'not found' in body:
+            return 'not_found'
+        code = e.response.status_code if e.response is not None else '?'
+        logger.warning(f'[휴지통] VFS 새로고침 확인 실패 (job {jobid}): HTTP {code}')
+        return None
+    except Exception as e:
+        logger.warning(f'[휴지통] VFS 새로고침 확인 실패 (job {jobid}): {type(e).__name__}: {e}')
+        return None
+
+
 def _wait_vfs(addr, jobid, timeout=None, claim_id=None):
     """rclone VFS 새로고침 job 완료를 기다린다.
     {'result': done|failed|cancelled, 'duration': 초}를 돌려준다.
     기한은 설정(휴지통 VFS 새로고침 제한 시간, 기본 360분)에서 읽는다.
-    timeout을 직접 주면 그 값(초)을 쓴다.
+    timeout을 직접 주면 그 값(초)을 쓴다. 폴링 중 일시적 오류는 원인을
+    로그에 남기고 계속 기다린다 (0.9.9h). 기한이 됐을 때 아직 진행 중이면
+    기한을 연장하고, 기한 안에 한 번도 확인이 안 됐을 때만 실패로 확정한다.
     claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
     if timeout is None:
         timeout = _vfs_timeout_sec()
     t0 = time.time()
     deadline = time.time() + timeout
-    while time.time() < deadline:
+    last_ok = None
+    while True:
+        if time.time() >= deadline:
+            # 기한 도달 — job을 한 번 더 조회한다. 끝났으면 그 결과를
+            # 쓰고, 아직 돌고 있으면 기한을 연장한다. 확인이 안 되면
+            # 기한 내내 확인이 안 됐을 때만 실패로 확정한다 (0.9.9h).
+            job = _query_rc_job(addr, jobid)
+            if isinstance(job, dict):
+                last_ok = time.time()
+                if job.get('finished'):
+                    return {'result': 'failed' if job.get('error') else 'done',
+                            'duration': int(time.time() - t0)}
+                deadline = time.time() + timeout
+                logger.info(
+                    f"휴지통: VFS 새로고침이 아직 진행 중이라 기한을 "
+                    f"{_fmt_wait(timeout)} 연장합니다 (job {jobid})")
+                continue
+            if job == 'not_found':
+                return {'result': 'failed', 'duration': int(time.time() - t0)}
+            if last_ok is None or time.time() - last_ok >= timeout:
+                return {'result': 'failed', 'duration': int(time.time() - t0)}
+            deadline = time.time() + VFS_POLL_SEC * 6
         if _trash_cancel_requested(claim_id):
             return {'result': 'cancelled', 'duration': int(time.time() - t0)}
-        try:
-            from .mod_status import ModuleStatus
-            job = ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
-            if job.get('finished'):
-                return {'result': 'failed' if job.get('error') else 'done',
-                        'duration': int(time.time() - t0)}
-        except requests.HTTPError as e:
-            body = ''
-            try:
-                body = e.response.text if e.response is not None else ''
-            except Exception:
-                body = ''
-            if 'not found' in body:
-                return {'result': 'failed', 'duration': int(time.time() - t0)}
-        except Exception:
-            pass
+        job = _query_rc_job(addr, jobid)
+        if job == 'not_found':
+            return {'result': 'failed', 'duration': int(time.time() - t0)}
+        if job is None:
+            # 조회 실패 원인은 _query_rc_job이 로그에 남겼다.
+            time.sleep(VFS_POLL_SEC)
+            continue
+        last_ok = time.time()
+        if job.get('finished'):
+            return {'result': 'failed' if job.get('error') else 'done',
+                    'duration': int(time.time() - t0)}
         time.sleep(VFS_POLL_SEC)
-    return {'result': 'failed', 'duration': int(time.time() - t0)}
 
 
 def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
@@ -761,8 +801,9 @@ def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
     돌려준다. timeout — None이면 설정 trash_scan_timeout_min에서 읽는다
     (기본 360분). 기한이 됐을 때 shyni에서 job이 아직 진행 중이면 기한을
     연장하며 계속 기다린다. job 조회에서 404를 받으면 즉시 실패로 끝낸다
-    (W3). 폴링 중 일시적 오류는 재시도하고 연속 3회 실패 시에만 실패로
-    확정한다.
+    (W3). 폴링 중 일시적 오류는 원인을 로그에 남기고 계속 기다린다 —
+    확인 실패만으로는 실패로 확정하지 않는다 (0.9.9h). 기한 안에 한 번도
+    확인이 안 됐을 때만 실패로 확정한다.
     section_key가 있으면 60초마다 스캔 진행률을 현황에 기록한다 (스캔
     job만 — 비우기 job은 section_key를 넘기지 않는다). 스캔 job은 취소
     요청이 오면 shyni 스캔도 함께 취소하고 확인한다 (Step5-1). 비우기
@@ -773,7 +814,7 @@ def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
     if timeout is None:
         timeout = _scan_timeout_sec()
     deadline = time.time() + timeout
-    fail_count = 0
+    last_ok = None
     poll_count = 0
     while True:
         if time.time() >= deadline:
@@ -782,7 +823,7 @@ def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
             # 기다린다. job이 끝났으면 그 결과를 그대로 쓴다.
             job = _fetch_compat_job(url, token, job_id)
             if isinstance(job, dict):
-                fail_count = 0
+                last_ok = time.time()
                 outcome, _msg = _scan_poll_outcome(200, job)
                 if outcome == 'done':
                     return {'result': 'done', 'job': job,
@@ -804,13 +845,13 @@ def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
             if job == 'not_found':
                 return {'result': 'not_found', 'job': None,
                         'duration': int(time.time() - t0)}
-            # 조회 실패 — 연속 실패 로직으로 처리한다. 아직 기준에
-            # 못 미치면 잠깐 뒤에 다시 확인한다.
-            fail_count += 1
-            if fail_count >= POLL_FAIL_MAX:
+            # 조회 실패 — 기한 안에 한 번이라도 확인이 됐으면 잠깐
+            # 뒤에 다시 확인한다. 기한 내내 확인이 안 됐으면 그때
+            # 실패로 확정한다 (0.9.9h).
+            if last_ok is None or time.time() - last_ok >= timeout:
                 return {'result': 'failed', 'job': None,
                         'duration': int(time.time() - t0)}
-            deadline = time.time() + poll_sec
+            deadline = time.time() + poll_sec * 3
         if section_key is not None and _trash_cancel_requested(claim_id):
             # 스캔 job — shyni 스캔도 함께 취소하고 확인한다 (Step5-1).
             cres = _cancel_shyni_scan(url, token, job_id, section_key)
@@ -834,18 +875,16 @@ def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
                                headers={'X-Plex-Token': token,
                                         'Accept': 'application/json'},
                                timeout=15)
-        except Exception:
-            fail_count += 1
-            if fail_count >= POLL_FAIL_MAX:
-                return {'result': 'failed', 'job': None,
-                        'duration': int(time.time() - t0)}
+        except Exception as e:
+            logger.warning(f'[휴지통] 스캔 확인 실패 (job {job_id}): {type(e).__name__}: {e}')
             time.sleep(poll_sec)
             continue
         job = None
         if res.status_code == 200:
             try:
                 job = res.json()
-            except Exception:
+            except Exception as e:
+                logger.warning(f'[휴지통] 스캔 확인 응답 파싱 실패 (job {job_id}): {type(e).__name__}: {e}')
                 job = None
         outcome, _msg = _scan_poll_outcome(res.status_code, job)
         if outcome == 'not_found':
@@ -862,12 +901,9 @@ def _wait_job(url, token, job_id, timeout=None, poll_sec=SCAN_POLL_SEC,
                     'duration': int(time.time() - t0),
                     'cancel_message': '스캔이 취소됐습니다.'}
         if res.status_code != 200:
-            fail_count += 1
-            if fail_count >= POLL_FAIL_MAX:
-                return {'result': 'failed', 'job': None,
-                        'duration': int(time.time() - t0)}
-        else:
-            fail_count = 0
+            logger.warning(f'[휴지통] 스캔 확인 실패 (job {job_id}): HTTP {res.status_code}')
+        elif isinstance(job, dict):
+            last_ok = time.time()
         # 진행률 기록 — 60초마다 (폴링 간격 × 횟수, SCAN_POLL_SEC 20초 기준 3회).
         poll_count += 1
         if section_key and poll_count % max(1, int(60 / max(poll_sec, 1))) == 0:
