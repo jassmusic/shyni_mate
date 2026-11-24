@@ -15,7 +15,7 @@
 <form id='setting'>
   <div class="tab-content" id="nav-tabContent">
     {{ macros.m_tab_content_start('basic', true) }}
-      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['기본값 2 · 단위: 개', '한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인이 끝난 뒤에 다음 항목을 시작합니다.', '서버 부하가 걱정되시면 1로 줄여서 사용하셔도 됩니다.']) }}
+      {{ macros.setting_input_int('scan_max_scan_count', '동시 스캔 수', min=1, max=20, value=arg['scan_max_scan_count'], desc=['기본값 2 · 단위: 개', '한 번에 shyni로 전송해 동시에 실행할 스캔 수입니다. 항목마다 VFS 새로고침 → 스캔 전송 → 결과 확인 순서로 진행하고, 동시 스캔 수까지 함께 실행합니다.', '서버 부하가 걱정되시면 1로 줄여서 사용하셔도 됩니다.']) }}
       {{ macros.setting_input_int('scan_filecheck_thread_interval', '파일체크 주기', value=arg['scan_filecheck_thread_interval'], desc=['기본값 60초 · 단위: 초', '새로 들어온 항목이 있는지 확인하는 간격입니다.']) }}
       {{ macros.setting_input_int('scan_max_wait_time', '스캔 대기 시간', value=arg['scan_max_wait_time'], desc=['기본값 5분 · 단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.']) }}
       {{ macros.m_hr() }}
