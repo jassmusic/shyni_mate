@@ -240,7 +240,9 @@ function renderCurrent(curs) {
     }
     str += '<div style="font-size:12px; color:#888; margin-top:2px">' + bits.join(' · ') + '</div></div>';
     var pendKey = (cur.source == 'dashboard') ? ('dashboard:' + cur.section_key) : String(cur.claim_id);
-    var pending = !!cancelPending[pendKey];
+    // 취소중 표시 — 이 페이지에서 누른 것뿐 아니라 서버에 남아 있는
+    // 취소 요청(cur.cancel_requested)도 본다. 새로고침해도 '취소중'이 유지된다.
+    var pending = !!cancelPending[pendKey] || !!cur.cancel_requested;
     if (cur.source == 'dashboard') {
       str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-source="dashboard" data-key="' + esc(cur.section_key) + '"' + (pending ? ' disabled' : '') + ' style="flex-shrink:0">' + (pending ? '취소중' : '취소') + '</button>';
     } else {

@@ -4,7 +4,9 @@ from .model_periodic import ModelPeriodicItem
 from .mod_status import ModuleStatus
 from .setup import *
 from .task_periodic import (LIBRARY_BUSY_MESSAGE, TaskPeriodic,
-                            _same_job_busy, _same_library_busy,
+                            _cancel_requested, _clear_resume_current,
+                            _record_start_error, _same_job_busy,
+                            _same_library_busy,
                             annotate_total_labels, clear_start_error,
                             current_scan_progress, fail_start, get_currents,
                             get_jobs, get_last_start_error,
@@ -81,8 +83,11 @@ class ModulePeriodic(PluginModuleBase):
 
     def plugin_load(self):
         self.migration()
-        # 재시작 복구: 스캔 중이던 이력이 있으면 완료 확인을 이어서 하고,
-        # 복구할 게 없으면 running 이력을 중단됨으로 정리한다.
+        # 재시작 복구: 스캔 중이던 이력이 있으면 완료 확인을 이어서 한다.
+        # running 이력이 하나도 없을 때만(복구가 False를 돌려줄 때)
+        # 나머지 이력을 중단됨으로 정리하고 진행 상태를 비운다 —
+        # 방금 시작한 살아 있는 실행이 있으면 복구가 True를 돌려줘서
+        # 여기서 정리하지 않는다.
         resumed = False
         try:
             resumed = TaskPeriodic.resume_running(self.start_celery)
@@ -242,6 +247,11 @@ class ModulePeriodic(PluginModuleBase):
             # 다른 행을 고치거나 앞 행을 지우는 저장은 그대로 허용한다.)
             # 여러 작업이 함께 돌 수 있으니 진행 중인 작업마다 확인한다.
             for cur in get_currents():
+                # 아직 시작하지 않은 복구 항목은 작업 정의를 잠그지 않는다 —
+                # 복구 작업이 뜨지 않으면 이 항목이 남아 작업 수정을 영원히 막는다.
+                if (cur.get('stage') == 'waiting'
+                        and cur.get('resume_item_id') is not None):
+                    continue
                 stored = get_jobs()
                 ridx = cur.get('job_idx')
                 running = (stored[ridx] if isinstance(ridx, int)
@@ -285,11 +295,20 @@ class ModulePeriodic(PluginModuleBase):
                 return jsonify({'ret': 'warning',
                                 'msg': '선택한 라이브러리가 없습니다. 라이브러리 선택에서 골라 주세요.'})
             if _same_job_busy(jobs[idx].get('name') or ''):
+                # 거절은 로그와 배너에 남긴다 — 안 그러면 '시작 중'
+                # 카드만 떴다 사라지고 왜 시작 안 했는지 알 수 없다
+                # (2026-11-25 다른 서버 미드 스캔 수동 실행 실측).
+                logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — 이미 실행 중입니다.")
+                _record_start_error(jobs[idx].get('name') or '',
+                                    '이미 실행 중입니다.')
                 return jsonify({'ret': 'warning', 'msg': '이미 실행 중입니다.'})
             # 규칙 1이 규칙 2보다 먼저다. 규칙 1: 같은 모듈 안에서
             # 같은 라이브러리가 실행 중이면 동작 종류와 무관하게
             # 거절한다. 새로고침만 하는 동작도 예외가 아니다.
             if _same_library_busy(jobs[idx]['sections'][0]):
+                logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — {LIBRARY_BUSY_MESSAGE}")
+                _record_start_error(jobs[idx].get('name') or '',
+                                    LIBRARY_BUSY_MESSAGE)
                 return jsonify({'ret': 'warning',
                                 'msg': LIBRARY_BUSY_MESSAGE})
             # 규칙 2: 스캔이 들어간 동작은 첫 라이브러리 기준으로
@@ -301,6 +320,8 @@ class ModulePeriodic(PluginModuleBase):
             if 'scan' in str(action or ''):
                 gate_msg = ModuleStatus.library_gate_check(jobs[idx]['sections'][0])
                 if gate_msg:
+                    logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — {gate_msg}")
+                    _record_start_error(jobs[idx].get('name') or '', gate_msg)
                     return jsonify({'ret': 'warning', 'msg': gate_msg})
             result = self.one_execute(idx)
             logger.info(f'[Periodic] 지금 실행 요청: idx={idx} 결과={result}')
@@ -324,6 +345,25 @@ class ModulePeriodic(PluginModuleBase):
             if cur is None:
                 return jsonify({'ret': 'warning',
                                 'msg': '지금 진행 중인 주기적 스캔이 없습니다.'})
+            # 아직 시작하지 않은 복구 항목은 실행 중인 작업이 없어
+            # 취소 요청만으로는 안 사라진다 — 이력을 취소됨으로 끝내고
+            # 항목을 바로 지운다. 취소 요청도 함께 남겨, 늦게 뜨는
+            # 복구 작업이 있으면 시작할 때 멈추게 한다.
+            if (cur.get('resume_item_id') is not None
+                    and (cur.get('stage') or '') == 'waiting'):
+                request_cancel(cur.get('claim_id'))
+                try:
+                    item = (F.db.session.query(ModelPeriodicItem)
+                            .filter(ModelPeriodicItem.id
+                                    == int(cur.get('resume_item_id'))).first())
+                    if item is not None and item.status in ('running', 'waiting'):
+                        item.finish('cancelled', '취소했습니다. (실행되지 않은 복구 작업)')
+                except Exception as e:
+                    logger.warning(f'[Periodic] 복구 이력 취소 기록 실패: {e}')
+                _clear_resume_current(cur.get('resume_item_id'))
+                logger.info('[Periodic] 실행되지 않은 복구 작업 취소·정리')
+                ret['msg'] = '실행되지 않은 복구 작업을 정리했습니다.'
+                return jsonify(ret)
             request_cancel(cur.get('claim_id'))
             logger.info('[Periodic] 취소 요청')
             # Step5-1 — shyni 스캔까지 함께 취소하므로 "웹에서 취소" 안내는 없앴다.
@@ -351,6 +391,10 @@ class ModulePeriodic(PluginModuleBase):
                 if cur.get('stage') == 'scan' and cur.get('section_key'):
                     cur['scan_progress'] = current_scan_progress(
                         cur['section_key'], 'periodic')
+                # 취소 요청 여부 — 새로고침해도 '취소중' 버튼이 유지되게
+                # 서버에서 알려준다. 취소 요청은 작업이 멈출 때 지워진다.
+                cur['cancel_requested'] = bool(
+                    _cancel_requested(cur.get('claim_id')))
                 cards.append(cur)
             # 대시보드에서 시작한 스캔도 함께 보여 준다 — 어디서
             # 시작했든 진행 중인 스캔을 한곳에서 볼 수 있게 한다.

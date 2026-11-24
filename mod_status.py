@@ -2228,7 +2228,8 @@ class ModuleStatus(PluginModuleBase):
                               'status': 'cancelled',
                               'error': gate_msg}
                 self._set_state(key, st)
-                self._dashboard_row_finish(row_id, 'failed', gate_msg)
+                # 게이트에 걸려 스캔을 보내지 못한 것은 실패가 아니라 건너뜀이다.
+                self._dashboard_row_finish(row_id, 'skipped', gate_msg)
                 logger.warning(f'[현황] 새로고침 후 스캔 취소: {title} — {gate_msg}')
                 return
             st = self._get_state(key)

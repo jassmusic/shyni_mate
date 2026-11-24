@@ -223,7 +223,9 @@ function renderCurrentBox() {
     var isDashboard = (cur.source == 'dashboard');
     var isWaiting = (cur.stage == 'waiting');
     var pendKey = isDashboard ? ('dashboard:' + cur.section_key) : String(cur.claim_id);
-    var pending = !!cancelPending[pendKey];
+    // 취소중 표시 — 이 페이지에서 누른 것뿐 아니라 서버에 남아 있는
+    // 취소 요청(cur.cancel_requested)도 본다. 새로고침해도 '취소중'이 유지된다.
+    var pending = !!cancelPending[pendKey] || !!cur.cancel_requested;
     var prog = (cur.stage == 'scan' && cur.scan_progress) ? progressText(cur.scan_progress) : '';
     var title = esc(cur.section_title || cur.job_name || '');
     if (cur.job_name && cur.section_title && cur.job_name != cur.section_title) {
@@ -586,7 +588,7 @@ function renderJobs() {
       // Step5-1 — 비우기 중에는 취소 버튼을 비활성화한다 (비우기는 취소 불가).
       var runCur = runMap[i];
       var emptying = runCur && runCur.stage == 'empty';
-      var runPend = !!cancelPending[String(runCur.claim_id)];
+      var runPend = !!cancelPending[String(runCur.claim_id)] || !!runCur.cancel_requested;
       str += '<button type="button" class="btn btn-sm btn-danger job-cancel" data-idx="' + i + '" data-claim="' + esc(runCur.claim_id) + '" style="padding:3px 8px; font-size:14px"' + ((runPend || emptying) ? ' disabled' : '') + (emptying ? ' title="비우기 중에는 취소할 수 없습니다."' : '') + '>' + (runPend ? '취소중' : '취소') + '</button> ';
     } else {
       str += '<button type="button" class="btn btn-sm btn-success job-run" data-idx="' + i + '" style="padding:3px 8px; font-size:14px">지금 실행</button> ';

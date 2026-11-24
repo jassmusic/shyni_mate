@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import threading
 import time
@@ -30,6 +31,26 @@ DEFAULT_VFS_TIMEOUT_MIN = 360
 # 연장하며 계속 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
 SCAN_TIMEOUT_KEY = 'periodic_scan_timeout_min'
 DEFAULT_SCAN_TIMEOUT_MIN = 360
+# 기동 식별자 — FF 메인 프로세스의 기동 시각(epoch). 웹·워커 두
+# 프로세스가 플러그인을 따로 로드하는 틈에 방금 시작한 실행을 중단된
+# 작업으로 오인해 복구 항목을 만들면, 새 실행이 게이트에서 자기 복구
+# 항목에 걸려 실패하고 시스템이 멈춘다 (2026-11-25 실측). 이력·항목의
+# 시작 시각이 기동보다 이전이면 끊긴 것(복구), 이후면 살아 있는
+# 것(건드리지 않음)으로 판정한다. 나이 기준(10분)은 폐기 — 재시작을
+# 거의 안 하면 10분 안에 끊긴 이력이 영원히 '실행 중'으로 남는다.
+# 기동 시각과 비교할 때 시계 보정 오차(수 초)를 흡수하는 여유분.
+RUN_START_MARGIN_SEC = 5
+# 기동 식별자 비교 허용 오차(초) — 두 프로세스가 같은 메인 프로세스에서
+# 독립 계산해도 값은 같지만, 저장·복원 과정의 반올림을 흡수한다.
+RUN_ID_TOLERANCE_SEC = 1.0
+# 기동 식별자를 못 읽을 때(/proc 없음) 폴백 — 모듈 로드 시각을 기동
+# 시각 대신 쓰고, 이 시간 창 안에 있으면 같은 기동으로 본다.
+RUN_ID_FALLBACK_WINDOW_SEC = 180
+# 복구 실행 기록 — resume_running이 돌았던 기동의 식별자를 남긴다.
+# 같은 기동에서 다시 로드되면 복구를 건너뛴다.
+RESUME_RUN_KEY = 'periodic_resume_run_id'
+# 모듈 로드 시각 — _ff_run_id()가 /proc를 못 읽을 때 폴백 기동 식별자.
+_PLUGIN_LOAD_TIME = time.time()
 # 가장 최근 시작 실패 — 작업 관리 배너가 읽는다. '지금 실행'을 눌렀는데
 # 아무것도 시작되지 않은 경우(진행 중·목록 조회 실패 등)는 이력 행이
 # 생기기 전에 끝나므로, 로그에만 남던 사유를 여기에 남긴다.
@@ -575,9 +596,15 @@ def _fmt_wait(sec):
 
 def _same_job_busy(name):
     """같은 이름의 작업이 이미 돌거나 기다리고 있으면 True.
-    스케줄이 겹쳐 같은 작업이 두 번 도는 것을 막는다."""
+    스케줄이 겹쳐 같은 작업이 두 번 도는 것을 막는다.
+    아직 시작하지 않은 복구 항목('waiting')은 세지 않는다 — 복구
+    작업이 뜨지 않으면 이 항목이 영원히 남아 뒤의 실행을 전부 막아
+    버린다. 복구 작업이 뜨면 단계를 바꿔 다시 센다."""
     try:
         for cur in get_currents():
+            if (cur.get('stage') == 'waiting'
+                    and cur.get('resume_item_id') is not None):
+                continue
             if (cur.get('job_name') or '') == (name or ''):
                 return True
     except Exception:
@@ -744,8 +771,9 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
     돌려준다. 바로 시작하면 (None, 0, claim_id), 기다렸다 시작하면
     (행 id, 기다린 초, claim_id), 기다리다 시간 초과하면
     (None, None, None) — 이 때는 실패 행을 남긴다.
-    작업 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
-    '지금 실행'(수동)은 기다리지 않고 자리가 없으면 바로 실패로 끝낸다.
+    작업 대기 시간이 0이면 기다리지 않고 바로 건너뜀으로 끝낸다.
+    '지금 실행'(수동)은 기다리지 않고 자리가 없으면 바로 건너뜀으로
+    끝낸다. 자리가 없어 시작하지 못한 것은 실패가 아니라 건너뜀이다.
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
     그 이름, 여러 개면 '전체'. first_key — 첫 라이브러리 번호."""
     claim_id = f'run-{idx}-{int(time.time() * 1000)}'
@@ -757,13 +785,13 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
     if mode == 'manual':
         fail_start(name, mode,
                    gate_msg or '이미 진행 중인 주기적 스캔이 있어 시작하지 못했습니다.',
-                   section_label, action)
+                   section_label, action, status='skipped')
         return (None, None, None)
     max_min = _max_wait_min()
     if max_min <= 0:
         fail_start(name, mode,
                    gate_msg or '이미 진행 중인 주기적 스캔이 있어 시작하지 못했습니다.',
-                   section_label, action)
+                   section_label, action, status='skipped')
         return (None, None, None)
     running_names = [(c.get('job_name') or '') for c in get_currents()]
     running_names = [n for n in running_names if n]
@@ -870,17 +898,21 @@ def get_last_start_error(max_age_sec=START_ERROR_MAX_AGE_SEC):
     return err
 
 
-def fail_start(job_name, mode, reason, section_label='전체', action=None):
+def fail_start(job_name, mode, reason, section_label='전체', action=None,
+               status='failed'):
     """작업 단위 시작 실패 — 이력 행을 남기고 배너용 오류를 기록한다.
     이력 행 저장이 실패해도 배너 기록은 시도한다.
     section_label — 이력 행에 표시할 라이브러리명. 대상을 알면 그 이름,
-    모르면 '전체'."""
+    모르면 '전체'. status — 기본 'failed'. 자리가 없어 시작하지 못한
+    경우(게이트 차단)는 'skipped'로 남기고 배너에는 띄우지 않는다 —
+    실패가 아니라 건너뛴 것이기 때문이다."""
     try:
         item = ModelPeriodicItem(job_name, '', section_label, mode, action)
-        item.finish('failed', reason)
+        item.finish(status, reason)
     except Exception as e:
         logger.error(f'[주기적 스캔] 시작 실패 이력 기록 실패: {e}')
-    _record_start_error(job_name, reason)
+    if status == 'failed':
+        _record_start_error(job_name, reason)
 
 
 def _cancel_ids():
@@ -963,6 +995,199 @@ def _vfs_resume_decision(job):
     if job.get('error'):
         return 'restart', f"VFS 새로고침이 실패했습니다: {job['error']}"
     return 'done', 'VFS 새로고침이 완료됐습니다.'
+
+
+_RUN_ID_CACHE = {'done': False, 'run_id': None, 'exact': False}
+
+
+def _proc_start_epoch(pid):
+    """프로세스 기동 시각(epoch) — /proc/<pid>/stat 22번 필드와
+    /proc/stat btime으로 계산한다. 실패하면 None."""
+    try:
+        with open(f'/proc/{pid}/stat', 'r') as f:
+            stat = f.read()
+        rparen = stat.rfind(')')
+        if rparen < 0:
+            return None
+        parts = stat[rparen + 2:].split()
+        start_ticks = int(parts[19])
+        btime = None
+        with open('/proc/stat', 'r') as f:
+            for line in f:
+                if line.startswith('btime '):
+                    btime = int(line.split()[1])
+                    break
+        if btime is None:
+            return None
+        try:
+            hz = os.sysconf('SC_CLK_TCK')
+        except Exception:
+            hz = 100
+        return btime + start_ticks / hz
+    except Exception:
+        return None
+
+
+def _ff_run_id():
+    """FF 기동 식별자 — 메인 프로세스(플라스크팜) 기동 시각(epoch)과
+    정확 여부. 웹은 자기 것, 워커는 부모(메인)의 것을 쓴다 — 둘 다
+    같은 메인을 가리키니 같은 값이 나온다. 부모 명령줄에 'flaskfarm'이
+    없으면 자기 것을 쓴다. /proc를 못 읽으면 모듈 로드 시각을 폴백으로
+    쓰고 정확하지 않다고 표시한다. 결과를 캐시한다 (기동 중 불변)."""
+    if _RUN_ID_CACHE['done']:
+        return _RUN_ID_CACHE['run_id'], _RUN_ID_CACHE['exact']
+    run_id = None
+    exact = False
+    try:
+        ppid = os.getppid()
+        use_parent = False
+        try:
+            with open(f'/proc/{ppid}/cmdline', 'rb') as f:
+                if b'flaskfarm' in f.read():
+                    use_parent = True
+        except Exception:
+            pass
+        pid = ppid if use_parent else os.getpid()
+        run_id = _proc_start_epoch(pid)
+        exact = run_id is not None
+    except Exception:
+        run_id = None
+    if run_id is None:
+        run_id = _PLUGIN_LOAD_TIME
+        exact = False
+    _RUN_ID_CACHE['done'] = True
+    _RUN_ID_CACHE['run_id'] = run_id
+    _RUN_ID_CACHE['exact'] = exact
+    return run_id, exact
+
+
+def _format_run_id(run_id):
+    """기동 식별자를 저장용 문자열로 — 소수 둘째 자리."""
+    try:
+        return f'{float(run_id):.2f}'
+    except Exception:
+        return ''
+
+
+def _parse_run_id(raw):
+    """저장된 기동 식별자 문자열을 실수로 — 깨졌으면 None."""
+    try:
+        if raw is None:
+            return None
+        return float(str(raw).strip())
+    except Exception:
+        return None
+
+
+def _same_run(a, b, exact):
+    """두 기동 식별자가 같은 기동인지 — 정확한 값이면 1초, 폴백
+    (모듈 로드 시각)이면 3분 창 안에서 같은 기동으로 본다."""
+    if a is None or b is None:
+        return False
+    try:
+        window = (RUN_ID_TOLERANCE_SEC if exact
+                  else RUN_ID_FALLBACK_WINDOW_SEC)
+        return abs(float(a) - float(b)) < window
+    except Exception:
+        return False
+
+
+def _is_interrupted_run(start_time, run_start,
+                        margin_sec=RUN_START_MARGIN_SEC):
+    """이력이 기동보다 전에 시작됐으면 True — 끊긴 것으로 보고 복구
+    대상이다. 기동 이후에 시작됐으면 살아 있는 실행이다. 시작 시각이
+    없으면 끊긴 것으로 본다. 순수 함수(하니스 검증용)."""
+    if start_time is None:
+        return True
+    try:
+        return start_time.timestamp() < run_start - margin_sec
+    except Exception:
+        return True
+
+
+def _entry_is_live(cur, run_start, margin_sec=RUN_START_MARGIN_SEC):
+    """진행 상태 항목이 기동 이후에 시작됐으면 True — 살아 있는
+    실행의 표시다. 시작 시각이 없거나 못 읽으면 살아 있는 것으로 본다
+    (죽은 표시를 남기는 것보다 살아 있는 표시를 지우는 쪽이 위험하다).
+    순수 함수(하니스 검증용)."""
+    try:
+        raw = cur.get('job_started_at') if isinstance(cur, dict) else None
+        if not raw:
+            return True
+        started = datetime.strptime(str(raw), '%Y-%m-%d %H:%M:%S')
+        return started.timestamp() >= run_start - margin_sec
+    except Exception:
+        return True
+
+
+def _live_entry_for_section(currents, section_key, run_start):
+    """같은 라이브러리에 살아 있는 실행의 표시(복구 항목이 아닌 것)가
+    있으면 True. 순수 함수(하니스 검증용)."""
+    try:
+        for cur in currents or []:
+            if not isinstance(cur, dict):
+                continue
+            if cur.get('resume_item_id') is not None:
+                continue
+            if str(cur.get('section_key') or '') != str(section_key):
+                continue
+            if _entry_is_live(cur, run_start):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _merge_resume_currents(old, resume_entries, keep_resume_ids=None,
+                           run_start=None):
+    """복구 항목과 살아 있는 실행의 진행 상태를 합친다 — 순수 함수
+    (하니스 검증용). 복구 항목은 같은 라이브러리의 옛 표시를 대신하고,
+    복구 대상이 아닌 표시 중 살아 있는 것만 둔다. run_start가 주어지면
+    기동보다 전에 시작된 표시는 죽은 것으로 보고 버린다 (지난 기동의
+    죽은 카드가 계속 남는 것을 막는다). 낡은 복구 항목은 버린다 —
+    복구 작업이 뜨면 시작할 때 다시 남기니, 남아 있는 것은 뜨지 않은
+    작업의 것이다. keep_resume_ids — 이미 복구 작업이 떠서 진행 중인
+    이력 id 집합. 이 항목들은 그대로 둔다."""
+    keep_resume_ids = keep_resume_ids or set()
+    resume_keys = {str(e.get('section_key')) for e in resume_entries}
+    kept = []
+    for cur in old:
+        if not isinstance(cur, dict):
+            continue
+        rid = cur.get('resume_item_id')
+        if rid is not None:
+            try:
+                if int(rid) in keep_resume_ids:
+                    kept.append(cur)
+            except Exception:
+                pass
+            continue
+        if str(cur.get('section_key')) in resume_keys:
+            continue
+        if run_start is not None and not _entry_is_live(cur, run_start):
+            continue
+        kept.append(cur)
+    return list(resume_entries) + kept
+
+
+def _resume_already_done(run_id, exact):
+    """이 기동에서 resume_running이 이미 돌았으면 True — 마커에
+    남긴 기동 식별자와 지금 기동을 비교한다."""
+    try:
+        raw = P.ModelSetting.get(RESUME_RUN_KEY) or ''
+        if not raw:
+            return False
+        return _same_run(_parse_run_id(raw), run_id, exact)
+    except Exception:
+        return False
+
+
+def _mark_resume_done(run_id):
+    """복구 실행 기록을 지금 기동 식별자로 남긴다."""
+    try:
+        P.ModelSetting.set(RESUME_RUN_KEY, _format_run_id(run_id))
+    except Exception as e:
+        logger.warning(f'[주기적 스캔 복구] 복구 기록 저장 실패: {e}')
 
 
 class TaskPeriodic:
@@ -1238,12 +1463,13 @@ class TaskPeriodic:
                 cur['pre_max_id'] = pre_max_id
                 _upsert_current(cur)
             # 라이브러리 동시 스캔 수 게이트 — 같은 라이브러리가 스캔
-            # 중이거나 상한까지 돌고 있으면 이 섹션은 실패로 끝낸다
-            # (기다리지 않는다). 자기 작업의 진행 상태만 빼고 센다.
+            # 중이거나 상한까지 돌고 있으면 이 섹션은 건너뜀으로 끝낸다
+            # (기다리지 않는다). 실패가 아니다 — 실행하지 못한 것이다.
+            # 자기 작업의 진행 상태만 빼고 센다.
             gate_msg = ModuleStatus.library_gate_check(
                 key, exclude_claim_id=claim_id)
             if gate_msg:
-                item.finish('failed', gate_msg)
+                item.finish('skipped', gate_msg)
                 return False
             scan_started = _now_text()
             _write_status(key, 'scan', {
@@ -1637,6 +1863,9 @@ class TaskPeriodic:
                 except Exception as e:
                     logger.error(f'[주기적 스캔 복구] 남은 라이브러리 이어서 하기 실패: {e}')
                     logger.error(traceback.format_exc())
+            # 복구 작업이 끝났으면 이 작업의 취소 요청은 지운다 —
+            # 남겨 두면 취소 목록에 쌓인다.
+            _clear_cancel(f'resume-{item_id}')
 
     @staticmethod
     def _resume_continuation_info(item_id):
@@ -1744,6 +1973,47 @@ class TaskPeriodic:
                 .filter(ModelPeriodicItem.id == int(item_id)).first())
         if item is None or item.status != 'running':
             logger.info(f'주기적 스캔 복구: 이력 {item_id}이 이미 정리돼 있어 건너뜁니다.')
+            _clear_resume_current(item_id)
+            return
+        # 복구 작업이 워커에서 실행되기 시작한 순간 — 이 로그가 없으면
+        # 복구 작업이 전송만 되고 실행은 안 된 것이다.
+        logger.info(f'[주기적 스캔 복구] {item.section_title or ""} '
+                    f'복구 작업 시작 (이력 {item_id})')
+        # 복구 작업이 실제로 떴다는 표시 — 진행 상태 단계를 'waiting'에서
+        # 실제 단계로 바꾼다. resume_running이 'waiting'으로 남겨 두는
+        # 것은 복구 작업이 뜨지 않았을 때 항목이 게이트를 막지 않게
+        # 하기 위해서다. 여기서 단계를 바꿔야 이 복구가 게이트에 잡힌다.
+        flipped = False
+        try:
+            _kind, use_vfs = periodic_action_to_kind_use_vfs(item.action)
+            real_stage = ('scan' if item.shyni_job_id
+                          else ('vfs' if use_vfs else 'scan'))
+            for cur in get_currents():
+                if str(cur.get('resume_item_id')) == str(item_id):
+                    cur['stage'] = real_stage
+                    _upsert_current(cur)
+                    flipped = True
+                    break
+        except Exception as e:
+            # 전환에 실패하면 여기서 멈춘다 — 항목이 'waiting'인 채로
+            # 스캔이 돌면 게이트가 이 복구를 못 잡아 같은 라이브러리
+            # 스캔이 겹친다. 다음 재시작 때 다시 복구한다.
+            logger.error(f'[주기적 스캔 복구] 진행 상태 단계 전환 실패로 '
+                         f'복구를 중단합니다: {e}')
+            try:
+                item.finish('failed', '진행 상태 표시를 바꾸지 못해 복구를 중단했습니다.')
+            except Exception:
+                pass
+            _clear_resume_current(item_id)
+            return
+        if not flipped:
+            # 항목이 없으면 게이트가 이 복구를 못 잡으니 여기서 멈춘다.
+            logger.error(f'[주기적 스캔 복구] 이력 {item_id}의 진행 상태 '
+                         f'항목이 없어 복구를 중단합니다.')
+            try:
+                item.finish('failed', '진행 상태 표시가 없어 복구를 중단했습니다.')
+            except Exception:
+                pass
             _clear_resume_current(item_id)
             return
         job_id = item.shyni_job_id
@@ -1888,6 +2158,7 @@ class TaskPeriodic:
                 'section_started_at': (item.start_time.strftime('%Y-%m-%d %H:%M:%S')
                                        if item.start_time else ''),
                 'resume_item_id': item_id,
+                'run_id': _format_run_id(_ff_run_id()[0]),
                 'claim_id': claim_id,
                 'action': item.action,
             }
@@ -2036,12 +2307,13 @@ class TaskPeriodic:
                 cur['pre_max_id'] = pre_max_id
                 _upsert_current(cur)
             # 라이브러리 동시 스캔 수 게이트 — 같은 라이브러리가 스캔
-            # 중이거나 상한까지 돌고 있으면 이 섹션은 실패로 끝낸다
-            # (기다리지 않는다). 자기 작업의 진행 상태만 빼고 센다.
+            # 중이거나 상한까지 돌고 있으면 이 섹션은 건너뜀으로 끝낸다
+            # (기다리지 않는다). 실패가 아니다 — 실행하지 못한 것이다.
+            # 자기 작업의 진행 상태만 빼고 센다.
             gate_msg = ModuleStatus.library_gate_check(
                 key, exclude_claim_id=claim_id)
             if gate_msg:
-                item.finish('failed', gate_msg)
+                item.finish('skipped', gate_msg)
                 _clear_resume_current(item_id)
                 return
             scan_started = _now_text()
@@ -2138,7 +2410,21 @@ class TaskPeriodic:
         0.9.9g부터 VFS 새로고침부터 복구한다 — 새로고침 job id로
         rclone을 조회해 이어서 기다리거나 처음부터 다시 건다.
         여러 작업이 함께 돌고 있었다면 그만큼 복구한다.
-        복구를 시작했으면 True, 복구할 게 없으면 False."""
+        running 이력을 확인하고 정리했으면 True, running 이력이
+        하나도 없으면 False — False일 때만 플러그인 로드가 나머지
+        이력을 중단됨으로 정리하고 진행 상태를 비운다.
+
+        기동 이후에 시작한 이력은 건드리지 않는다 — 웹·워커 두
+        프로세스가 플러그인을 따로 로드하는 틈에 방금 시작한 실행을
+        중단된 작업으로 오인하면, 새 실행이 게이트에서 자기 복구
+        항목에 걸려 실패하고 시스템이 멈춘다 (2026-11-25 실측).
+        복구 항목은 'waiting'으로 남겨 두고, 복구 작업이 실제로
+        뜰 때 단계를 바꾼다 — 복구 작업이 뜨지 않았을 때 항목이
+        게이트를 막는 일을 막기 위해서다."""
+        run_id, run_exact = _ff_run_id()
+        if _resume_already_done(run_id, run_exact):
+            logger.info('[주기적 스캔 복구] 이 기동에서 이미 확인했으니 건너뜁니다.')
+            return True
         with F.app.app_context():
             try:
                 rows = (F.db.session.query(ModelPeriodicItem)
@@ -2147,8 +2433,63 @@ class TaskPeriodic:
             except Exception as e:
                 logger.error(f'[주기적 스캔 복구] 이력 조회 실패: {e}')
                 return False
+            if not rows:
+                return False
+            # 이 기동에서 이미 복구 작업을 보낸 이력 — 진행 상태에
+            # 복구 항목이 있고 기동 식별자가 지금 기동과 같다. 다시
+            # 보내면 같은 이력을 두 번 이어서 하게 된다. 지난 기동의
+            # 항목은 작업이 죽은 것이니 다시 보낸다.
+            try:
+                old_curs = get_currents()
+            except Exception:
+                old_curs = []
+            launched_ids = set()
+            for cur in old_curs:
+                if not isinstance(cur, dict):
+                    continue
+                rid = cur.get('resume_item_id')
+                if rid is None:
+                    continue
+                if _same_run(_parse_run_id(cur.get('run_id')),
+                             run_id, run_exact):
+                    try:
+                        launched_ids.add(int(rid))
+                    except Exception:
+                        pass
             targets = []
+            keep_ids = []
             for row in rows:
+                if row.id in launched_ids:
+                    logger.info(f"[주기적 스캔 복구] {row.section_title or ''} "
+                                f"이력 {row.id}은(는) 이 기동에서 이미 복구 "
+                                f"작업을 보냈으니 건너뜁니다.")
+                    keep_ids.append(row.id)
+                    continue
+                if not _is_interrupted_run(row.start_time, run_id):
+                    # 기동 이후에 시작한 실행 — 살아 있는 것으로 보고
+                    # 건드리지 않는다. 중단됨으로 정리하지도 않는다
+                    # (살아 있는 실행의 이력을 망가뜨리면 안 된다).
+                    logger.info(f"[주기적 스캔 복구] {row.section_title or ''} "
+                                f"이력 {row.id}은(는) 기동 이후에 시작돼 "
+                                f"살아 있는 실행으로 보고 건너뜁니다.")
+                    keep_ids.append(row.id)
+                    continue
+                # 같은 라이브러리에 살아 있는 실행의 표시가 있으면
+                # 복구하지 않고 건너뜀으로 마감한다 — 복구 항목이
+                # 살아 있는 표시를 대신하면 카드가 사라지고, 게이트가
+                # 어차피 새 스캔을 막는다.
+                if _live_entry_for_section(old_curs, row.section_key,
+                                           run_id):
+                    logger.info(f"[주기적 스캔 복구] {row.section_title or ''} "
+                                f"이력 {row.id}은(는) 같은 라이브러리 스캔이 "
+                                f"진행 중이라 건너뜁니다.")
+                    try:
+                        row.finish('skipped',
+                                   '같은 라이브러리 스캔이 진행 중이라 건너뜁니다.')
+                    except Exception as e:
+                        logger.warning(f'[주기적 스캔 복구] 이력 {row.id} '
+                                       f'건너뜀 마감 실패: {e}')
+                    continue
                 if row.shyni_job_id:
                     targets.append({
                         'item_id': row.id,
@@ -2176,40 +2517,45 @@ class TaskPeriodic:
                                             if row.start_time else ''),
                         'stage': 'vfs',
                     })
-            if not targets:
-                return False
-        # 복구 대상이 아닌 running 이력은 중단됨으로 정리한다
+        # 복구 대상이 아닌 running 이력은 중단됨으로 정리한다 —
+        # 기동 이후 시작한 이력과 이미 복구 작업을 보낸 이력은 살아 있는
+        # 실행이니 함께 뺀다.
+        _mark_resume_done(run_id)
         try:
             ModelPeriodicItem.set_terminated(
-                exclude_ids=[t['item_id'] for t in targets])
+                exclude_ids=[t['item_id'] for t in targets] + keep_ids)
         except Exception as e:
             logger.error(f'[주기적 스캔 복구] 나머지 이력 정리 실패: {e}')
-        # 진행 중 표시를 복구 상태로 유지한다 — 새 실행을 막고
-        # 대시보드·작업 관리 화면이 진행 중임을 알 수 있게 한다.
-        # 복구 대상이 아닌 옛 진행 상태는 버린다.
+        # 진행 중 표시 — 복구 항목을 더하고, 복구 대상이 아닌 살아 있는
+        # 실행의 표시는 그대로 둔다. 통째로 갈아끼우면 살아 있는 실행의
+        # 표시가 사라진다. 기동보다 전에 시작된 표시는 죽은 것으로 보고
+        # 버린다. 복구 항목은 'waiting'으로 남겨 두고 복구 작업이 뜰 때
+        # 단계를 바꾼다.
         try:
-            old = {str(c.get('section_key')): c for c in get_currents()
-                   if c.get('section_key')}
+            old_by_key = {str(c.get('section_key')): c for c in old_curs
+                          if isinstance(c, dict) and c.get('section_key')}
             entries = []
             for t in targets:
-                prev = old.get(t['section_key']) or {}
+                prev = old_by_key.get(t['section_key']) or {}
                 entries.append({
                     'job_idx': prev.get('job_idx'),
                     'job_name': t['job_name'],
                     'section_key': t['section_key'],
                     'section_title': t['section_title'],
-                    'stage': t.get('stage', 'scan'),
+                    'stage': 'waiting',
                     'mode': t['mode'],
                     'job_started_at': prev.get('job_started_at') or t['section_started'],
                     'section_started_at': t['section_started'],
                     'scan_job': t['job_id'],
                     'resume_item_id': t['item_id'],
+                    'run_id': _format_run_id(run_id),
                     'claim_id': f"resume-{t['item_id']}",
                     'claimed_at': prev.get('claimed_at'),
                     'pre_max_id': prev.get('pre_max_id'),
                     'action': t['action'],
                 })
-            _save_currents(entries)
+            _save_currents(_merge_resume_currents(old_curs, entries,
+                                                  launched_ids, run_id))
         except Exception as e:
             logger.error(f'[주기적 스캔 복구] 진행 상태 기록 실패: {e}')
         for t in targets:
@@ -2220,9 +2566,15 @@ class TaskPeriodic:
                 logger.info(f"[주기적 스캔 복구] {t['section_title']} "
                             f"VFS 단계부터 이어서 합니다.")
             item_id = t['item_id']
+            title = t['section_title']
 
-            def _launch(item_id=item_id):
+            def _launch(item_id=item_id, title=title):
                 try:
+                    # start_celery는 전송 후 작업이 끝날 때까지 기다리므로
+                    # (result.get()), 전송 기록은 호출 전에 남긴다.
+                    # 호출 뒤에 남기면 작업이 끝난 뒤에야 찍힌다.
+                    logger.info(f'[주기적 스캔 복구] 복구 작업 전송: {title} '
+                                f'(이력 {item_id})')
                     start_celery(TaskPeriodic.resume, None, *(item_id,))
                 except Exception as e:
                     logger.error(f'[주기적 스캔 복구] 복구 작업 시작 실패: {e}')
@@ -2235,5 +2587,9 @@ class TaskPeriodic:
                         _clear_resume_current(item_id)
                     except Exception:
                         pass
+            # daemon으로 둔다 — FF 재시작은 sys.exit으로 끝나는데,
+            # non-daemon 스레드가 start_celery의 result.get()에서
+            # 기다리고 있으면 재시작이 멈춘다 (워커가 먼저 꺼져서
+            # 결과는 영원히 안 옴). 전송은 로그로 확인한다.
             threading.Thread(target=_launch, daemon=True).start()
         return True

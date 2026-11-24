@@ -525,8 +525,9 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
     돌려준다. 바로 시작하면 (None, 0, claim_id), 기다렸다 시작하면
     (행 id, 기다린 초, claim_id), 기다리다 시간 초과하면
     (None, None, None) — 이 때는 실패 행을 남긴다.
-    작업 대기 시간이 0이면 기다리지 않고 바로 시작 실패로 끝낸다.
-    '지금 실행'(수동)은 기다리지 않고 자리가 없으면 바로 실패로 끝낸다.
+    작업 대기 시간이 0이면 기다리지 않고 바로 건너뜀으로 끝낸다.
+    '지금 실행'(수동)은 기다리지 않고 자리가 없으면 바로 건너뜀으로
+    끝낸다. 자리가 없어 시작하지 못한 것은 실패가 아니라 건너뜀이다.
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
     그 이름, 여러 개면 '전체'. first_key — 첫 라이브러리 번호."""
     from .model_trash import ModelTrashItem
@@ -539,13 +540,13 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
     if mode == 'manual':
         fail_trash_start(name, mode,
                          gate_msg or '이미 진행 중인 휴지통 스캔이 있어 시작하지 못했습니다.',
-                         section_label, action)
+                         section_label, action, status='skipped')
         return (None, None, None)
     max_min = _max_wait_min()
     if max_min <= 0:
         fail_trash_start(name, mode,
                          gate_msg or '이미 진행 중인 휴지통 스캔이 있어 시작하지 못했습니다.',
-                         section_label, action)
+                         section_label, action, status='skipped')
         return (None, None, None)
     running_names = [(c.get('job_name') or '') for c in get_trash_currents()]
     running_names = [n for n in running_names if n]
@@ -653,18 +654,23 @@ def get_last_trash_start_error(max_age_sec=TRASH_START_ERROR_MAX_AGE_SEC):
     return err
 
 
-def fail_trash_start(job_name, mode, reason, section_label='전체', action=None):
+def fail_trash_start(job_name, mode, reason, section_label='전체', action=None,
+                     status='failed'):
     """작업 단위 시작 실패 — 이력 행을 남기고 배너용 오류를 기록한다.
     이력 행 저장이 실패해도 배너 기록은 시도한다.
     section_label — 이력 행에 표시할 라이브러리명. 대상을 알면 그 이름,
-    모르면 '전체'. action — 알면 이력 행에 함께 남긴다."""
+    모르면 '전체'. action — 알면 이력 행에 함께 남긴다.
+    status — 기본 'failed'. 자리가 없어 시작하지 못한 경우(게이트 차단)는
+    'skipped'로 남기고 배너에는 띄우지 않는다 — 실패가 아니라 건너뛴
+    것이기 때문이다."""
     try:
         from .model_trash import ModelTrashItem
         item = ModelTrashItem(job_name, '', section_label, mode, action)
-        item.finish('failed', reason)
+        item.finish(status, reason)
     except Exception as e:
         logger.error(f'[휴지통 스캔] 시작 실패 이력 기록 실패: {e}')
-    _record_trash_start_error(job_name, reason)
+    if status == 'failed':
+        _record_trash_start_error(job_name, reason)
 
 
 def _trash_cancel_ids():
@@ -1328,15 +1334,16 @@ class TaskTrash:
                                 if vfs_results is None
                                 or (vfs_results.get(g['folder']) or {}).get('ok')]
                             # 라이브러리 동시 스캔 수 게이트 — 같은 라이브러리가
-                            # 스캔 중이거나 상한까지 돌고 있으면 실패로 끝낸다
-                            # (기다리지 않는다). 폴더마다 검사하지 않고 섹션
-                            # 단위로 한 번만 검사한다. 스캔할 폴더가 없으면
-                            # 검사할 필요가 없다.
+                            # 스캔 중이거나 상한까지 돌고 있으면 건너뜀으로
+                            # 끝낸다 (기다리지 않는다). 실패가 아니다 —
+                            # 실행하지 못한 것이다. 폴더마다 검사하지 않고
+                            # 섹션 단위로 한 번만 검사한다. 스캔할 폴더가
+                            # 없으면 검사할 필요가 없다.
                             if scan_folders:
                                 gate_msg = ModuleStatus.library_gate_check(
                                     key, exclude_claim_id=claim_id)
                                 if gate_msg:
-                                    status, message = 'failed', gate_msg
+                                    status, message = 'skipped', gate_msg
                                     break
                             scan_results = {}
                             scan_total = 0

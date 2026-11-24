@@ -11,7 +11,8 @@ from .task_trash_view import TaskTrashView
 from .task_trash_selected import TaskTrashSelected
 from .task_periodic import annotate_total_labels, current_scan_progress
 from .task_trash import (ACTION_LABEL, LIBRARY_BUSY_MESSAGE, TaskTrash,
-                         _same_job_busy, _same_library_busy,
+                         _record_trash_start_error, _same_job_busy,
+                         _same_library_busy, _trash_cancel_requested,
                          clear_trash_start_error, fail_trash_start,
                          get_last_trash_start_error, get_trash_currents,
                          get_trash_jobs, request_trash_cancel,
@@ -379,11 +380,20 @@ class ModuleTrash(PluginModuleBase):
                 return jsonify({'ret': 'warning',
                                 'msg': '선택한 라이브러리가 없습니다. 라이브러리 선택에서 골라 주세요.'})
             if _same_job_busy(jobs[idx].get('name') or ''):
+                # 거절은 로그와 배너에 남긴다 — 안 그러면 '시작 중'
+                # 카드만 떴다 사라지고 왜 시작 안 했는지 알 수 없다
+                # (2026-11-25 주기적 스캔과 같은 문제).
+                logger.info(f"[Trash] 지금 실행 거절: {jobs[idx].get('name') or ''} — 이미 실행 중입니다.")
+                _record_trash_start_error(jobs[idx].get('name') or '',
+                                          '이미 실행 중입니다.')
                 return jsonify({'ret': 'warning', 'msg': '이미 실행 중입니다.'})
             # 규칙 1이 규칙 2보다 먼저다. 규칙 1: 같은 모듈 안에서
             # 같은 라이브러리가 실행 중이면 동작 종류와 무관하게
             # 거절한다. 새로고침만·비우기만 하는 동작도 예외가 아니다.
             if _same_library_busy(jobs[idx]['sections'][0]):
+                logger.info(f"[Trash] 지금 실행 거절: {jobs[idx].get('name') or ''} — {LIBRARY_BUSY_MESSAGE}")
+                _record_trash_start_error(jobs[idx].get('name') or '',
+                                          LIBRARY_BUSY_MESSAGE)
                 return jsonify({'ret': 'warning',
                                 'msg': LIBRARY_BUSY_MESSAGE})
             # 규칙 2: 스캔이 들어간 동작은 첫 라이브러리 기준으로
@@ -393,6 +403,9 @@ class ModuleTrash(PluginModuleBase):
             if 'scan' in str(jobs[idx].get('action') or ''):
                 gate_msg = ModuleStatus.library_gate_check(jobs[idx]['sections'][0])
                 if gate_msg:
+                    logger.info(f"[Trash] 지금 실행 거절: {jobs[idx].get('name') or ''} — {gate_msg}")
+                    _record_trash_start_error(jobs[idx].get('name') or '',
+                                              gate_msg)
                     return jsonify({'ret': 'warning', 'msg': gate_msg})
             result = self.one_execute(idx)
             logger.info(f'[Trash] 지금 실행 요청: idx={idx} 결과={result}')
@@ -786,6 +799,10 @@ class ModuleTrash(PluginModuleBase):
                 if cur.get('stage') == 'scan' and cur.get('section_key'):
                     cur['scan_progress'] = current_scan_progress(
                         cur['section_key'], 'trash')
+                # 취소 요청 여부 — 새로고침해도 '취소중' 버튼이 유지되게
+                # 서버에서 알려준다. 취소 요청은 작업이 멈출 때 지워진다.
+                cur['cancel_requested'] = bool(
+                    _trash_cancel_requested(cur.get('claim_id')))
                 cards.append(cur)
             # 대시보드에서 시작한 스캔도 함께 보여 준다 — 어디서
             # 시작했든 진행 중인 스캔을 한곳에서 볼 수 있게 한다.
