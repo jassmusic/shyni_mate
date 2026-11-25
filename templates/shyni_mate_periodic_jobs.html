@@ -429,6 +429,16 @@ function loadCurrent() {
       if (errSig !== lastErrorSig) {
         lastErrorSig = errSig;
         renderStartError(err);
+        // 새 시작 실패가 뜨면 '시작 중' 카드를 전부 지운다 — 거절된
+        // 작업이 3분 동안 '시작 중'으로 보이면 시작되는 줄 알고
+        // 기다리게 된다 (2026-11-25 9개 작업 테스트 실측).
+        // 실제 시작 중인 작업의 카드도 함께 지워지지만, 실제 카드가
+        // 1~2초 안에 뜨니 금방 다시 보인다. 오류 뒤에 누른 작업의
+        // 카드는 건드리지 않는다 (서명이 이미 바뀌어 있어 안 지워짐).
+        if (err && startingCards.length) {
+          startingCards = [];
+          runningSig = null;
+        }
       }
       var curs = ret.data;
       if (!Array.isArray(curs)) curs = curs ? [curs] : [];

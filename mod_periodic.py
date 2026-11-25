@@ -93,6 +93,38 @@ def _pending_row_dict(entry):
     }
 
 
+def _first_section_label(sections):
+    """첫 라이브러리 번호 → 제목. 못 찾으면 '전체'."""
+    try:
+        secs = sections or []
+        if not secs:
+            return '전체'
+        found, _err = ModuleStatus._sections()
+        for s in (found or []):
+            if str(s.get('key')) == str(secs[0]):
+                return s.get('title') or '전체'
+    except Exception:
+        pass
+    return '전체'
+
+
+def _record_reject_skipped(idx, job_name, reason):
+    """수동 실행 거절을 이력에 '건너뜀' 행으로 남긴다 — 거절돼도
+    목록에서 눌렀다는 흔적을 볼 수 있게. 'skipped'는 배너를
+    건드리지 않으니 거절 배너와 중복되지 않는다."""
+    try:
+        jobs = get_jobs()
+        job = jobs[idx] if 0 <= idx < len(jobs) else None
+        action = periodic_kind_use_vfs_to_action(
+            job.get('kind'), job.get('use_vfs')) if job else None
+        secs = job.get('sections') if job else None
+        fail_start(job_name, 'manual', reason,
+                   _first_section_label(secs), action=action,
+                   status='skipped')
+    except Exception as e:
+        logger.warning(f'[Periodic] 거절 이력 기록 실패: {e}')
+
+
 class ModulePeriodic(PluginModuleBase):
     """주기적 스캔 — 라이브러리를 골라 cron으로 등록하면 정해진 시각에
     (옵션) VFS 새로고침 → 스캔을 하나씩 순차로 실행한다."""
@@ -399,11 +431,14 @@ class ModulePeriodic(PluginModuleBase):
                 logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — 이미 대기 중입니다.")
                 _record_start_error(jobs[idx].get('name') or '',
                                     '이미 대기 중입니다.')
+                _record_reject_skipped(idx, jobs[idx].get('name') or '',
+                                       '이미 대기 중입니다.')
                 return jsonify({'ret': 'warning', 'msg': '이미 대기 중입니다.'})
             if is_library_pending(jobs[idx]['sections'][0]):
                 _msg = '해당 라이브러리 작업이 대기 중입니다.'
                 logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — {_msg}")
                 _record_start_error(jobs[idx].get('name') or '', _msg)
+                _record_reject_skipped(idx, jobs[idx].get('name') or '', _msg)
                 return jsonify({'ret': 'warning', 'msg': _msg})
             if _same_job_busy(jobs[idx].get('name') or ''):
                 # 거절은 로그와 배너에 남긴다 — 안 그러면 '시작 중'
@@ -412,6 +447,8 @@ class ModulePeriodic(PluginModuleBase):
                 logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — 이미 실행 중입니다.")
                 _record_start_error(jobs[idx].get('name') or '',
                                     '이미 실행 중입니다.')
+                _record_reject_skipped(idx, jobs[idx].get('name') or '',
+                                       '이미 실행 중입니다.')
                 return jsonify({'ret': 'warning', 'msg': '이미 실행 중입니다.'})
             # 규칙 1이 규칙 2보다 먼저다. 규칙 1: 같은 모듈 안에서
             # 같은 라이브러리가 실행 중이면 동작 종류와 무관하게
@@ -420,6 +457,8 @@ class ModulePeriodic(PluginModuleBase):
                 logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — {LIBRARY_BUSY_MESSAGE}")
                 _record_start_error(jobs[idx].get('name') or '',
                                     LIBRARY_BUSY_MESSAGE)
+                _record_reject_skipped(idx, jobs[idx].get('name') or '',
+                                       LIBRARY_BUSY_MESSAGE)
                 return jsonify({'ret': 'warning',
                                 'msg': LIBRARY_BUSY_MESSAGE})
             # 규칙 2: 스캔이 들어간 동작은 첫 라이브러리 기준으로
@@ -436,6 +475,8 @@ class ModulePeriodic(PluginModuleBase):
                 if gate_msg:
                     logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — {gate_msg}")
                     _record_start_error(jobs[idx].get('name') or '', gate_msg)
+                    _record_reject_skipped(idx, jobs[idx].get('name') or '',
+                                           gate_msg)
                     return jsonify({'ret': 'warning', 'msg': gate_msg})
             result = self.one_execute(idx)
             logger.info(f'[Periodic] 지금 실행 요청: idx={idx} 결과={result}')
