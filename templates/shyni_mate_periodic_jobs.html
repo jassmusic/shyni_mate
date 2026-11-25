@@ -245,6 +245,7 @@ function renderCurrentBox() {
     var actLabel = cur.action_label || ACTION_LABELS[cur.action] || '';
     if (actLabel) bits.push(esc(actLabel));
     bits.push(cur.mode == 'manual' ? '수동' : '스케줄');
+    if (cur.section_count > 1) bits.push('라이브러리 ' + cur.section_count + '개');
     var startedMs = parseTs(isWaiting ? cur.section_started_at : cur.job_started_at);
     if (isWaiting) {
       bits.push(fmtHM(cur.section_started_at) + ' 대기 시작');
@@ -256,6 +257,10 @@ function renderCurrentBox() {
     str += '<div style="font-size:12px; color:#888; margin-top:2px">' + bits.join(' · ') + '</div></div>';
     if (isDashboard) {
       str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-source="dashboard" data-key="' + esc(cur.section_key) + '"' + (pending ? ' disabled' : '') + ' style="flex-shrink:0">' + (pending ? '취소중' : '취소') + '</button>';
+    } else if (cur.pending) {
+      // 대기 중인 작업 — 아직 실행이 안 돼 claim이 없다. 대기 취소는
+      // 바로 끝나니 '취소중' 표시 없이 버튼만 둔다.
+      str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-pending="' + esc(cur.pending_id) + '" style="flex-shrink:0">취소</button>';
     } else {
       str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-claim="' + esc(cur.claim_id) + '"' + (pending ? ' disabled' : '') + ' style="flex-shrink:0">' + (pending ? '취소중' : '취소') + '</button>';
     }
@@ -377,6 +382,18 @@ function requestCancel(btn) {
     setTimeout(loadCurrent, 2000);
     setTimeout(loadCurrent, 8000);
     setTimeout(loadCurrent, 20000);
+    return;
+  }
+  var pendingId = $btn.data('pending');
+  if (pendingId) {
+    var pcur = null;
+    for (var n = 0; n < runningCurs.length; n++) {
+      if (String(runningCurs[n].pending_id) == String(pendingId)) { pcur = runningCurs[n]; break; }
+    }
+    var pname = (pcur && (pcur.job_name || pcur.section_title)) || '';
+    if (!confirm((pname ? pname + ' ' : '') + '대기 중인 작업이 취소됩니다.')) return;
+    globalSendCommand('cancel_pending', pendingId);
+    setTimeout(loadCurrent, 1000);
     return;
   }
   var cur = null;

@@ -1273,16 +1273,87 @@ class ModuleStatus(PluginModuleBase):
         return sorted(running.items(), key=lambda kv: order.get(kv[0], 999))
 
     @classmethod
-    def library_gate_check(cls, key, exclude_source=None, exclude_claim_id=None):
+    def _pending_scan_first_keys(cls):
+        """스캔이 들어간 대기 항목들의 첫 라이브러리 [(번호, 이름)] —
+        게이트의 자리 계산용. task_periodic을 위에서 가져오면 순환
+        참조가 되니 설정을 직접 읽는다. 만료·취소된 항목은 빼고 센다."""
+        try:
+            raw = P.ModelSetting.get('periodic_pending')
+            entries = json.loads(raw) if raw else []
+        except Exception:
+            return []
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            return []
+        try:
+            from .task_periodic import PENDING_MAX_AGE_SEC
+        except Exception:
+            PENDING_MAX_AGE_SEC = 6 * 3600
+        try:
+            sections, _err = cls._sections()
+        except Exception:
+            sections = None
+        titles = {}
+        for s in (sections or []):
+            try:
+                titles[str(s.get('key'))] = (s.get('title')
+                                             or f"라이브러리 {s.get('key')}")
+            except Exception:
+                continue
+        out = []
+        seen = set()
+        now = time.time()
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            if e.get('status') == 'cancelled':
+                continue
+            try:
+                sent = float(e.get('sent_at') or 0)
+            except Exception:
+                continue
+            if sent <= 0 or now - sent > PENDING_MAX_AGE_SEC:
+                continue
+            if 'scan' not in str(e.get('action') or ''):
+                continue
+            secs = e.get('sections') or []
+            if not secs:
+                continue
+            k = str(secs[0])
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append((k, titles.get(k) or f'라이브러리 {k}'))
+        return out
+
+    @classmethod
+    def library_gate_check(cls, key, exclude_source=None, exclude_claim_id=None,
+                           include_pending=False):
         """스캔 시작 전 게이트 검사 — 막아야 하면 안내 문구, 아니면 None.
-        같은 라이브러리가 이미 스캔 중이면 그 문구를 먼저 낸다."""
+        같은 라이브러리가 이미 스캔 중이면 그 문구를 먼저 낸다.
+        include_pending면 대기 중인 스캔도 자리로 센다 (보낼 때만 —
+        실행 중에는 대기 중인 걸 세면 안 된다)."""
         running = cls.running_library_scans(
             exclude_source=exclude_source, exclude_claim_id=exclude_claim_id)
         if str(key) in {str(k) for k, _ in running}:
             return cls.LIBRARY_SCAN_SAME_MESSAGE
+        pending = []
+        if include_pending:
+            pending = cls._pending_scan_first_keys()
+            if str(key) in {str(k) for k, _ in pending}:
+                return '해당 라이브러리 스캔이 대기 중입니다.'
         limit = cls.library_scan_limit()
-        if len(running) >= limit:
+        total = {str(k) for k, _ in running}
+        total.update(str(k) for k, _ in pending)
+        if len(total) >= limit:
             names = ', '.join(t for _, t in running)
+            pend_names = ', '.join(t for k, t in pending
+                                  if str(k) not in {str(rk) for rk, _ in running})
+            all_names = ', '.join([n for n in [names, pend_names] if n])
+            if pending:
+                return (f'다른 라이브러리 스캔 {len(total)}개가 실행 중이거나 대기 중입니다 '
+                        f'({all_names}). (라이브러리 동시 스캔 수: {limit}개)')
             return (f'다른 라이브러리 스캔 {len(running)}개가 실행 중입니다 '
                     f'({names}). (라이브러리 동시 스캔 수: {limit}개)')
         return None

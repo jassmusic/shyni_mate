@@ -543,6 +543,266 @@ def update_current_job_idx(claim_id, new_idx):
             return
 
 
+# ---------- 대기 항목 (Celery 대기열에 쌓인 실행) ----------
+# '지금 실행'이나 스케줄이 작업을 Celery로 넘겼는데 워커 자리가
+# 없어 아직 실행이 안 된 상태. 실행 중 진행 상태(CURRENT_KEY)와는
+# 별개로 둔다 — 아직 실행이 안 돼 claim_id도, 진행 상태도 없다.
+# 작업 하나당 항목 하나다 (라이브러리 20개짜리 작업도 한 항목).
+PENDING_KEY = 'periodic_pending'
+# 대기 항목 보관 기한(초) — 이보다 오래 실행이 안 되면 작업이
+# 사라진 것으로 보고 지운다. _wait_for_turn의 최대 대기(기본 6시간)와
+# 같은 값이다.
+PENDING_MAX_AGE_SEC = 6 * 3600
+
+
+def _parse_pending(raw):
+    """대기 항목 JSON → 목록. 깨졌으면 빈 목록."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict)]
+
+
+def _read_pending_raw():
+    try:
+        return _parse_pending(P.ModelSetting.get(PENDING_KEY))
+    except Exception:
+        return []
+
+
+def _save_pending(entries):
+    try:
+        P.ModelSetting.set(PENDING_KEY,
+                           json.dumps(entries, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f'[주기적 스캔] 대기 항목 저장 실패: {e}')
+
+
+def _pending_expired(entry, now=None):
+    try:
+        sent = float(entry.get('sent_at') or 0)
+    except Exception:
+        return True
+    if sent <= 0:
+        return True
+    return (now if now is not None else time.time()) - sent > PENDING_MAX_AGE_SEC
+
+
+def get_pending_entries(include_cancelled=False):
+    """대기 중인 항목 목록 (보낸 시각 순). 만료된 항목은 지우고
+    로그를 남긴다 — 실행이 안 되고 사라진 작업의 기록이다.
+    기본적으로 취소된 항목은 빼고 돌려준다 (화면·게이트용)."""
+    entries = _read_pending_raw()
+    now = time.time()
+    kept = []
+    dropped = 0
+    for e in entries:
+        if _pending_expired(e, now):
+            dropped += 1
+            try:
+                logger.info(
+                    f"[주기적 스캔] 대기 항목 만료로 정리: "
+                    f"{e.get('job_name') or ''} "
+                    f"({e.get('mode') or ''}, "
+                    f"{e.get('sent_at_text') or ''})")
+            except Exception:
+                pass
+            continue
+        kept.append(e)
+    if dropped:
+        _save_pending(kept)
+    if include_cancelled:
+        return sorted(kept, key=lambda e: float(e.get('sent_at') or 0))
+    return sorted([e for e in kept if e.get('status') != 'cancelled'],
+                  key=lambda e: float(e.get('sent_at') or 0))
+
+
+def add_pending_entry(job_idx, job_name, mode, action, sections):
+    """대기 항목 추가 — 같은 (작업, 방식)이 이미 대기 중이면 새로
+    만들지 않고 기존 항목을 돌려준다. 연달아 눌러도 하나만 쌓인다."""
+    entries = _read_pending_raw()
+    now = time.time()
+    kept = []
+    for e in entries:
+        if _pending_expired(e, now):
+            continue
+        kept.append(e)
+        if (e.get('status') != 'cancelled'
+                and str(e.get('job_idx')) == str(job_idx)
+                and (e.get('mode') or '') == (mode or '')):
+            if len(kept) != len(entries):
+                _save_pending(kept)
+            return e
+    sent_ms = int(now * 1000)
+    entry = {
+        'pending_id': f'pend-{job_idx}-{sent_ms}-{random.randint(1000, 9999)}',
+        'job_idx': job_idx,
+        'job_name': job_name or '',
+        'mode': mode or '',
+        'action': action or '',
+        'sections': [str(k) for k in (sections or [])],
+        'sent_at': now,
+        'sent_at_text': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now)),
+        'status': 'waiting',
+    }
+    kept.append(entry)
+    _save_pending(kept)
+    return entry
+
+
+def take_pending_entry(job_idx, mode):
+    """(작업, 방식)에 맞는 가장 오래된 대기 항목을 꺼낸다 — 꺼낸
+    항목은 목록에서 지운다. 없으면 None. 실행 시작(_run)이 부른다."""
+    entries = _read_pending_raw()
+    best_i = None
+    best_at = None
+    for i, e in enumerate(entries):
+        if (str(e.get('job_idx')) == str(job_idx)
+                and (e.get('mode') or '') == (mode or '')):
+            try:
+                at = float(e.get('sent_at') or 0)
+            except Exception:
+                at = 0
+            if best_i is None or at < best_at:
+                best_i = i
+                best_at = at
+    if best_i is None:
+        return None
+    entry = entries.pop(best_i)
+    _save_pending(entries)
+    return entry
+
+
+def cancel_pending_entry(pending_id):
+    """대기 항목을 취소 상태로 바꾼다 — 없으면 None, 있으면 항목을
+    돌려준다. 목록에서 바로 지우지 않는다: 나중에 실행되는 큐 작업이
+    취소됐음을 알고 바로 끝내야 하기 때문이다. 만료가 정리한다."""
+    if not pending_id:
+        return None
+    entries = _read_pending_raw()
+    for e in entries:
+        if str(e.get('pending_id') or '') == str(pending_id):
+            if e.get('status') == 'cancelled':
+                return e
+            e['status'] = 'cancelled'
+            e['cancelled_at'] = time.time()
+            _save_pending(entries)
+            return e
+    return None
+
+
+def is_job_pending(job_name):
+    """같은 이름의 작업이 대기 중이면 True."""
+    try:
+        for e in get_pending_entries():
+            if (e.get('job_name') or '') == (job_name or ''):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def is_library_pending(first_key):
+    """첫 라이브러리가 대기 중인 작업의 첫 라이브러리면 True —
+    대기 중인 작업이 곧 그 라이브러리를 스캔할 예정이다."""
+    if first_key is None:
+        return False
+    try:
+        for e in get_pending_entries():
+            secs = e.get('sections') or []
+            if secs and str(secs[0]) == str(first_key):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def pending_scan_first_keys():
+    """스캔이 들어간 대기 항목들의 첫 라이브러리 번호 목록 —
+    게이트의 자리 계산용. 작업 하나가 자리 하나를 쓴다."""
+    keys = []
+    try:
+        for e in get_pending_entries():
+            if 'scan' not in str(e.get('action') or ''):
+                continue
+            secs = e.get('sections') or []
+            if secs:
+                keys.append(str(secs[0]))
+    except Exception:
+        pass
+    return keys
+
+
+def _celery_queue_len():
+    """Celery 대기열에 쌓인 작업 수 — Redis를 직접 읽는다.
+    읽지 못하면 None (건드리지 않는다는 뜻)."""
+    try:
+        import redis as redis_lib
+    except Exception:
+        return None
+    host, port, db = 'localhost', 6379, 0
+    try:
+        url = ''
+        try:
+            url = (F.celery.conf.broker_url or '') if hasattr(F, 'celery') else ''
+        except Exception:
+            url = ''
+        if url.startswith('redis://'):
+            from urllib.parse import urlparse
+            u = urlparse(url)
+            host = u.hostname or host
+            port = u.port or port
+            try:
+                db = int((u.path or '/0').strip('/') or 0)
+            except Exception:
+                db = 0
+    except Exception:
+        pass
+    try:
+        r = redis_lib.Redis(host=host, port=port, db=db, socket_timeout=2)
+        return int(r.llen('celery'))
+    except Exception:
+        return None
+
+
+def cleanup_pending_on_load():
+    """FF 시작 때 낡은 대기 항목 정리 — Redis 대기열이 비어 있으면
+    시작 전에 보낸 대기 항목은 작업이 사라진 것이니 지운다.
+    Redis를 못 읽으면 건드리지 않는다 (만료가 처리한다).
+    시작한 뒤에 보낸 항목은 건드리지 않는다."""
+    entries = _read_pending_raw()
+    if not entries:
+        return
+    qlen = _celery_queue_len()
+    now = time.time()
+    kept = []
+    dropped = 0
+    for e in entries:
+        if _pending_expired(e, now):
+            dropped += 1
+            continue
+        if qlen == 0:
+            try:
+                sent = float(e.get('sent_at') or 0)
+            except Exception:
+                sent = 0
+            if sent < _PLUGIN_LOAD_TIME:
+                dropped += 1
+                continue
+        kept.append(e)
+    if dropped:
+        logger.info(f'[주기적 스캔] 시작 시 낡은 대기 항목 {dropped}개 정리 '
+                    f'(Redis 대기열: {qlen if qlen is not None else "확인 불가"})')
+        _save_pending(kept)
+
+
 def _max_wait_min():
     """작업 대기 시간(분) — 설정값, 없거나 숫자가 아니면 기본 360분.
     음수는 기본값으로 취급한다. 0이면 기다리지 않는다."""
@@ -1237,6 +1497,14 @@ class TaskPeriodic:
         # 이력·진행 상태에 남길 동작 — 작업 정의의 kind + use_vfs를
         # 동작 코드로 되돌린다 (refresh | scan | refresh_scan).
         action = periodic_kind_use_vfs_to_action(job.get('kind'), job.get('use_vfs'))
+        # 대기 항목 회수 — 이 작업이 대기 중이었다면 항목을 지운다.
+        # _same_job_busy보다 먼저 해야 자기 대기 항목에 안 걸린다.
+        # 취소된 대기 항목이면 실행하지 않고 끝낸다 (취소 때 이력은
+        # '대기가 취소되었습니다'로 이미 남겼다).
+        pending = take_pending_entry(idx, mode)
+        if pending is not None and pending.get('status') == 'cancelled':
+            logger.info(f'주기적 스캔: {job_name} — 대기 취소된 작업이라 시작하지 않습니다.')
+            return
         # 같은 작업이 이미 돌거나 기다리고 있으면 중복으로 세지 않는다.
         if _same_job_busy(job_name):
             logger.info(f'주기적 스캔: {job_name} — 이미 실행 중이거나 대기 중이라 건너뜁니다.')

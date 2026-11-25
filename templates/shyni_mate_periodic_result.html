@@ -245,6 +245,7 @@ function renderCurrent(curs) {
     var actLabel = cur.action_label || ACTION_LABELS[cur.action] || '';
     if (actLabel) bits.push(esc(actLabel));
     bits.push(cur.mode == 'manual' ? '수동' : '스케줄');
+    if (cur.section_count > 1) bits.push('라이브러리 ' + cur.section_count + '개');
     var startedMs = parseTs(isWaiting ? cur.section_started_at : cur.job_started_at);
     if (isWaiting) {
       bits.push(fmtHM(cur.section_started_at) + ' 대기 시작');
@@ -260,6 +261,10 @@ function renderCurrent(curs) {
     var pending = !!cancelPending[pendKey] || !!cur.cancel_requested;
     if (cur.source == 'dashboard') {
       str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-source="dashboard" data-key="' + esc(cur.section_key) + '"' + (pending ? ' disabled' : '') + ' style="flex-shrink:0">' + (pending ? '취소중' : '취소') + '</button>';
+    } else if (cur.pending) {
+      // 대기 중인 작업 — 아직 실행이 안 돼 claim이 없다. 대기 취소는
+      // 바로 끝나니 '취소중' 표시 없이 버튼만 둔다.
+      str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-pending="' + esc(cur.pending_id) + '" style="flex-shrink:0">취소</button>';
     } else {
       str += '<button type="button" class="btn btn-sm btn-danger current-cancel" data-claim="' + esc(cur.claim_id) + '"' + (pending ? ' disabled' : '') + ' style="flex-shrink:0">' + (pending ? '취소중' : '취소') + '</button>';
     }
@@ -298,6 +303,19 @@ function requestCancel(btn) {
     setTimeout(loadCurrent, 2000);
     setTimeout(loadCurrent, 8000);
     setTimeout(loadCurrent, 20000);
+    return;
+  }
+  var pendingId = $btn.data('pending');
+  if (pendingId) {
+    var pcur = null;
+    for (var n = 0; n < currentCurs.length; n++) {
+      if (String(currentCurs[n].pending_id) == String(pendingId)) { pcur = currentCurs[n]; break; }
+    }
+    var pname = (pcur && (pcur.job_name || pcur.section_title)) || '';
+    if (!confirm((pname ? pname + ' ' : '') + '대기 중인 작업이 취소됩니다.')) return;
+    globalSendCommand('cancel_pending', pendingId);
+    setTimeout(loadCurrent, 1000);
+    setTimeout(function () { loadHistory(histPage); }, 1500);
     return;
   }
   var cur = null;
@@ -391,7 +409,12 @@ function renderHistory(data) {
   for (var i = 0; i < rows.length; i++) {
     var h = rows[i];
     var expanded = !!expandedIds[h.id];
-    str += '<tr class="hist-row" data-id="' + h.id + '" style="cursor:pointer' + (expanded ? '; background:#f7fafc' : '') + '">';
+    if (h.pending) {
+      // 대기 행은 DB 행이 아니라 펼침 상세가 없다 — 클릭해도 안 열린다.
+      str += '<tr class="hist-row" data-id="' + h.id + '" data-pending="1">';
+    } else {
+      str += '<tr class="hist-row" data-id="' + h.id + '" style="cursor:pointer' + (expanded ? '; background:#f7fafc' : '') + '">';
+    }
     str += '<td class="c-time">' + fmtTimeShort(h.start_time) + '</td>';
     str += '<td class="c-time">' + fmtTimeShort(h.finish_time) + '</td>';
     str += '<td class="c-name">' + esc(h.job_name) + (h.mode == 'manual' ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + (h.action_label ? '<div style="font-size:13px; color:#888">' + esc(h.action_label) + '</div>' : '') + '</td>';
@@ -666,6 +689,7 @@ $(document).ready(function () {
   });
 
   $(document).off('click', '.hist-row').on('click', '.hist-row', function () {
+    if ($(this).data('pending')) return; // 대기 행은 DB 행이 아니라 펼침 상세가 없다
     var id = $(this).data('id');
     if (expandedIds[id]) delete expandedIds[id];
     else { expandedIds[id] = true; }

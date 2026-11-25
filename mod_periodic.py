@@ -1,4 +1,5 @@
 import json
+import time
 
 from .model_periodic import ModelPeriodicItem
 from .mod_status import ModuleStatus
@@ -6,13 +7,16 @@ from .setup import *
 from .task_periodic import (LIBRARY_BUSY_MESSAGE, TaskPeriodic,
                             _cancel_requested, _clear_resume_current,
                             _record_start_error, _same_job_busy,
-                            _same_library_busy,
-                            annotate_total_labels, clear_start_error,
+                            _same_library_busy, add_pending_entry,
+                            annotate_total_labels, cancel_pending_entry,
+                            cleanup_pending_on_load, clear_start_error,
                             current_scan_progress, fail_start, get_currents,
                             get_jobs, get_last_start_error,
+                            get_pending_entries, is_job_pending,
+                            is_library_pending,
                             periodic_action_to_kind_use_vfs,
                             periodic_kind_use_vfs_to_action, request_cancel,
-                            update_current_job_idx)
+                            take_pending_entry, update_current_job_idx)
 
 name = 'periodic'
 logger = P.logger
@@ -20,6 +24,73 @@ logger = P.logger
 # 라이브러리 선택 목록 정렬 — 주기적 스캔·휴지통 스캔이 같은 설정을 쓴다.
 PICK_SORTS = ('default_asc', 'default_desc', 'name_asc', 'name_desc')
 PICK_SORT_KEY = 'jobs_lib_pick_sort'
+
+
+def _pending_card_dict(entry):
+    """대기 항목 → 진행 카드 dict. stage='waiting'으로 렌더링돼
+    기존 대기 카드와 같은 모양으로 나온다."""
+    from .model_periodic import action_label
+    secs = entry.get('sections') or []
+    return {
+        'pending': True,
+        'pending_id': entry.get('pending_id') or '',
+        'claim_id': 'pending:' + str(entry.get('pending_id') or ''),
+        'job_idx': entry.get('job_idx'),
+        'job_name': entry.get('job_name') or '',
+        'section_key': str(secs[0]) if secs else '',
+        'section_title': entry.get('job_name') or '',
+        'stage': 'waiting',
+        'mode': entry.get('mode') or '',
+        'job_started_at': entry.get('sent_at_text') or '',
+        'section_started_at': entry.get('sent_at_text') or '',
+        'action': entry.get('action') or '',
+        'action_label': action_label(entry.get('action')),
+        'section_count': len(secs),
+        'cancel_requested': False,
+    }
+
+
+def _pending_row_dict(entry):
+    """대기 항목 → 이력 목록 가상 행 dict. DB 행이 아니라 펼침
+    상세는 없다 (템플릿이 pending이면 펼침을 막는다)."""
+    from .model_periodic import action_label
+    secs = entry.get('sections') or []
+    try:
+        waiting_seconds = max(
+            0, int(time.time() - float(entry.get('sent_at') or 0)))
+    except Exception:
+        waiting_seconds = 0
+    sent = entry.get('sent_at_text') or ''
+    return {
+        'pending': True,
+        'id': 'pending:' + str(entry.get('pending_id') or ''),
+        'mode': entry.get('mode') or '',
+        'action': entry.get('action') or '',
+        'action_label': action_label(entry.get('action')),
+        'status': 'waiting',
+        'job_name': entry.get('job_name') or '',
+        'section_key': str(secs[0]) if secs else '',
+        'section_title': entry.get('job_name') or '',
+        'start_time': sent[5:] if len(sent) > 5 else sent,
+        'finish_time': '',
+        'duration': None,
+        'wait_seconds': None,
+        'waiting_seconds': waiting_seconds,
+        'message': '워커 대기 중입니다.',
+        'shyni_job_id': None,
+        'stat_total': None,
+        'stat_new': None,
+        'stat_missing': None,
+        'stat_updated': None,
+        'stat_restored': None,
+        'stat_registered': None,
+        'stat_failed': None,
+        'vfs_duration': None,
+        'vfs_job_id': None,
+        'scan_duration': None,
+        'append_count': None,
+        'has_append': False,
+    }
 
 
 class ModulePeriodic(PluginModuleBase):
@@ -97,6 +168,12 @@ class ModulePeriodic(PluginModuleBase):
             ModelPeriodicItem.set_terminated()
             P.ModelSetting.set('periodic_current', '')
         P.ModelSetting.set('periodic_cancel', '')
+        # 대기 항목 정리 — FF 시작 때 Redis 대기열이 비어 있으면
+        # 시작 전에 보낸 대기 항목은 작업이 사라진 것이니 지운다.
+        try:
+            cleanup_pending_on_load()
+        except Exception as e:
+            logger.warning(f'[Periodic] 대기 항목 시작 정리 실패: {e}')
         self.start()
 
     # ---------- 스케줄러 ----------
@@ -140,10 +217,30 @@ class ModulePeriodic(PluginModuleBase):
         # Celery에 넘기지 못하면 스레드·태스크 안에서 조용히 죽는다 —
         # '실행을 시작했습니다'라고 답한 뒤 아무것도 안 뜨는 경우다.
         # 그래서 여기서 실패를 잡아 이력 행과 배너 기록으로 남긴다.
+        # 대기 항목 기록 — 스케줄러 경로는 여기서 기록한다. 수동은
+        # task_execute에서 먼저 기록하고, 여기는 중복 방지 때문에
+        # 한 번만 남는다.
+        try:
+            jobs = get_jobs()
+            job = jobs[idx] if 0 <= idx < len(jobs) else None
+            if job is not None:
+                add_pending_entry(idx, job.get('name') or '', mode,
+                                  periodic_kind_use_vfs_to_action(
+                                      job.get('kind'), job.get('use_vfs')),
+                                  [str(k) for k in (job.get('sections') or [])])
+        except Exception as e:
+            logger.warning(f'[Periodic] 대기 항목 기록 실패: {e}')
         try:
             self.start_celery(TaskPeriodic.start, None, *(idx, mode))
         except Exception as e:
             logger.error(f'[Periodic] Celery 시작 실패: {e}')
+            # 넘기지 못했으면 대기 항목도 지운다 — 큐에 안 들어갔으니
+            # 대기 중으로 보이면 안 된다. (실행 중 실패면 _run이
+            # 이미 항목을 가져가서 여기는 아무것도 안 한다.)
+            try:
+                take_pending_entry(idx, mode)
+            except Exception:
+                pass
             try:
                 jobs = get_jobs()
                 job = jobs[idx] if 0 <= idx < len(jobs) else None
@@ -294,6 +391,20 @@ class ModulePeriodic(PluginModuleBase):
             if not (jobs[idx].get('sections') or []):
                 return jsonify({'ret': 'warning',
                                 'msg': '선택한 라이브러리가 없습니다. 라이브러리 선택에서 골라 주세요.'})
+            # 대기 중인 작업은 실행 중인 작업보다 먼저 본다 — 같은
+            # 작업이 이미 대기 중이면 또 쌓지 않는다. 게이트는 실행
+            # 중인 것만 세서, 대기 중인 걸 안 보면 연달아 누를 때마다
+            # 대기열에 쌓인다 (2026-11-25 다른 서버 미드 3회 중복 실측).
+            if is_job_pending(jobs[idx].get('name') or ''):
+                logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — 이미 대기 중입니다.")
+                _record_start_error(jobs[idx].get('name') or '',
+                                    '이미 대기 중입니다.')
+                return jsonify({'ret': 'warning', 'msg': '이미 대기 중입니다.'})
+            if is_library_pending(jobs[idx]['sections'][0]):
+                _msg = '해당 라이브러리 작업이 대기 중입니다.'
+                logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — {_msg}")
+                _record_start_error(jobs[idx].get('name') or '', _msg)
+                return jsonify({'ret': 'warning', 'msg': _msg})
             if _same_job_busy(jobs[idx].get('name') or ''):
                 # 거절은 로그와 배너에 남긴다 — 안 그러면 '시작 중'
                 # 카드만 떴다 사라지고 왜 시작 안 했는지 알 수 없다
@@ -315,10 +426,13 @@ class ModulePeriodic(PluginModuleBase):
             # 게이트를 본다 — 같은 라이브러리가 스캔 중이거나 설정한
             # 개수까지 돌고 있으면 시작하지 않고 거절한다.
             # 새로고침만 하는 동작은 스캔 자리를 안 쓴다.
+            # 대기 중인 스캔도 자리로 센다 (include_pending) — 안 세면
+            # 대기열에 쌓인 만큼 자리를 초과해서 받는다.
             action = periodic_kind_use_vfs_to_action(
                 jobs[idx].get('kind'), jobs[idx].get('use_vfs'))
             if 'scan' in str(action or ''):
-                gate_msg = ModuleStatus.library_gate_check(jobs[idx]['sections'][0])
+                gate_msg = ModuleStatus.library_gate_check(
+                    jobs[idx]['sections'][0], include_pending=True)
                 if gate_msg:
                     logger.info(f"[Periodic] 지금 실행 거절: {jobs[idx].get('name') or ''} — {gate_msg}")
                     _record_start_error(jobs[idx].get('name') or '', gate_msg)
@@ -330,6 +444,16 @@ class ModulePeriodic(PluginModuleBase):
             elif result == 'fail':
                 return jsonify({'ret': 'warning', 'msg': '실행하지 못했습니다.'})
             else:
+                # 대기 항목 기록 — 스레드가 Celery로 넘기기 전에 미리
+                # 기록해, 누르자마자 '대기 중'으로 보이게 한다.
+                # 스레드 쪽(job_function)에서도 기록하지만 중복 방지
+                # 때문에 한 번만 남는다.
+                try:
+                    add_pending_entry(idx, jobs[idx].get('name') or '', 'manual',
+                                      action,
+                                      [str(k) for k in (jobs[idx].get('sections') or [])])
+                except Exception as e:
+                    logger.warning(f'[Periodic] 대기 항목 기록 실패: {e}')
                 ret['msg'] = '실행을 시작했습니다. 잠시 뒤 워커가 작업을 시작합니다.'
         elif command == 'cancel_current':
             claim_id = (arg1 or '').strip() or None
@@ -373,6 +497,32 @@ class ModulePeriodic(PluginModuleBase):
                 ret['msg'] = '취소를 요청했습니다. 대기가 중단되면 멈춥니다.'
             else:
                 ret['msg'] = '취소를 요청했습니다. 새로고침이 정리되면 멈춥니다.'
+        elif command == 'cancel_pending':
+            pending_id = (arg1 or '').strip()
+            entry = cancel_pending_entry(pending_id) if pending_id else None
+            if entry is None:
+                return jsonify({'ret': 'warning',
+                                'msg': '대기 중인 작업을 찾지 못했습니다.'})
+            # 이력에 '대기가 취소되었습니다' 행을 남긴다 — 조용히
+            # 사라지지 않게. 실행 중인 걸 취소하면 '취소됨'으로 남는
+            # 것과 같은 방식이다.
+            section_label = '전체'
+            try:
+                secs = entry.get('sections') or []
+                if len(secs) == 1:
+                    sections, _err = ModuleStatus._sections()
+                    for s in (sections or []):
+                        if str(s.get('key')) == str(secs[0]):
+                            section_label = s.get('title') or '전체'
+                            break
+            except Exception:
+                pass
+            fail_start(entry.get('job_name') or '', entry.get('mode') or '',
+                       '대기가 취소되었습니다.', section_label,
+                       action=entry.get('action'), status='cancelled')
+            logger.info(f"[Periodic] 대기 취소: {entry.get('job_name') or ''} "
+                        f"(pending {pending_id})")
+            ret['msg'] = '대기가 취소되었습니다.'
         return jsonify(ret)
 
     # ---------- 화면 AJAX ----------
@@ -402,6 +552,14 @@ class ModulePeriodic(PluginModuleBase):
                 cards.extend(ModuleStatus.dashboard_scan_cards())
             except Exception as e:
                 logger.warning(f'[Periodic] 대시보드 스캔 목록 조회 실패: {e}')
+            # 대기 중인 작업도 카드로 보여 준다 — Celery 대기열에 쌓여
+            # 아직 실행이 안 된 작업이다. '시작 중' 카드만 떴다 사라져
+            # 아무것도 안 보이는 일이 없게 한다.
+            try:
+                for entry in get_pending_entries():
+                    cards.append(_pending_card_dict(entry))
+            except Exception as e:
+                logger.warning(f'[Periodic] 대기 항목 카드 조회 실패: {e}')
             return jsonify({'ret': 'success', 'data': cards,
                             'last_error': get_last_start_error()})
         if sub == 'clear_start_error':
@@ -424,6 +582,16 @@ class ModulePeriodic(PluginModuleBase):
             data = ModelPeriodicItem.get_page(
                 page, section_key=section, only_append=only_append, search=search)
             annotate_total_labels(data.get('list') or [])
+            # 대기 중인 작업도 목록 맨 위에 행으로 보여 준다 — 필터가
+            # 없는 1페이지만. 필터 중에는 대기 행을 섞지 않는다.
+            if page == 1 and not section and not only_append and not search:
+                try:
+                    pending_rows = [_pending_row_dict(e)
+                                    for e in get_pending_entries()]
+                    if pending_rows:
+                        data['list'] = pending_rows + (data.get('list') or [])
+                except Exception as e:
+                    logger.warning(f'[Periodic] 대기 항목 목록 조회 실패: {e}')
             return jsonify({'ret': 'success', 'data': data})
         if sub == 'history_detail':
             try:
