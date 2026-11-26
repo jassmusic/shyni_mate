@@ -523,7 +523,10 @@ function renderDetail(d) {
   } else {
     str += '<div style="color:#888">집계가 없습니다.</div>';
   }
-  if (d.vfs_job_id) str += '<div style="color:#888">rclone job id ' + esc(d.vfs_job_id) + '</div>';
+  if (d.vfs_job_id) {
+    if (String(d.vfs_job_id).indexOf('sync:') === 0) str += '<div style="color:#888">rclone process id ' + esc(String(d.vfs_job_id).substring(5)) + '</div>';
+    else str += '<div style="color:#888">rclone job id ' + esc(d.vfs_job_id) + '</div>';
+  }
   if (d.shyni_job_id) str += '<div style="color:#888">shyni 작업 번호 ' + esc(d.shyni_job_id) + '</div>';
   // 폴더별 결과
   var folders = d.stat_folders || [];

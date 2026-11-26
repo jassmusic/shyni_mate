@@ -319,6 +319,8 @@ class ModelTrashItem(ModelBase):
                         if isinstance(v, dict):
                             grp['vfs_ok'] = bool(v.get('ok'))
                             grp['vfs_error'] = v.get('error') or ''
+                            grp['vfs_job'] = v.get('job')
+                            grp['vfs_pid'] = v.get('pid')
                         s = scan_map.get(grp['folder'])
                         if isinstance(s, dict):
                             grp['scan_ok'] = bool(s.get('ok'))

@@ -1025,11 +1025,14 @@ def _refresh_folder_vfs(key, folder, name, claim_id=None):
                        'cancelled': 'cancelled'}.get(w['result'], 'failed'),
             'source': 'trash', 'job_name': name}, label='휴지통 스캔')
         if w['result'] == 'done':
-            return {'result': 'done', 'duration': w['duration'], 'error': ''}
+            return {'result': 'done', 'duration': w['duration'], 'error': '',
+                    'pid': proc.pid}
         if w['result'] == 'cancelled':
-            return {'result': 'cancelled', 'duration': w['duration'], 'error': ''}
+            return {'result': 'cancelled', 'duration': w['duration'],
+                    'error': '', 'pid': proc.pid}
         return {'result': 'failed', 'duration': w['duration'],
-                'error': 'VFS 새로고침이 끝나지 않았습니다.'}
+                'error': 'VFS 새로고침이 끝나지 않았습니다.',
+                'pid': proc.pid}
     jobid = vfs_refresh_async_start(server, remote)
     if jobid is None:
         _write_status(key, 'vfs', {
@@ -1054,7 +1057,8 @@ def _refresh_folder_vfs(key, folder, name, claim_id=None):
         proc = vfs_refresh_sync_spawn(server, remote)
         if proc is not None:
             sw = _wait_vfs_sync(proc, claim_id=claim_id)
-            w = {'result': sw['result'], 'duration': int(time.time() - t0)}
+            w = {'result': sw['result'], 'duration': int(time.time() - t0),
+                 'pid': proc.pid}
         else:
             w = {'result': 'failed', 'duration': int(time.time() - t0)}
     _write_status(key, 'vfs', {
@@ -1064,14 +1068,18 @@ def _refresh_folder_vfs(key, folder, name, claim_id=None):
                    'cancelled': 'cancelled'}.get(w['result'], 'failed'),
         'source': 'trash', 'job_name': name}, label='휴지통 스캔')
     if w['result'] == 'done':
-        return {'result': 'done', 'duration': w['duration'], 'error': ''}
+        return {'result': 'done', 'duration': w['duration'], 'error': '',
+                'jobid': jobid, 'pid': w.get('pid')}
     if w['result'] == 'cancelled':
-        return {'result': 'cancelled', 'duration': w['duration'], 'error': ''}
+        return {'result': 'cancelled', 'duration': w['duration'], 'error': '',
+                'jobid': jobid, 'pid': w.get('pid')}
     if w['result'] == 'not_found':
         return {'result': 'failed', 'duration': w['duration'],
-                'error': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.'}
+                'error': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.',
+                'jobid': jobid, 'pid': w.get('pid')}
     return {'result': 'failed', 'duration': w['duration'],
-            'error': 'VFS 새로고침이 끝나지 않았습니다.'}
+            'error': 'VFS 새로고침이 끝나지 않았습니다.',
+            'jobid': jobid, 'pid': w.get('pid')}
 
 def _compute_skip_reason(key, claim_id=None):
     """이 섹션을 건너뛸 사유 — None이면 진행한다.
@@ -1359,7 +1367,9 @@ class TaskTrash:
                                     break
                                 ok = w['result'] == 'done'
                                 vfs_results[folder] = {'ok': ok,
-                                                       'error': w.get('error') or ''}
+                                                       'error': w.get('error') or '',
+                                                       'job': w.get('jobid'),
+                                                       'pid': w.get('pid')}
                                 if ok:
                                     # 새로고침이 끝난 폴더는 목록을 한 번 읽어
                                     # 대상 파일이 실제로 있는지 확인한다.

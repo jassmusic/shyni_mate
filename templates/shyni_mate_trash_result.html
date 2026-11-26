@@ -532,6 +532,8 @@ function renderDetail(d) {
         str += '<li><a href="#" class="target-group-toggle" data-gidx="' + g + '" data-id="' + d.id + '">' + esc(grp.name) + ' (' + grp.count + '개)</a>';
         if (grp.vfs_ok === true) str += ' <span style="color:#2f855a">· 새로고침 완료</span>';
         else if (grp.vfs_ok === false) str += ' <span style="color:#c0392b">· 새로고침 실패</span>';
+        if (grp.vfs_pid) str += ' <span style="color:#888; font-size:12px">· rclone process id ' + esc(grp.vfs_pid) + '</span>';
+        else if (grp.vfs_job) str += ' <span style="color:#888; font-size:12px">· rclone job id ' + esc(grp.vfs_job) + '</span>';
         if (grp.scan_ok === true) str += ' <span style="color:#2f855a">· 스캔 OK</span>';
         else if (grp.scan_ok === false) str += ' <span style="color:#c0392b">· 스캔 실패</span>';
         str += '<span style="color:#888; font-size:12px"> ' + esc(grp.folder) + '</span>';

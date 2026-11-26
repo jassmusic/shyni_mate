@@ -1719,6 +1719,11 @@ class TaskPeriodic:
                         'started_at': vfs_started, 'finished_at': None,
                         'status': 'running', 'source': 'periodic',
                         'job_name': job_name})
+                    # 이력 행에도 'sync:PID' 형태로 남긴다 — 상태 슬롯은
+                    # 다음 실행이 덮어써서, 이게 없으면 이력 상세에서 동기
+                    # 새로고침이 실제로 돌았는지 확인할 길이 없다.
+                    item.vfs_job_id = f'sync:{vfs_pid}'
+                    item.save()
 
                 vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job,
                                             on_sync_pid=_on_vfs_pid)
@@ -2692,6 +2697,11 @@ class TaskPeriodic:
                         'started_at': vfs_started, 'finished_at': _now_text(),
                         'status': vfs_status, 'source': 'periodic',
                         'job_name': job_name})
+                    # 복구로 이어진 동기 새로고침도 이력 행에 PID를 남긴다.
+                    # (다시 걸었는데 비동기로 돌아간 경우는 jobid가 있어 제외)
+                    if vres.get('pid') and not vres.get('jobid'):
+                        item.vfs_job_id = f"sync:{vres['pid']}"
+                        item.save()
                     if vres['status'] != 'done':
                         item.vfs_duration = vfs_duration
                         if vres['status'] == 'cancelled':
@@ -2728,6 +2738,8 @@ class TaskPeriodic:
                             'started_at': vfs_started, 'finished_at': None,
                             'status': 'running', 'source': 'periodic',
                             'job_name': job_name})
+                        item.vfs_job_id = f'sync:{new_pid}'
+                        item.save()
 
                     vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job,
                                                 on_sync_pid=_on_vfs_pid)
