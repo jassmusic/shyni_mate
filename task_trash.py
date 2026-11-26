@@ -6,6 +6,8 @@ import time
 
 import requests
 
+from .extensions import (rc_job_status, rc_server_by_addr, sync_pid_kill,
+                         vfs_refresh_async_start, vfs_refresh_sync_spawn)
 from .setup import *
 from .shyni_backend import ShyniBackend
 from .task_periodic import (CANCEL_RESULT_MESSAGE, _cancel_shyni_scan,
@@ -37,6 +39,9 @@ DEFAULT_MAX_WAIT_MIN = 360
 # 이 시간까지 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
 TRASH_VFS_TIMEOUT_KEY = 'trash_vfs_timeout_min'
 DEFAULT_VFS_TIMEOUT_MIN = 360
+# VFS 비동기 사용 설정 키 — 켜면(기본값) 새로고침 작업을 걸어 두고
+# 확인하면서 기다리고, 끄면 동기 방식으로 진행한다.
+TRASH_VFS_ASYNC_KEY = 'trash_vfs_use_async'
 # 스캔·비우기 대기 기한 설정 키(분) — shyni job이 끝나기를 이 시간까지
 # 기다린다. 기한이 됐을 때 shyni에서 job이 아직 진행 중이면 이 시간만큼
 # 기한을 연장하며 계속 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
@@ -727,35 +732,37 @@ def _now_text():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def _query_rc_job(addr, jobid):
-    """rclone job 1회 조회 — 결과 dict / 'not_found' / None(조회 실패).
-    조회 실패 원인은 로그에 남긴다 (0.9.9h)."""
+def _vfs_use_async():
+    """VFS 비동기 사용 여부 — 설정이 없으면 기본값(켜짐)으로 본다."""
     try:
-        from .mod_status import ModuleStatus
-        return ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
-    except requests.HTTPError as e:
-        body = ''
-        try:
-            body = e.response.text if e.response is not None else ''
-        except Exception:
-            body = ''
-        if 'not found' in body:
-            return 'not_found'
-        code = e.response.status_code if e.response is not None else '?'
-        logger.warning(f'[휴지통] VFS 새로고침 확인 실패 (job {jobid}): HTTP {code}')
-        return None
-    except Exception as e:
-        logger.warning(f'[휴지통] VFS 새로고침 확인 실패 (job {jobid}): {type(e).__name__}: {e}')
-        return None
+        v = P.ModelSetting.get(TRASH_VFS_ASYNC_KEY)
+    except Exception:
+        v = None
+    if v is None:
+        return True
+    return str(v).lower() == 'true'
 
 
-def _wait_vfs(addr, jobid, timeout=None, claim_id=None):
-    """rclone VFS 새로고침 job 완료를 기다린다.
-    {'result': done|failed|cancelled, 'duration': 초}를 돌려준다.
+def _query_rc_job(server, jobid):
+    """rclone job 1회 조회 (CLI) — 결과 dict / 'not_found' / None(조회 실패).
+    조회 실패 원인은 로그에 남긴다 (0.9.9h)."""
+    job = rc_job_status(server, jobid)
+    if job is None:
+        logger.warning(f'[휴지통] VFS 새로고침 확인 실패 (job {jobid})')
+    return job
+
+
+def _wait_vfs(server, jobid, timeout=None, claim_id=None):
+    """rclone VFS 새로고침 job 완료를 기다린다 (CLI 조회).
+    {'result': done|failed|cancelled|not_found, 'seen': 진행 중인 것을
+     본 적이 있는지, 'duration': 초}를 돌려준다.
     기한은 설정(휴지통 VFS 새로고침 제한 시간, 기본 360분)에서 읽는다.
     timeout을 직접 주면 그 값(초)을 쓴다. 폴링 중 일시적 오류는 원인을
     로그에 남기고 계속 기다린다 (0.9.9h). 기한이 됐을 때 아직 진행 중이면
     기한을 연장하고, 기한 안에 한 번도 확인이 안 됐을 때만 실패로 확정한다.
+    작업 기록이 사라지면(not_found) 즉시 돌려주되, 본 적이 있는지는
+    'seen'으로 함께 알린다 — 호출자가 동기 새로고침으로 마무리할지
+    정한다 (0.9.9l).
     claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
     if timeout is None:
         timeout = _vfs_timeout_sec()
@@ -767,27 +774,31 @@ def _wait_vfs(addr, jobid, timeout=None, claim_id=None):
             # 기한 도달 — job을 한 번 더 조회한다. 끝났으면 그 결과를
             # 쓰고, 아직 돌고 있으면 기한을 연장한다. 확인이 안 되면
             # 기한 내내 확인이 안 됐을 때만 실패로 확정한다 (0.9.9h).
-            job = _query_rc_job(addr, jobid)
+            job = _query_rc_job(server, jobid)
             if isinstance(job, dict):
                 last_ok = time.time()
                 if job.get('finished'):
                     return {'result': 'failed' if job.get('error') else 'done',
-                            'duration': int(time.time() - t0)}
+                            'seen': True, 'duration': int(time.time() - t0)}
                 deadline = time.time() + timeout
                 logger.info(
                     f"휴지통: VFS 새로고침이 아직 진행 중이라 기한을 "
                     f"{_fmt_wait(timeout)} 연장합니다 (job {jobid})")
                 continue
             if job == 'not_found':
-                return {'result': 'failed', 'duration': int(time.time() - t0)}
+                return {'result': 'not_found', 'seen': last_ok is not None,
+                        'duration': int(time.time() - t0)}
             if last_ok is None or time.time() - last_ok >= timeout:
-                return {'result': 'failed', 'duration': int(time.time() - t0)}
+                return {'result': 'failed', 'seen': last_ok is not None,
+                        'duration': int(time.time() - t0)}
             deadline = time.time() + VFS_POLL_SEC * 6
         if _trash_cancel_requested(claim_id):
-            return {'result': 'cancelled', 'duration': int(time.time() - t0)}
-        job = _query_rc_job(addr, jobid)
+            return {'result': 'cancelled', 'seen': last_ok is not None,
+                    'duration': int(time.time() - t0)}
+        job = _query_rc_job(server, jobid)
         if job == 'not_found':
-            return {'result': 'failed', 'duration': int(time.time() - t0)}
+            return {'result': 'not_found', 'seen': last_ok is not None,
+                    'duration': int(time.time() - t0)}
         if job is None:
             # 조회 실패 원인은 _query_rc_job이 로그에 남겼다.
             time.sleep(VFS_POLL_SEC)
@@ -795,7 +806,33 @@ def _wait_vfs(addr, jobid, timeout=None, claim_id=None):
         last_ok = time.time()
         if job.get('finished'):
             return {'result': 'failed' if job.get('error') else 'done',
+                    'seen': True, 'duration': int(time.time() - t0)}
+        time.sleep(VFS_POLL_SEC)
+
+
+def _wait_vfs_sync(proc, timeout=None, claim_id=None):
+    """동기 VFS 새로고침 프로세스가 끝날 때까지 기다린다.
+    {'result': done|failed|cancelled, 'duration': 초}를 돌려준다.
+    기한은 설정(휴지통 VFS 새로고침 제한 시간, 기본 360분)에서 읽는다.
+    기한이 됐을 때 아직 진행 중이면 기한을 연장한다 (비동기와 같은 기준).
+    취소 요청이 오면 프로세스를 멈추고 취소로 끝낸다."""
+    if timeout is None:
+        timeout = _vfs_timeout_sec()
+    t0 = time.time()
+    deadline = time.time() + timeout
+    while True:
+        if _trash_cancel_requested(claim_id):
+            sync_pid_kill(proc.pid)
+            return {'result': 'cancelled', 'duration': int(time.time() - t0)}
+        rc = proc.poll()
+        if rc is not None:
+            return {'result': 'done' if rc == 0 else 'failed',
                     'duration': int(time.time() - t0)}
+        if time.time() >= deadline:
+            deadline = time.time() + timeout
+            logger.info(
+                f"휴지통: VFS 새로고침이 아직 진행 중이라 기한을 "
+                f"{_fmt_wait(timeout)} 연장합니다 (동기)")
         time.sleep(VFS_POLL_SEC)
 
 
@@ -946,44 +983,43 @@ def _send_folder_scan(url, token, key, folder, seq):
 def _refresh_folder_vfs(key, folder, name, claim_id=None):
     """폴더 하나 VFS 새로고침.
     {'result': done|failed|cancelled, 'duration': 초, 'error': 사유}를
-    돌려준다. 라이브러리 전체를 한 번에 새로고침하던 기존 방식과 같은
-    RC 호출을 폴더 단위로 한다. jobid가 안 오면 동기 응답의 result를
-    직접 판정한다 (선택 실행의 _refresh_ok와 같은 기준).
+    돌려준다. 전송은 rclone CLI로 한다 (0.9.9l). 비동기(기본값)는
+    작업을 걸어 두고 job/status로 확인하면서 기다리고, 동기는
+    새로고침 프로세스가 끝날 때까지 기다린다. 비동기에서 작업
+    기록이 사라진 경우 — 진행 중인 것을 본 적이 있으면 동기로
+    한 번 더 걸어 끝내고, 본 적이 없으면 실패로 끝낸다.
     claim_id — 취소 요청을 이 작업 것으로만 확인하기 위한 식별자다."""
     from .mod_status import ModuleStatus
     addr, remote = ModuleStatus._rc_target(folder)
-    if not addr:
+    server = rc_server_by_addr(addr) if addr else None
+    if server is None:
         return {'result': 'failed', 'duration': 0,
                 'error': 'VFS 새로고침 규칙과 맞지 않는 경로입니다.'}
     started = _now_text()
     _write_status(key, 'vfs', {
-        'job': None, 'path': folder,
+        'job': None, 'pid': None, 'mode': None, 'path': folder,
         'started_at': started, 'finished_at': None,
         'status': 'running', 'source': 'trash',
         'job_name': name}, label='휴지통 스캔')
     t0 = time.time()
-    try:
-        ret = ModuleStatus._rc(addr, 'vfs/refresh',
-                               {'dir': remote, 'recursive': 'true',
-                                '_async': 'true'})
-    except Exception as e:
+    if not _vfs_use_async():
+        proc = vfs_refresh_sync_spawn(server, remote)
+        if proc is None:
+            _write_status(key, 'vfs', {
+                'job': None, 'pid': None, 'mode': 'sync', 'path': folder,
+                'started_at': started, 'finished_at': _now_text(),
+                'status': 'failed', 'source': 'trash',
+                'job_name': name}, label='휴지통 스캔')
+            return {'result': 'failed', 'duration': int(time.time() - t0),
+                    'error': 'VFS 새로고침을 시작하지 못했습니다.'}
         _write_status(key, 'vfs', {
-            'job': None, 'path': folder,
-            'started_at': started, 'finished_at': _now_text(),
-            'status': 'failed', 'source': 'trash',
-            'job_name': name}, label='휴지통 스캔')
-        return {'result': 'failed', 'duration': int(time.time() - t0),
-                'error': str(e)[:200]}
-    jobid = ret.get('jobid') if isinstance(ret, dict) else None
-    if jobid:
-        _write_status(key, 'vfs', {
-            'job': jobid, 'path': folder,
+            'job': None, 'pid': proc.pid, 'mode': 'sync', 'path': folder,
             'started_at': started, 'finished_at': None,
             'status': 'running', 'source': 'trash',
             'job_name': name}, label='휴지통 스캔')
-        w = _wait_vfs(addr, jobid, claim_id=claim_id)
+        w = _wait_vfs_sync(proc, claim_id=claim_id)
         _write_status(key, 'vfs', {
-            'job': jobid, 'path': folder,
+            'job': None, 'pid': proc.pid, 'mode': 'sync', 'path': folder,
             'started_at': started, 'finished_at': _now_text(),
             'status': {'done': 'done', 'failed': 'failed',
                        'cancelled': 'cancelled'}.get(w['result'], 'failed'),
@@ -994,28 +1030,48 @@ def _refresh_folder_vfs(key, folder, name, claim_id=None):
             return {'result': 'cancelled', 'duration': w['duration'], 'error': ''}
         return {'result': 'failed', 'duration': w['duration'],
                 'error': 'VFS 새로고침이 끝나지 않았습니다.'}
-    # jobid 없이 동기 결과가 온 경우 — result 값을 직접 판정한다.
-    result = ret.get('result') if isinstance(ret, dict) else None
-    ok = False
-    error = ''
-    if isinstance(result, dict):
-        if any(str(v).lower() == 'ok' for v in result.values()):
-            ok = True
-        else:
-            vals = [str(v) for v in result.values() if v]
-            error = vals[0][:200] if vals else '새로고침에 실패했습니다.'
-    elif isinstance(ret, dict) and ret.get('error'):
-        error = str(ret['error'])[:200]
-    else:
-        error = '새로고침 응답이 없습니다.'
+    jobid = vfs_refresh_async_start(server, remote)
+    if jobid is None:
+        _write_status(key, 'vfs', {
+            'job': None, 'pid': None, 'mode': 'async', 'path': folder,
+            'started_at': started, 'finished_at': _now_text(),
+            'status': 'failed', 'source': 'trash',
+            'job_name': name}, label='휴지통 스캔')
+        return {'result': 'failed', 'duration': int(time.time() - t0),
+                'error': 'VFS 새로고침을 시작하지 못했습니다.'}
     _write_status(key, 'vfs', {
-        'job': None, 'path': folder,
-        'started_at': started, 'finished_at': _now_text(),
-        'status': 'done' if ok else 'failed', 'source': 'trash',
+        'job': jobid, 'pid': None, 'mode': 'async', 'path': folder,
+        'started_at': started, 'finished_at': None,
+        'status': 'running', 'source': 'trash',
         'job_name': name}, label='휴지통 스캔')
-    return {'result': 'done' if ok else 'failed',
-            'duration': int(time.time() - t0), 'error': error}
-
+    w = _wait_vfs(server, jobid, claim_id=claim_id)
+    if w['result'] == 'not_found' and w.get('seen'):
+        # 진행 중인 것을 본 적이 있다 — 끝난 뒤 기록이 만료된 경우라
+        # 동기로 한 번 더 걸어 끝낸다 (0.9.9l).
+        logger.warning(
+            f'휴지통: VFS 새로고침 작업 기록이 사라져 동기 새로고침으로 '
+            f'마무리합니다 (job {jobid})')
+        proc = vfs_refresh_sync_spawn(server, remote)
+        if proc is not None:
+            sw = _wait_vfs_sync(proc, claim_id=claim_id)
+            w = {'result': sw['result'], 'duration': int(time.time() - t0)}
+        else:
+            w = {'result': 'failed', 'duration': int(time.time() - t0)}
+    _write_status(key, 'vfs', {
+        'job': jobid, 'pid': None, 'mode': 'async', 'path': folder,
+        'started_at': started, 'finished_at': _now_text(),
+        'status': {'done': 'done', 'failed': 'failed',
+                   'cancelled': 'cancelled'}.get(w['result'], 'failed'),
+        'source': 'trash', 'job_name': name}, label='휴지통 스캔')
+    if w['result'] == 'done':
+        return {'result': 'done', 'duration': w['duration'], 'error': ''}
+    if w['result'] == 'cancelled':
+        return {'result': 'cancelled', 'duration': w['duration'], 'error': ''}
+    if w['result'] == 'not_found':
+        return {'result': 'failed', 'duration': w['duration'],
+                'error': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.'}
+    return {'result': 'failed', 'duration': w['duration'],
+            'error': 'VFS 새로고침이 끝나지 않았습니다.'}
 
 def _compute_skip_reason(key, claim_id=None):
     """이 섹션을 건너뛸 사유 — None이면 진행한다.

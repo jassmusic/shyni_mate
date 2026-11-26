@@ -273,7 +273,13 @@ class Task:
                             item.filecheck_time = datetime.now()
                         if item.mode == 'ADD' and P.ModelSetting.get_bool('scan_use_vfs_refresh') and not item.vfs_done:
                             try:
-                                vfs_ret = vfs_refresh(item.target, recursive=True)
+                                # VFS 비동기 사용(스캔 설정, 기본 켜짐) — 설정이
+                                # 없으면 켜짐으로 본다.
+                                _async_v = P.ModelSetting.get('scan_vfs_use_async')
+                                vfs_ret = vfs_refresh(
+                                    item.target, recursive=True,
+                                    async_=(_async_v is None
+                                            or str(_async_v).lower() == 'true'))
                                 values = (vfs_ret.get('result') or {}).values() if isinstance(vfs_ret, dict) else []
                                 if any(str(v).lower() == 'ok' for v in values):
                                     item.vfs_done = True

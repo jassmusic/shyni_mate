@@ -27,6 +27,10 @@ class ModuleScan(PluginModuleBase):
             f"{self.name}_max_scan_count": "2",
             #f"{self.name}_incompleted_rescan": "False",
             f"{self.name}_max_wait_time": "5",
+            # VFS 비동기 사용 — 켜면(기본값) 새로고침 작업을 걸어 두고
+            # 완료를 확인하면서 기다리고, 끄면 새로고침이 끝날 때까지
+            # 기다리는 동기 방식으로 진행한다.
+            f"{self.name}_vfs_use_async": "True",
             f"{self.name}_probe_timeout_sec": "60",
             f"{self.name}_analyze_wait_min": "5",
             f"{self.name}_analyze_fail_min": "60",

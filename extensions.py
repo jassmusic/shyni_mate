@@ -3,6 +3,8 @@ import json
 import time
 import base64
 import shutil
+import signal
+import subprocess
 import urllib
 import pathlib
 import sqlite3
@@ -175,6 +177,153 @@ def vfs__forget(server: dict, remote_path: str, is_file: bool = False) -> dict:
     if server['vfs']:
         data['args'].append(f'fs={server["vfs"]}')
     return data
+
+
+def _rc_cli_base(server: dict) -> list:
+    """rclone rc CLI 공통 앞부분 — 실행 파일·--timeout=0·rc·--url·인증."""
+    rclone = F.PluginManager.get_plugin_instance('rclone')
+    cmd = [
+        rclone.ModelSetting.get('rclone_path'),
+        '--timeout=0',
+        'rc',
+    ]
+    cmd.append(f'--url={server["address"]}')
+    if server.get('user'):
+        cmd.extend([f"--user={server['user']}", f"--pass={server['pass']}"])
+    return cmd
+
+
+def rc_call(server: dict, command: str, args: list = None,
+            async_: bool = False, timeout: int = 60) -> Optional[dict]:
+    """rclone rc CLI 1회 호출 — 응답 dict를 돌려준다.
+    응답의 error 키는 그대로 담아 돌려주므로, 호출자가 'job not found'
+    같은 서버 쪽 오류와 전송 실패를 구분할 수 있다. 실행 자체가
+    실패하거나(타임아웃·실행 오류) 응답을 읽을 수 없으면 None.
+    명령 이름은 'job/status'처럼 슬래시 형태 그대로 쓴다."""
+    try:
+        cmd = _rc_cli_base(server)
+        cmd.insert(3, command)
+        if args:
+            cmd.extend(args)
+        if async_:
+            cmd.append('_async=true')
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout)
+        for text in (proc.stdout, proc.stderr):
+            if text and text.strip():
+                try:
+                    ret = json.loads(text)
+                except Exception:
+                    continue
+                if isinstance(ret, dict):
+                    return ret
+        P.logger.warning(f'[RC] {command} 응답을 읽을 수 없습니다: '
+                         f'{(proc.stdout or proc.stderr or "")[:200]}')
+        return None
+    except Exception as e:
+        P.logger.warning(f'[RC] {command} 호출 실패: {type(e).__name__}: {e}')
+        return None
+
+
+def rc_server_by_addr(addr: str) -> Optional[dict]:
+    """규칙에서 뽑은 RC 주소와 같은 서버 정보를 돌려준다 (없으면 None)."""
+    for server in get_rc_servers():
+        if server.get('address') == addr:
+            return server
+    return None
+
+
+def rc_job_status(server: dict, job_id: int):
+    """rclone job 1회 조회 (CLI) — 결과 dict / 'not_found' / None(조회 실패).
+    조회 실패 원인은 로그에 남긴다."""
+    ret = rc_call(server, 'job/status', [f'jobid={job_id}'], timeout=60)
+    if ret is None:
+        return None
+    if ret.get('error'):
+        if 'not found' in str(ret['error']):
+            return 'not_found'
+        P.logger.warning(f'[RC] job/status 오류 (job {job_id}): {ret["error"]}')
+        return None
+    return ret
+
+
+def rc_job_stop(server: dict, job_id: int) -> bool:
+    """rclone job 중단 요청 (CLI) — 요청이 받아들여지면 True."""
+    ret = rc_call(server, 'job/stop', [f'jobid={job_id}'], timeout=60)
+    return isinstance(ret, dict) and not ret.get('error')
+
+
+def _refresh_args(server: dict, remote_path: str) -> list:
+    args = [f'dir={remote_path}', 'recursive=true']
+    if server.get('vfs'):
+        args.append(f'fs={server["vfs"]}')
+    return args
+
+
+def vfs_refresh_async_start(server: dict, remote_path: str) -> Optional[int]:
+    """비동기 VFS 새로고침을 걸고 rclone job id를 돌려준다. 실패하면 None."""
+    ret = rc_call(server, 'vfs/refresh', _refresh_args(server, remote_path),
+                  async_=True, timeout=120)
+    if isinstance(ret, dict):
+        if ret.get('jobid') is not None:
+            try:
+                return int(ret['jobid'])
+            except Exception:
+                return None
+        if ret.get('error'):
+            P.logger.error(f'[RC] vfs/refresh 시작 실패: {ret["error"]}')
+    return None
+
+
+def vfs_refresh_sync_spawn(server: dict, remote_path: str):
+    """동기 VFS 새로고침 프로세스를 띄우고 Popen을 돌려준다. 실패하면 None.
+    새로고침이 끝날 때까지 이 프로세스가 살아 있다 — 기다리는 쪽이
+    poll()로 확인하고, 취소하면 sync_pid_kill로 멈춘다."""
+    try:
+        cmd = _rc_cli_base(server)
+        cmd.insert(3, 'vfs/refresh')
+        cmd.extend(_refresh_args(server, remote_path))
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    except Exception as e:
+        P.logger.error(f'[RC] 동기 vfs/refresh 시작 실패: {type(e).__name__}: {e}')
+        return None
+
+
+def sync_pid_state(pid, remote_path: str = None) -> str:
+    """동기 새로고침 프로세스의 생존 상태 — 'running' | 'gone'.
+    PID가 재사용된 경우를 걸러내기 위해 명령줄에 vfs/refresh와
+    대상 경로가 들어 있는지도 함께 본다."""
+    if not pid:
+        return 'gone'
+    try:
+        with open(f'/proc/{int(pid)}/cmdline', 'rb') as f:
+            cmdline = f.read().replace(b'\0', b' ').decode('utf-8', 'ignore')
+    except Exception:
+        return 'gone'
+    if 'vfs/refresh' not in cmdline:
+        return 'gone'
+    if remote_path and f'dir={remote_path}' not in cmdline:
+        return 'gone'
+    return 'running'
+
+
+def sync_pid_kill(pid) -> None:
+    """동기 새로고침 프로세스를 멈춘다 — SIGTERM 후에도 살아 있으면 SIGKILL."""
+    if not pid:
+        return
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except Exception:
+        return
+    for _ in range(10):
+        time.sleep(0.5)
+        if sync_pid_state(pid) == 'gone':
+            return
+    try:
+        os.kill(int(pid), signal.SIGKILL)
+    except Exception:
+        pass
 
 
 def with_servers(function: Callable) -> Callable:

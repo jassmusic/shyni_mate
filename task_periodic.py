@@ -6,6 +6,9 @@ import time
 
 import requests
 
+from .extensions import (rc_job_status, rc_job_stop, rc_server_by_addr,
+                         sync_pid_kill, sync_pid_state,
+                         vfs_refresh_async_start, vfs_refresh_sync_spawn)
 from .model_periodic import ModelPeriodicItem
 from .mod_status import ModuleStatus
 from .setup import *
@@ -26,6 +29,10 @@ DEFAULT_MAX_WAIT_MIN = 360
 # 이 시간까지 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
 VFS_TIMEOUT_KEY = 'periodic_vfs_timeout_min'
 DEFAULT_VFS_TIMEOUT_MIN = 360
+# VFS 비동기 사용 설정 키 — 켜면(기본값) 새로고침 작업을 걸어 두고
+# 확인하면서 기다리고, 끄면 새로고침이 끝날 때까지 기다리는 동기
+# 방식으로 진행한다.
+VFS_ASYNC_KEY = 'periodic_vfs_use_async'
 # 스캔 대기 기한 설정 키(분) — 스캔이 끝나기를 이 시간까지 기다린다.
 # 기한이 됐을 때 shyni에서 스캔이 아직 진행 중이면 이 시간만큼 기한을
 # 연장하며 계속 기다린다. 설정이 없거나 0 이하면 기본값을 쓴다.
@@ -226,7 +233,7 @@ CANCEL_RESULT_MESSAGE = {
     'api_failed': '취소 요청으로 대기를 중단했습니다. shyni 스캔 취소 요청에 실패했으니, shyni 웹 화면에서 취소됐는지 확인해 주세요.',
     'finished_first': '취소 요청 뒤 스캔이 먼저 끝났습니다.',
     'job_gone': '취소 요청으로 대기를 중단했습니다. 스캔 작업 기록을 찾을 수 없습니다.',
-    'timeout': '취소 요청으로 대기를 중단했습니다. shyni 스캔 취소가 기한 안에 확인되지 않았습니다. shyni 웹 화면에서 취소됐는지 확인해 주세요.',
+    'timeout': '취소 요청으로 대기를 중단했습니다. shyni 스캔 취소가 제한 시간 안에 확인되지 않았습니다. shyni 웹 화면에서 취소됐는지 확인해 주세요.',
 }
 
 
@@ -825,6 +832,17 @@ def _vfs_timeout_sec():
     if val is None or val <= 0:
         return DEFAULT_VFS_TIMEOUT_MIN * 60
     return val * 60
+
+
+def _vfs_use_async():
+    """VFS 비동기 사용 여부 — 설정이 없으면 기본값(켜짐)으로 본다."""
+    try:
+        v = P.ModelSetting.get(VFS_ASYNC_KEY)
+    except Exception:
+        v = None
+    if v is None:
+        return True
+    return str(v).lower() == 'true'
 
 
 def _scan_timeout_sec():
@@ -1674,14 +1692,16 @@ class TaskPeriodic:
             if vfs_only or job.get('use_vfs'):
                 vfs_started = _now_text()
                 _write_status(key, 'vfs', {
-                    'job': None, 'path': sec.get('path', ''),
+                    'job': None, 'pid': None, 'mode': None,
+                    'path': sec.get('path', ''),
                     'started_at': vfs_started, 'finished_at': None,
                     'status': 'running', 'source': 'periodic',
                     'job_name': job_name})
 
                 def _on_vfs_job(vfs_jobid):
                     _write_status(key, 'vfs', {
-                        'job': vfs_jobid, 'path': sec.get('path', ''),
+                        'job': vfs_jobid, 'pid': None, 'mode': 'async',
+                        'path': sec.get('path', ''),
                         'started_at': vfs_started, 'finished_at': None,
                         'status': 'running', 'source': 'periodic',
                         'job_name': job_name})
@@ -1690,12 +1710,25 @@ class TaskPeriodic:
                     item.vfs_job_id = str(vfs_jobid)
                     item.save()
 
-                vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job)
+                def _on_vfs_pid(vfs_pid):
+                    # 동기 방식은 rclone 작업 번호가 없다 — 프로세스 ID를
+                    # 남겨 재시작 복구가 생존을 확인할 수 있게 한다.
+                    _write_status(key, 'vfs', {
+                        'job': None, 'pid': vfs_pid, 'mode': 'sync',
+                        'path': sec.get('path', ''),
+                        'started_at': vfs_started, 'finished_at': None,
+                        'status': 'running', 'source': 'periodic',
+                        'job_name': job_name})
+
+                vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job,
+                                            on_sync_pid=_on_vfs_pid)
                 vfs_duration = vres['duration']
                 vfs_status = {'done': 'done', 'failed': 'failed',
                               'cancelled': 'cancelled'}.get(vres['status'], 'failed')
                 _write_status(key, 'vfs', {
-                    'job': vres.get('jobid'), 'path': sec.get('path', ''),
+                    'job': vres.get('jobid'), 'pid': vres.get('pid'),
+                    'mode': 'sync' if vres.get('pid') else 'async',
+                    'path': sec.get('path', ''),
                     'started_at': vfs_started, 'finished_at': _now_text(),
                     'status': vfs_status, 'source': 'periodic',
                     'job_name': job_name})
@@ -1816,62 +1849,150 @@ class TaskPeriodic:
             return False
 
     @staticmethod
-    def _do_vfs(sec, cur, on_job_id=None):
-        """VFS 새로고침을 걸고 완료까지 기다린다.
-        {'status': done|failed|cancelled, 'message', 'duration': 초,
-         'jobid': rclone job id}를 돌려준다. 기한은 설정(VFS 새로고침
-        제한 시간, 기본 360분)에서 읽고, 폴링 중 일시적 오류는 원인을
-        로그에 남기고 계속 기다린다 (0.9.9h)."""
-        t0 = time.time()
+    def _vfs_server(sec):
+        """섹션 경로 → (rclone 서버 정보, 리모트 경로).
+        규칙과 맞지 않으면 (None, remote)를 돌려준다."""
         addr, remote = ModuleStatus._rc_target(sec.get('path', ''))
         if not addr:
+            return None, remote
+        return rc_server_by_addr(addr), remote
+
+    @staticmethod
+    def _do_vfs(sec, cur, on_job_id=None, on_sync_pid=None):
+        """VFS 새로고침을 걸고 완료까지 기다린다.
+        {'status': done|failed|cancelled, 'message', 'duration': 초,
+         'jobid': rclone job id(비동기일 때만), 'pid': 동기 프로세스
+         ID(동기일 때만)}를 돌려준다. 전송은 rclone CLI로 한다 (0.9.9l).
+        비동기(기본값)는 작업을 걸어 두고 job/status로 확인하면서
+        기다리고, 동기는 새로고침 프로세스가 끝날 때까지 기다린다.
+        기한은 설정(VFS 새로고침 제한 시간, 기본 360분)에서 읽고,
+        폴링 중 일시적 오류는 원인을 로그에 남기고 계속 기다린다 (0.9.9h)."""
+        t0 = time.time()
+        server, remote = TaskPeriodic._vfs_server(sec)
+        if server is None:
             raise Exception('경로가 VFS 새로고침 규칙과 맞지 않습니다. 스캔 설정을 확인해 주세요.')
-        ret = ModuleStatus._rc(addr, 'vfs/refresh',
-                               {'dir': remote, 'recursive': 'true', '_async': 'true'})
-        jobid = ret.get('jobid')
+        deadline = time.time() + _vfs_timeout_sec()
+        if not _vfs_use_async():
+            proc = vfs_refresh_sync_spawn(server, remote)
+            if proc is None:
+                raise Exception('VFS 새로고침을 시작하지 못했습니다. rclone 연결을 확인해 주세요.')
+            cur['vfs_pid'] = proc.pid
+            _upsert_current(cur)
+            if on_sync_pid is not None:
+                try:
+                    on_sync_pid(proc.pid)
+                except Exception:
+                    pass
+            res = TaskPeriodic._wait_vfs_sync(
+                proc.pid, remote, t0, deadline,
+                claim_id=cur.get('claim_id'),
+                title=sec.get('title') or '', proc=proc)
+            res['pid'] = proc.pid
+            return res
+        jobid = vfs_refresh_async_start(server, remote)
+        if jobid is None:
+            raise Exception('VFS 새로고침을 시작하지 못했습니다. rclone 연결을 확인해 주세요.')
         cur['vfs_job'] = jobid
         _upsert_current(cur)
-        if on_job_id is not None and jobid:
+        if on_job_id is not None:
             try:
                 on_job_id(jobid)
             except Exception:
                 pass
-        deadline = time.time() + _vfs_timeout_sec()
-        return TaskPeriodic._poll_vfs_job(addr, jobid, t0, deadline,
-                                          claim_id=cur.get('claim_id'),
-                                          title=sec.get('title') or '')
+        res = TaskPeriodic._poll_vfs_job(server, remote, jobid, t0, deadline,
+                                         claim_id=cur.get('claim_id'),
+                                         title=sec.get('title') or '')
+        res.setdefault('pid', None)
+        return res
 
     @staticmethod
-    def _query_vfs_job(addr, jobid):
-        """rclone VFS 새로고침 job 한 번 조회 — 결과 dict를 돌려주고,
+    def _query_vfs_job(server, jobid):
+        """rclone VFS 새로고침 job 한 번 조회 (CLI) — 결과 dict를 돌려주고,
         기록이 없으면 'not_found', 그 외 조회 실패면 None을 돌려준다.
         조회 실패 원인은 로그에 남긴다 (0.9.9h)."""
-        try:
-            return ModuleStatus._rc(addr, 'job/status', {'jobid': jobid})
-        except requests.HTTPError as e:
-            body = ''
-            try:
-                body = e.response.text if e.response is not None else ''
-            except Exception:
-                body = ''
-            if 'not found' in body:
-                return 'not_found'
-            code = e.response.status_code if e.response is not None else '?'
-            logger.warning(f'[주기적 스캔] VFS 새로고침 확인 실패 (job {jobid}): HTTP {code}')
-            return None
-        except Exception as e:
-            logger.warning(f'[주기적 스캔] VFS 새로고침 확인 실패 (job {jobid}): {type(e).__name__}: {e}')
-            return None
+        job = rc_job_status(server, jobid)
+        if job is None:
+            logger.warning(f'[주기적 스캔] VFS 새로고침 확인 실패 (job {jobid})')
+        return job
 
     @staticmethod
-    def _poll_vfs_job(addr, jobid, t0, deadline, claim_id=None, title=''):
+    def _wait_vfs_sync(pid, remote, t0, deadline, claim_id=None, title='',
+                       proc=None):
+        """동기 VFS 새로고침 프로세스가 끝날 때까지 기다린다.
+        {'status': done|failed|cancelled|gone, 'message', 'duration': 초}를
+        돌려준다. proc이 있으면(방금 띄운 경우) 종료 코드로 판정하고,
+        없으면(pid만 아는 복구 경로) /proc으로 생존을 확인해 프로세스가
+        사라졌으면 'gone'을 돌려준다 — 복구 쪽이 새로고침을 다시 건다.
+        기한이 됐을 때 아직 진행 중이면 기한을 연장한다 (비동기 폴링과
+        같은 기준). 취소 요청이 오면 프로세스를 멈추고 취소로 끝낸다."""
+        timeout_sec = _vfs_timeout_sec()
+        while True:
+            if _cancel_requested(claim_id):
+                sync_pid_kill(pid)
+                return {'status': 'cancelled',
+                        'message': '취소 요청으로 중단했습니다.',
+                        'duration': int(time.time() - t0)}
+            if proc is not None:
+                rc = proc.poll()
+                if rc is not None:
+                    if rc == 0:
+                        logger.info(f"주기적 스캔: {title} VFS 새로고침 완료 (동기)")
+                        return {'status': 'done',
+                                'message': 'VFS 새로고침이 완료됐습니다.',
+                                'duration': int(time.time() - t0)}
+                    return {'status': 'failed',
+                            'message': f'VFS 새로고침이 오류로 끝났습니다 (종료 코드 {rc}).',
+                            'duration': int(time.time() - t0)}
+            elif sync_pid_state(pid, remote) == 'gone':
+                return {'status': 'gone',
+                        'message': 'VFS 새로고침 프로세스가 사라졌습니다.',
+                        'duration': int(time.time() - t0)}
+            if time.time() >= deadline:
+                deadline = time.time() + timeout_sec
+                logger.info(
+                    f"주기적 스캔: {title} VFS 새로고침이 아직 진행 중이라 기한을 "
+                    f"{_fmt_wait(timeout_sec)} 연장합니다 (동기)")
+            time.sleep(VFS_POLL_SEC)
+
+    @staticmethod
+    def _vfs_sync_fallback(server, remote, jobid, t0, claim_id, title):
+        """비동기로 걸어 둔 새로고침의 작업 기록이 사라졌을 때의 마무리 —
+        진행 중인 것을 본 적이 있으므로(끝난 뒤 기록이 만료된 경우),
+        동기로 한 번 더 걸어 끝낸 뒤 스캔으로 진행한다 (0.9.9l).
+        동기 실행 결과에 따라 done|failed|cancelled를 돌려준다."""
+        logger.warning(
+            f'주기적 스캔: {title} VFS 새로고침 작업 기록이 사라져 '
+            f'동기 새로고침으로 마무리합니다 (job {jobid})')
+        proc = vfs_refresh_sync_spawn(server, remote)
+        if proc is None:
+            return {'status': 'failed',
+                    'message': 'VFS 새로고침 작업 기록이 사라졌고, 동기 새로고침도 시작하지 못했습니다.',
+                    'duration': int(time.time() - t0), 'jobid': jobid}
+        deadline = time.time() + _vfs_timeout_sec()
+        res = TaskPeriodic._wait_vfs_sync(proc.pid, remote, t0, deadline,
+                                          claim_id=claim_id, title=title,
+                                          proc=proc)
+        if res['status'] == 'done':
+            res['message'] = 'VFS 새로고침 작업 기록이 사라져, 동기 새로고침으로 마무리했습니다.'
+        elif res['status'] == 'gone':
+            res['status'] = 'failed'
+            res['message'] = 'VFS 새로고침 작업 기록이 사라졌고, 동기 새로고침도 끝나지 않았습니다.'
+        res['jobid'] = jobid
+        return res
+
+    @staticmethod
+    def _poll_vfs_job(server, remote, jobid, t0, deadline, claim_id=None,
+                      title=''):
         """실행 중인 rclone VFS 새로고침 job이 끝날 때까지 기다린다.
         _do_vfs(새로 건 경우)와 VFS 단계 복구(이미 돌고 있는 경우)가 함께 쓴다.
         {'status': done|failed|cancelled, 'message', 'duration': 초,
          'jobid': rclone job id}를 돌려준다. 폴링 중 일시적 오류는 원인을
         로그에 남기고 계속 기다린다 — 확인 실패만으로는 실패로 확정하지
         않는다 (0.9.9h). 기한이 됐을 때 아직 진행 중이면 기한을 연장하고,
-        기한 안에 한 번도 확인이 안 됐을 때만 실패로 확정한다."""
+        기한 안에 한 번도 확인이 안 됐을 때만 실패로 확정한다.
+        작업 기록이 사라진 경우(not_found) — 진행 중인 것을 본 적이
+        있으면(끝난 뒤 기록이 만료된 경우) 동기로 한 번 더 걸어 끝내고
+        스캔으로 진행하고, 본 적이 없으면 지금처럼 실패로 끝낸다 (0.9.9l)."""
         timeout_sec = _vfs_timeout_sec()
         last_ok = None
         while True:
@@ -1879,7 +2000,7 @@ class TaskPeriodic:
                 # 기한 도달 — job을 한 번 더 조회한다. 끝났으면 그 결과를
                 # 쓰고, 아직 돌고 있으면 기한을 연장한다. 확인이 안 되면
                 # 기한 내내 확인이 안 됐을 때만 실패로 확정한다 (0.9.9h).
-                job = TaskPeriodic._query_vfs_job(addr, jobid)
+                job = TaskPeriodic._query_vfs_job(server, jobid)
                 if isinstance(job, dict):
                     last_ok = time.time()
                     if job.get('finished'):
@@ -1896,23 +2017,27 @@ class TaskPeriodic:
                         f"{_fmt_wait(timeout_sec)} 연장합니다 (job {jobid})")
                     continue
                 if job == 'not_found':
+                    if last_ok is not None:
+                        return TaskPeriodic._vfs_sync_fallback(
+                            server, remote, jobid, t0, claim_id, title)
                     return {'status': 'failed',
                             'message': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.',
                             'duration': int(time.time() - t0), 'jobid': jobid}
                 if last_ok is None or time.time() - last_ok >= timeout_sec:
                     return {'status': 'failed',
-                            'message': f'VFS 새로고침 확인이 기한({_fmt_wait(timeout_sec)}) 안에 되지 않았습니다.',
+                            'message': f'VFS 새로고침 확인이 제한 시간({_fmt_wait(timeout_sec)}) 안에 되지 않았습니다.',
                             'duration': int(time.time() - t0), 'jobid': jobid}
                 deadline = time.time() + VFS_POLL_SEC * 6
             if _cancel_requested(claim_id):
-                try:
-                    ModuleStatus._rc(addr, 'job/stop', {'jobid': jobid})
-                except Exception as e:
-                    logger.warning(f'[주기적 스캔] VFS 새로고침 중단 요청 실패: {e}')
+                if not rc_job_stop(server, jobid):
+                    logger.warning(f'[주기적 스캔] VFS 새로고침 중단 요청 실패 (job {jobid})')
                 return {'status': 'cancelled', 'message': '취소 요청으로 중단했습니다.',
                         'duration': int(time.time() - t0), 'jobid': jobid}
-            job = TaskPeriodic._query_vfs_job(addr, jobid)
+            job = TaskPeriodic._query_vfs_job(server, jobid)
             if job == 'not_found':
+                if last_ok is not None:
+                    return TaskPeriodic._vfs_sync_fallback(
+                        server, remote, jobid, t0, claim_id, title)
                 return {'status': 'failed',
                         'message': 'VFS 새로고침 작업 기록을 찾을 수 없습니다.',
                         'duration': int(time.time() - t0), 'jobid': jobid}
@@ -2022,7 +2147,7 @@ class TaskPeriodic:
                 # 실패로 확정한다 (0.9.9h).
                 if last_ok is None or time.time() - last_ok >= timeout_sec:
                     return {'status': 'failed',
-                            'message': f'스캔 확인이 기한({_fmt_wait(timeout_sec)}) 안에 되지 않았습니다. '
+                            'message': f'스캔 확인이 제한 시간({_fmt_wait(timeout_sec)}) 안에 되지 않았습니다. '
                                        'shyni 웹에서 스캔 상태를 확인해 주세요.',
                             'job_id': job_id, 'stats': None,
                             'duration': int(time.time() - t0)}
@@ -2457,19 +2582,28 @@ class TaskPeriodic:
                 except Exception:
                     vfs_slot = {}
                 jobid = vfs_slot.get('job')
+                vfs_pid = vfs_slot.get('pid')
+                vfs_mode = vfs_slot.get('mode')
                 vfs_started = vfs_slot.get('started_at')
-                addr, _remote = ModuleStatus._rc_target(sec.get('path', ''))
+                server, remote = TaskPeriodic._vfs_server(sec)
                 branch = 'restart'
                 branch_msg = 'VFS 새로고침 작업 번호가 없어 처음부터 다시 새로고침합니다.'
-                if jobid is not None and addr:
+                if vfs_mode == 'sync' and vfs_pid:
+                    if sync_pid_state(vfs_pid, remote) == 'running':
+                        branch = 'sync_poll'
+                        branch_msg = '동기 새로고침이 아직 진행 중이라 이어서 기다립니다.'
+                    else:
+                        branch_msg = '동기 새로고침 프로세스가 없어 처음부터 다시 새로고침합니다.'
+                elif jobid is not None and server is not None:
                     branch, branch_msg = _vfs_resume_decision(
-                        TaskPeriodic._query_vfs_job(addr, jobid))
+                        TaskPeriodic._query_vfs_job(server, jobid))
                 logger.info(f'[주기적 스캔 복구] {title} VFS 판정: {branch} — {branch_msg}')
                 if branch == 'done':
                     # 확인한 시점에 완료된 걸로 기록하고 스캔으로 간다.
                     vfs_duration = ModuleStatus._slot_seconds(vfs_started, _now_text())
                     _write_status(key, 'vfs', {
-                        'job': jobid, 'path': sec.get('path', ''),
+                        'job': jobid, 'pid': None, 'mode': 'async',
+                        'path': sec.get('path', ''),
                         'started_at': vfs_started, 'finished_at': _now_text(),
                         'status': 'done', 'source': 'periodic',
                         'job_name': job_name})
@@ -2496,7 +2630,8 @@ class TaskPeriodic:
                     item.save()
                     t0 = time.time()
                     vres = TaskPeriodic._poll_vfs_job(
-                        addr, jobid, t0, deadline, claim_id=claim_id, title=title)
+                        server, remote, jobid, t0, deadline,
+                        claim_id=claim_id, title=title)
                     # 소요는 원래 시작부터 끝까지로 본다.
                     if started_ts:
                         vfs_duration = max(0, int(time.time() - started_ts))
@@ -2505,7 +2640,55 @@ class TaskPeriodic:
                     vfs_status = {'done': 'done', 'failed': 'failed',
                                   'cancelled': 'cancelled'}.get(vres['status'], 'failed')
                     _write_status(key, 'vfs', {
-                        'job': jobid, 'path': sec.get('path', ''),
+                        'job': jobid, 'pid': vres.get('pid'), 'mode': 'async',
+                        'path': sec.get('path', ''),
+                        'started_at': vfs_started, 'finished_at': _now_text(),
+                        'status': vfs_status, 'source': 'periodic',
+                        'job_name': job_name})
+                    if vres['status'] != 'done':
+                        item.vfs_duration = vfs_duration
+                        if vres['status'] == 'cancelled':
+                            item.finish('cancelled', vres['message'])
+                        else:
+                            item.finish('failed', vres['message'])
+                        _clear_resume_current(item_id)
+                        return
+                elif branch == 'sync_poll':
+                    # 동기 새로고침 프로세스가 아직 살아 있다 — 기한은 원래
+                    # 시작한 시각 기준으로 잰다 (비동기 poll과 같은 기준).
+                    try:
+                        started_ts = datetime.strptime(
+                            vfs_started or '', '%Y-%m-%d %H:%M:%S').timestamp()
+                    except Exception:
+                        started_ts = None
+                    if started_ts:
+                        deadline = started_ts + _vfs_timeout_sec()
+                    else:
+                        deadline = time.time() + _vfs_timeout_sec()
+                    cur['vfs_pid'] = vfs_pid
+                    _upsert_current(cur)
+                    t0 = time.time()
+                    vres = TaskPeriodic._wait_vfs_sync(
+                        vfs_pid, remote, t0, deadline,
+                        claim_id=claim_id, title=title)
+                    if vres['status'] == 'gone':
+                        # 기다리는 사이에 프로세스가 사라졌다 — 새로고침을
+                        # 다시 걸어 그 결과로 판정한다.
+                        vres = TaskPeriodic._do_vfs(sec, cur)
+                    vres.setdefault('jobid', None)
+                    if 'pid' not in vres:
+                        vres['pid'] = vfs_pid
+                    # 소요는 원래 시작부터 끝까지로 본다.
+                    if started_ts:
+                        vfs_duration = max(0, int(time.time() - started_ts))
+                    else:
+                        vfs_duration = vres['duration']
+                    vfs_status = {'done': 'done', 'failed': 'failed',
+                                  'cancelled': 'cancelled'}.get(vres['status'], 'failed')
+                    _write_status(key, 'vfs', {
+                        'job': vres.get('jobid'), 'pid': vres.get('pid'),
+                        'mode': 'sync' if vres.get('pid') else 'async',
+                        'path': sec.get('path', ''),
                         'started_at': vfs_started, 'finished_at': _now_text(),
                         'status': vfs_status, 'source': 'periodic',
                         'job_name': job_name})
@@ -2520,14 +2703,16 @@ class TaskPeriodic:
                 else:  # restart — 처음부터 다시 새로고침
                     vfs_started = _now_text()
                     _write_status(key, 'vfs', {
-                        'job': None, 'path': sec.get('path', ''),
+                        'job': None, 'pid': None, 'mode': None,
+                        'path': sec.get('path', ''),
                         'started_at': vfs_started, 'finished_at': None,
                         'status': 'running', 'source': 'periodic',
                         'job_name': job_name})
 
                     def _on_vfs_job(vfs_jobid):
                         _write_status(key, 'vfs', {
-                            'job': vfs_jobid, 'path': sec.get('path', ''),
+                            'job': vfs_jobid, 'pid': None, 'mode': 'async',
+                            'path': sec.get('path', ''),
                             'started_at': vfs_started, 'finished_at': None,
                             'status': 'running', 'source': 'periodic',
                             'job_name': job_name})
@@ -2536,12 +2721,23 @@ class TaskPeriodic:
                         item.vfs_job_id = str(vfs_jobid)
                         item.save()
 
-                    vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job)
+                    def _on_vfs_pid(new_pid):
+                        _write_status(key, 'vfs', {
+                            'job': None, 'pid': new_pid, 'mode': 'sync',
+                            'path': sec.get('path', ''),
+                            'started_at': vfs_started, 'finished_at': None,
+                            'status': 'running', 'source': 'periodic',
+                            'job_name': job_name})
+
+                    vres = TaskPeriodic._do_vfs(sec, cur, on_job_id=_on_vfs_job,
+                                                on_sync_pid=_on_vfs_pid)
                     vfs_duration = vres['duration']
                     vfs_status = {'done': 'done', 'failed': 'failed',
                                   'cancelled': 'cancelled'}.get(vres['status'], 'failed')
                     _write_status(key, 'vfs', {
-                        'job': vres.get('jobid'), 'path': sec.get('path', ''),
+                        'job': vres.get('jobid'), 'pid': vres.get('pid'),
+                        'mode': 'sync' if vres.get('pid') else 'async',
+                        'path': sec.get('path', ''),
                         'started_at': vfs_started, 'finished_at': _now_text(),
                         'status': vfs_status, 'source': 'periodic',
                         'job_name': job_name})

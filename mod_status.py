@@ -765,15 +765,23 @@ class ModuleStatus(PluginModuleBase):
     # ---------- rclone RC ----------
     @staticmethod
     def _rc_target(path):
-        """라이브러리 경로 → (RC 주소, remote dir). scan_vfs_change_rule 첫 일치 규칙."""
+        """라이브러리 경로 → (RC 주소, remote dir). scan_vfs_change_rule 첫 일치 규칙.
+
+        일치는 경로 경계를 확인한다 (PlexMate와 동일): 규칙 경로와 같거나
+        그 아래 경로일 때만 적용되고, 앞부분만 같은 다른 폴더(예: 규칙
+        /mnt/gds2에 대한 /mnt/gds2-backup)에는 적용되지 않는다.
+        """
         for rule in P.ModelSetting.get_list('scan_vfs_change_rule'):
             tmps = rule.split('|')
             if len(tmps) < 3:
                 continue
             src, dst, addr = tmps[0].strip(), tmps[1].strip(), tmps[2].strip()
             addr = addr.split('#')[0].strip()
-            if src and path.startswith(src):
-                remote = (dst + path[len(src):]).replace('\\', '/').lstrip('/')
+            if not src:
+                continue
+            base = src.rstrip('/') or '/'
+            if base == '/' or path == base or path.startswith(base + '/'):
+                remote = (dst + path[len(base):]).replace('\\', '/').lstrip('/')
                 return addr, remote
         return None, None
 
@@ -899,7 +907,7 @@ class ModuleStatus(PluginModuleBase):
                 # 이력 행 끝내기는 한 번만 되게 돼 있어 겹쳐도 괜찮다.
                 vfs['status'] = 'failed'
                 vfs['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                vfs['error'] = 'VFS 새로고침이 기한 안에 끝나지 않았습니다.'
+                vfs['error'] = 'VFS 새로고침이 제한 시간 안에 끝나지 않았습니다.'
                 logger.warning(f"[현황] VFS 새로고침 기한 초과로 정리: 섹션 {key} job {vfs['job']}")
                 changed = True
                 row_id = vfs.get('history_row_id')
@@ -2285,7 +2293,7 @@ class ModuleStatus(PluginModuleBase):
                 break
             if not proceed:
                 self._dashboard_row_finish(row_id, 'failed',
-                                           'VFS 새로고침이 기한 안에 끝나지 않았습니다.')
+                                           'VFS 새로고침이 제한 시간 안에 끝나지 않았습니다.')
                 logger.warning(f'[현황] 새로고침 후 스캔 시간 초과로 중단: {title} job {jobid}')
                 return
             # 이어서 스캔 전송 — 같은 라이브러리가 스캔 중이거나

@@ -14,6 +14,7 @@
 <nav>
   {{ macros.m_tab_head_start() }}
     {{ macros.m_tab_head('normal', 'shyni 연결', true) }}
+    {{ macros.m_tab_head('global', '스캔 전역 설정', false) }}
     {{ macros.m_tab_head('etc', '기타', false) }}
   {{ macros.m_tab_head_end() }}
 </nav>
@@ -34,9 +35,33 @@
   {{ macros.setting_input_text('base_ghcr_token', 'shyni GHCR 토큰', value=arg['base_ghcr_token'], type='password', desc=['shyni 최신 버전을 확인할 때 쓰는 GHCR 토큰을 입력해 주세요.', '입력하면 대시보드의 shyni 서버 카드에 최신 버전이 표시됩니다.']) }}
 {{ macros.m_tab_content_end() }}
 
+{{ macros.m_tab_content_start('global', false) }}
+  <div style="font-size:13px; color:#555; margin:2px 0 12px 0">여기 있는 항목은 스캔 · 주기적 스캔 · 휴지통 스캔에 함께 적용됩니다.</div>
+  {{ macros.setting_input_int('scan_max_library_scan_count', '라이브러리 동시 스캔 수', min=1, max=20, value=arg['scan_max_library_scan_count'], desc=['대시보드 · 주기적 스캔 · 휴지통 스캔은 이 개수까지만 동시에 진행하며,', '동일한 라이브러리는 한 번에 하나만 스캔하고, 스캔 수 초과시 시작하지 않고 취소합니다.', '스캔 큐(폴더 단위)는 스캔 메뉴의 설정에서 동시 스캔 수로 별도로 제한됩니다.']) }}
+  {{ macros.setting_input_int('scan_max_wait_time', '파일 대기 시간', value=arg['scan_max_wait_time'], desc=['기본값 5분 · 단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.']) }}
+  {{ macros.m_hr() }}
+  {{ macros.setting_input_textarea('scan_vfs_change_rule', 'vfs/refresh 규칙', col='12', row='3', value=arg['scan_vfs_change_rule'], desc=['규칙은 한 줄에 하나씩 적어 주세요.']) }}
+  <div style="margin:-4px 0 12px 0">
+  <div id="vfs_rule_toggle" style="font-size:13px; color:#337ab7; cursor:pointer; margin:0 0 8px 0">형식 안내 <span id="vfs_rule_arrow">▸ 펼침</span></div>
+  <div id="vfs_rule_detail" style="display:none">
+  {{ macros.info_text('', '', "{local_path}|{remote_path}|{address}#{remote_name}|{user_name}|{password}") }}
+  {{ macros.info_text('', '', "/mnt/gds/GDRIVE|/GDRIVE|172.17.0.1:5275#gds2|admin|nimda") }}
+  {{ macros.info_text('', '', "/mnt/gds||http://admin:nimda@localhost:5572") }}
+  {{ macros.info_text('', '', "A: 로컬 경로, B: 리모트 경로, C: RC 주소, D(옵션): RC 사용자, E(옵션): RC 비밀번호") }}
+  {{ macros.info_text('', '', "스캔 경로가 A와 같거나 A 아래에 있으면, A 부분을 B로 바꾼 리모트 경로를 C 주소로 전달합니다.") }}
+  {{ macros.info_text('', '', "규칙이 여러 줄이면 위에서부터 확인해, 경로가 처음 맞는 줄 하나만 적용됩니다. 특정 폴더만 다르게 처리하려면, 더 좁은 경로의 줄을 위에 적어 주세요.") }}
+  {{ macros.info_text('', '', "rclone 인증이 없는 경우:") }}
+  {{ macros.info_text('', '', "/mnt/gds2/GDRIVE|/GDRIVE|172.17.0.1:5275") }}
+  {{ macros.info_text('', '', "rclone 인증이 있는 경우:") }}
+  {{ macros.info_text('', '', "/mnt/gds2/GDRIVE|/GDRIVE|172.17.0.1:5275|userid|userpw") }}
+  </div>
+  </div>
+  {{ macros.m_hr() }}
+  {{ macros.setting_input_textarea('scan_shyni_path_rule', '샤이니 경로 매핑', col='12', row='3', value=arg['scan_shyni_path_rule'], desc=['이 플러그인이 보는 경로와 shyni 서버가 보는 경로가 다를 때만 적어 주세요. 한 줄에 하나씩, 플러그인 경로|shyni 경로 형식입니다.', '두 서버가 같은 경로를 본다면 비워 두시면 됩니다. 비워 두면 경로가 그대로 전달됩니다.', '예: /mnt/ff쪽경로|/mnt/shyni쪽경로']) }}
+{{ macros.m_tab_content_end() }}
+
 {{ macros.m_tab_content_start('etc', false) }}
   {{ macros.setting_input_int('status_auto_refresh_min', '자동 업데이트 주기', min=0, max=120, value=arg['status_auto_refresh_min'], desc=['대시보드 · 건강도 · 세션 화면을 이 주기마다 자동으로 새로고침합니다.', '기본값 30 · 단위 분', '0이면 자동 업데이트를 하지 않고, 새로고침 버튼으로 직접 새로고침합니다.']) }}
-  {{ macros.setting_input_int('scan_max_library_scan_count', '라이브러리 동시 스캔 수', min=1, max=20, value=arg['scan_max_library_scan_count'], desc=['대시보드 · 주기적 스캔 · 휴지통 스캔은 이 개수까지만 동시에 진행하며,', '동일한 라이브러리는 한 번에 하나만 스캔하고, 스캔 수 초과시 시작하지 않고 취소합니다.', '스캔 큐(폴더 단위)는 스캔 메뉴의 설정에서 동시 스캔 수로 별도로 제한됩니다.']) }}
 {{ macros.m_tab_content_end() }}
 
 </div>
@@ -105,6 +130,14 @@ $(document).ready(function(){
     });
     return ok;
   };
+
+  // vfs/refresh 규칙 형식 안내 펼침/접기
+  $('#vfs_rule_toggle').click(function(){
+    var $detail = $('#vfs_rule_detail');
+    var open = $detail.is(':visible');
+    $detail.toggle();
+    $('#vfs_rule_arrow').text(open ? '▸ 펼침' : '▾ 접기');
+  });
 });
 </script>
 {% endblock %}
