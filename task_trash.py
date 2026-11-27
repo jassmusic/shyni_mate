@@ -500,6 +500,7 @@ def _try_claim(idx, name, mode, job_started, job_row_id, claim_id,
         # 차지했을 수 있다. 동시에 차지한 작업끼리는 차지한 시각
         # 순서로 가른다 (앞 순서가 자리를 갖고, 뒤 순서가 물러난다).
         try:
+            from .mod_status import ModuleStatus
             survives = ModuleStatus.claim_survives(claim_id, first_key, claimed_at)
         except Exception as e:
             logger.warning(f'[휴지통 스캔] 자리 재확인 실패: {e}')
