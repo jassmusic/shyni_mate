@@ -1105,6 +1105,7 @@ def _compute_skip_reason(key, claim_id=None):
     게이트와 마찬가지로 막지 않고 진행한다.
     섹션 시작 시마다 다시 읽는다."""
     try:
+        from .mod_status import ModuleStatus
         running = ModuleStatus.running_library_scans(exclude_claim_id=claim_id)
         running_keys = [k for k, _ in running]
     except Exception as e:
