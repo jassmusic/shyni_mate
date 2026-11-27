@@ -533,6 +533,9 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
     작업 대기 시간이 0이면 기다리지 않고 바로 건너뜀으로 끝낸다.
     '지금 실행'(수동)은 기다리지 않고 자리가 없으면 바로 건너뜀으로
     끝낸다. 자리가 없어 시작하지 못한 것은 실패가 아니라 건너뜀이다.
+    규칙 1(같은 라이브러리가 실행 중)에 걸린 경우도 기다리지 않고
+    건너뜀으로 끝낸다 — 기다리는 것은 규칙 2(동시 스캔 수 제한)에
+    걸린 경우만이다.
     section_label — 대기 행에 표시할 라이브러리명. 대상이 1개면
     그 이름, 여러 개면 '전체'. first_key — 첫 라이브러리 번호."""
     from .model_trash import ModelTrashItem
@@ -552,6 +555,18 @@ def _wait_for_turn(idx, name, mode, job_started, section_label='전체',
         fail_trash_start(name, mode,
                          gate_msg or '이미 진행 중인 휴지통 스캔이 있어 시작하지 못했습니다.',
                          section_label, action, status='skipped')
+        return (None, None, None)
+    # 규칙 1 — 같은 라이브러리가 실행 중이면 기다리지 않고 건너뜀으로
+    # 끝낸다. 그 작업이 끝나면 라이브러리는 최신 상태라, 대기했다가
+    # 이어서 도는 것은 중복에 가깝고, 기다리는 동안 다시 시작되면
+    # 대기가 중단돼 헷갈리는 기록만 남는다. 기다리는 것은 규칙 2
+    # (동시 스캔 수 제한)에 걸린 경우만이다. 판정은 이 시점에 다시
+    # 확인한다 — 자리를 차지하려다 같은 라이브러리 작업에 진 경우도
+    # 여기서 걸린다.
+    if _same_library_busy(first_key, exclude_claim_id=claim_id):
+        fail_trash_start(name, mode, LIBRARY_BUSY_MESSAGE,
+                         section_label, action, status='skipped')
+        logger.info(f'[휴지통 스캔] {name}: 같은 라이브러리 작업이 진행 중이라 건너뜁니다.')
         return (None, None, None)
     running_names = [(c.get('job_name') or '') for c in get_trash_currents()]
     running_names = [n for n in running_names if n]

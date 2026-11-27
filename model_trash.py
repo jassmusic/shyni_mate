@@ -6,6 +6,11 @@ from .setup import *
 
 logger = P.logger
 
+# 대기만 하다가 다시 시작되면서 종료된 행에 남는 문구. set_terminated가
+# 대기 행에만 남기므로, 화면이 이 문구로 '실행된 적 없이 대기로 끝난
+# 행'을 가려낸다 (상태를 '대기 중단'으로 나눠 보여주는 판정 기준).
+WAIT_TERMINATED_MESSAGE = '다시 시작되면서 대기가 중단됐습니다.'
+
 
 def action_label(action):
     """동작 코드 → 화면 표시 라벨. task_trash.ACTION_LABEL이 원본이다.
@@ -128,7 +133,7 @@ class ModelTrashItem(ModelBase):
                     if row.start_time:
                         row.duration = int((row.finish_time - row.start_time).total_seconds())
                     if was_waiting:
-                        row.message = '다시 시작되면서 대기가 중단됐습니다.'
+                        row.message = WAIT_TERMINATED_MESSAGE
                     row.save()
             except Exception as e:
                 logger.error(f'set_terminated 실패: {e}')
@@ -146,12 +151,18 @@ class ModelTrashItem(ModelBase):
                     0, int((datetime.now() - r.start_time).total_seconds()))
             except Exception:
                 waiting_seconds = None
+        # 실행된 적 없이 대기만 하다가 다시 시작되면서 종료된 행인지 —
+        # 화면이 상태를 '대기 중단'으로, 소요를 대기 시간으로 나눠
+        # 보여주는 판정값. 기존 이력 행에도 그대로 적용된다.
+        wait_terminated = (r.status == 'terminated'
+                           and (r.message or '') == WAIT_TERMINATED_MESSAGE)
         return {
             'id': r.id,
             'mode': r.mode,
             'action': r.action,
             'action_label': action_label(r.action),
             'status': r.status,
+            'wait_terminated': wait_terminated,
             'job_name': r.job_name,
             'section_key': r.section_key,
             'section_title': r.section_title,

@@ -96,6 +96,8 @@ function fmtWait(sec) {
 // 소요 칸 — 대기 중이면 대기 경과, 실행 중이면 기다린 시간, 끝나면 전체 소요
 function durCell(h) {
   if (h.status == 'waiting') return '대기 ' + fmtDur(h.waiting_seconds);
+  // 대기만 하다가 끝난 행은 소요 전체가 대기 시간이다.
+  if (h.wait_terminated) return '대기 ' + fmtDur(h.duration);
   if (h.status == 'running' && h.wait_seconds != null) return '대기 ' + fmtDur(h.wait_seconds);
   return fmtDur(h.duration);
 }
@@ -344,14 +346,18 @@ function loadCurrent() {
   });
 }
 
-function statusText(s) {
+function statusText(h) {
+  var s = h.status;
   if (s == 'done') return '<span style="color:#2f855a">완료</span>';
   if (s == 'failed') return '<span style="color:#c0392b">실패</span>';
   if (s == 'cancelled') return '<span style="color:#b7791f">취소</span>';
   if (s == 'skipped') return '<span style="color:#b7791f">건너뜀</span>';
   if (s == 'running') return '<span style="color:#2b6cb0">실행 중</span>';
   if (s == 'waiting') return '<span style="color:#6b46c1">대기 중</span>';
-  if (s == 'terminated') return '<span style="color:#888">중단됨(재시작)</span>';
+  // 실행된 적 없이 대기만 하다가 끝난 행은 실행 중 중단과 나눠 보여준다.
+  if (s == 'terminated') return h.wait_terminated
+    ? '<span style="color:#888">대기 중단(재시작)</span>'
+    : '<span style="color:#888">중단됨(재시작)</span>';
   return s;
 }
 
@@ -375,7 +381,7 @@ function renderHistory(data) {
     str += '<td class="c-time">' + fmtTimeShort(h.finish_time) + '</td>';
     str += '<td class="c-name">' + esc(h.job_name) + (showManual(h.job_name, h.mode) ? ' <span style="color:#6c757d; font-size:13px">(수동)</span>' : '') + (h.action_label ? '<div style="font-size:13px; color:#888">' + esc(h.action_label) + '</div>' : '') + '</td>';
     str += '<td class="c-name">' + esc(h.section_title) + '</td>';
-    str += '<td class="c-status">' + statusText(h.status) + '</td>';
+    str += '<td class="c-status">' + statusText(h) + '</td>';
     str += '<td class="c-num">' + durCell(h) + '</td>';
     var totalCell = statText(h.stat_total);
     if (h.stat_total != null && h.total_label === '처리') totalCell = '처리 ' + statText(h.stat_total);
@@ -445,6 +451,10 @@ function renderDetail(d) {
   var steps = [];
   if (d.status == 'waiting') {
     steps.push('대기 <span class="wait-timer" data-secs="' + (d.waiting_seconds || 0) + '">' + fmtWait(d.waiting_seconds || 0) + '</span>');
+  } else if (d.wait_terminated) {
+    // 실행된 적 없이 대기만 하다가 끝난 행 — 소요 전체가 대기 시간이라
+    // '전체'로 보여주면 실행한 시간처럼 오해할 수 있어 '대기'로 나눈다.
+    steps.push('대기 ' + fmtDur(d.duration));
   } else {
     if (d.wait_seconds != null) steps.push('대기 ' + fmtDur(d.wait_seconds));
     if (d.vfs_duration != null) steps.push('새로고침 ' + fmtDur(d.vfs_duration));
@@ -461,7 +471,11 @@ function renderDetail(d) {
   // (목록은 최신순이라 라이브러리별 행이 작업 단위 행보다 위에 있다.)
   var isJobRow = !d.section_key;
   if (isJobRow) {
-    str += '<div style="color:#888">라이브러리별 결과는 같은 작업명의 위 행에서 확인해 주세요.</div>';
+    // 실행된 적 없이 대기로 끝난 행은 라이브러리별 결과가 아예
+    // 없으므로 위 행을 보라는 안내를 내지 않는다.
+    if (!d.wait_terminated) {
+      str += '<div style="color:#888">라이브러리별 결과는 같은 작업명의 위 행에서 확인해 주세요.</div>';
+    }
   } else {
   // 집계 한 줄 (0인 항목은 빼고 간결하게)
   var hasStats = d.stat_total != null || d.stat_new != null || d.stat_missing != null ||
