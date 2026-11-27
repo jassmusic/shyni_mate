@@ -1448,6 +1448,61 @@ def _merge_resume_currents(old, resume_entries, keep_resume_ids=None,
     return list(resume_entries) + kept
 
 
+def _own_prev_current(old_curs, item_id, section_key):
+    """복구 대상 항목 자신의 옛 진행 상태를 찾는다 — 순수 함수
+    (하니스 검증용). 항목 id가 적힌 표시(resume_item_id·job_row_id)를
+    먼저 보고, 없으면 같은 라이브러리에서 실행 중이던 표시를 그
+    실행의 것으로 본다. 대기 표시는 남의 것이다 — 같은 라이브러리의
+    대기 항목 표시를 고르면 그 시작 시각이 복구 카드에 섞여 들어간다
+    (2026-11-28 실측: 복구된 48번 카드에 대기로 끝난 50번의 시작
+    시각 01:00이 섞여 '64분 경과'로 표시됨)."""
+    live = None
+    for cur in old_curs or []:
+        if not isinstance(cur, dict):
+            continue
+        if str(cur.get('section_key') or '') != str(section_key):
+            continue
+        if (str(cur.get('resume_item_id')) == str(item_id)
+                or str(cur.get('job_row_id')) == str(item_id)):
+            return cur
+        if cur.get('resume_item_id') is None \
+                and cur.get('stage') != 'waiting':
+            live = cur
+    return live or {}
+
+
+def _make_resume_entry(t, prev, run_id_text):
+    """복구 대상 1건의 진행 상태 항목을 만든다 — 순수 함수
+    (하니스 검증용). 시작 시각은 그 항목 자신의 옛 표시에 있으면
+    그 값(이어서 도는 실행이라 원래 시작을 유지한다), 없으면 이력
+    행의 시작 시각을 쓴다. 어느 쪽이든 복구 대상 항목 자신의
+    시작 시각이다. 옛 표시의 시작이 이력 행 시작보다 늦으면 그
+    실행의 시작일 수 없다 — 작업 시작은 섹션 행이 생기기 전이라
+    늦어질 수 없다. 이미 잘못 섞인 표시가 복구를 거듭하며 자기
+    값으로 굳는 것을 막는다."""
+    started = prev.get('job_started_at')
+    if started and t.get('section_started') \
+            and str(started) > str(t['section_started']):
+        started = None
+    return {
+        'job_idx': prev.get('job_idx'),
+        'job_name': t['job_name'],
+        'section_key': t['section_key'],
+        'section_title': t['section_title'],
+        'stage': 'waiting',
+        'mode': t['mode'],
+        'job_started_at': started or t['section_started'],
+        'section_started_at': t['section_started'],
+        'scan_job': t['job_id'],
+        'resume_item_id': t['item_id'],
+        'run_id': run_id_text,
+        'claim_id': f"resume-{t['item_id']}",
+        'claimed_at': prev.get('claimed_at'),
+        'pre_max_id': prev.get('pre_max_id'),
+        'action': t['action'],
+    }
+
+
 def _resume_already_done(run_id, exact):
     """이 기동에서 resume_running이 이미 돌았으면 True — 마커에
     남긴 기동 식별자와 지금 기동을 비교한다."""
@@ -3008,28 +3063,15 @@ class TaskPeriodic:
         # 버린다. 복구 항목은 'waiting'으로 남겨 두고 복구 작업이 뜰 때
         # 단계를 바꾼다.
         try:
-            old_by_key = {str(c.get('section_key')): c for c in old_curs
-                          if isinstance(c, dict) and c.get('section_key')}
             entries = []
             for t in targets:
-                prev = old_by_key.get(t['section_key']) or {}
-                entries.append({
-                    'job_idx': prev.get('job_idx'),
-                    'job_name': t['job_name'],
-                    'section_key': t['section_key'],
-                    'section_title': t['section_title'],
-                    'stage': 'waiting',
-                    'mode': t['mode'],
-                    'job_started_at': prev.get('job_started_at') or t['section_started'],
-                    'section_started_at': t['section_started'],
-                    'scan_job': t['job_id'],
-                    'resume_item_id': t['item_id'],
-                    'run_id': _format_run_id(run_id),
-                    'claim_id': f"resume-{t['item_id']}",
-                    'claimed_at': prev.get('claimed_at'),
-                    'pre_max_id': prev.get('pre_max_id'),
-                    'action': t['action'],
-                })
+                # 옛 표시는 섹션이 아니라 항목 자신 것으로 골라야
+                # 한다 — 같은 라이브러리의 대기 항목 표시를 고르면
+                # 그 시작 시각이 복구 카드에 섞여 들어간다.
+                prev = _own_prev_current(old_curs, t['item_id'],
+                                         t['section_key'])
+                entries.append(_make_resume_entry(
+                    t, prev, _format_run_id(run_id)))
             _save_currents(_merge_resume_currents(old_curs, entries,
                                                   launched_ids, run_id))
         except Exception as e:
