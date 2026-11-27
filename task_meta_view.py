@@ -43,7 +43,7 @@ STATE_KEY = 'meta_view_state'
 BULK_KEY = 'meta_bulk_state'
 CACHE_KEY = 'meta_view_cache'
 INDEX_KEY = 'meta_view_cache_index'
-WATCH_INTERVAL = 2
+WATCH_INTERVAL = 10
 REQUEST_EXPIRE = 15 * 60
 # 계산 중(busy)인 채로 이 시간이 지나면 중단된 것으로 본다 — 계산 도중
 # ff가 재시작되면 busy가 남아 이후 조회가 전부 막히는 것을 막는다.

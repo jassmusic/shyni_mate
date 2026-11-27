@@ -18,6 +18,24 @@ from .setup import *
 logger = P.logger
 
 
+def _decrypt(key, value):
+    """암호화 대상 키면 저장값을 복호화한다 (secret_store)."""
+    try:
+        from . import secret_store
+        return secret_store.decrypt_for_key(key, value)
+    except Exception:
+        return value
+
+
+def _encrypt(key, value):
+    """암호화 대상 키면 저장 직전에 암호화한다 (secret_store)."""
+    try:
+        from . import secret_store
+        return secret_store.encrypt_for_key(key, value)
+    except Exception:
+        return value
+
+
 def _setting_get(key):
     """app_context 중첩 없이 설정값을 읽는다.
 
@@ -31,10 +49,11 @@ def _setting_get(key):
         import flask
         if flask.has_app_context():
             ret = F.db.session.query(P.ModelSetting).filter_by(key=key).first()
-            return ret.value.strip() if ret is not None else None
+            value = ret.value.strip() if ret is not None else None
+            return _decrypt(key, value)
     except Exception:
         pass
-    return P.ModelSetting.get(key)
+    return _decrypt(key, P.ModelSetting.get(key))
 
 SESSION_TOKEN_KEY = 'base_shyni_session_token'
 ADMIN_ID_KEY = 'base_shyni_admin_id'
@@ -50,7 +69,11 @@ def _setting_set(key, value):
     안에서 부르면 중첩되고 DB 연결이 풀에 반환되지 않는다 (QueuePool
     고갈 원인 — get과 같은 원리). 컨텍스트가 이미 있으면 현재 세션으로
     직접 쓰고, 없을 때만 프레임워크 방식을 쓴다.
+
+    암호화 대상 키(세션 토큰 등)는 저장 직전에 암호화한다 — 세션 토큰은
+    이 경로로만 저장되므로, 여기서 암호화하면 자동 저장까지 일관된다.
     """
+    value = _encrypt(key, value)
     try:
         import flask
         if flask.has_app_context():

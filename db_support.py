@@ -65,6 +65,7 @@ def ensure_driver():
 
 def db_params():
     """저장된 설정에서 접속 정보를 읽는다. 필수 값이 비어 있으면 None."""
+    from . import secret_store
     get = P.ModelSetting.get
     host = (get('base_db_host') or '').strip()
     user = (get('base_db_user') or '').strip()
@@ -76,7 +77,10 @@ def db_params():
         port = 15432
     return {'host': host, 'port': port,
             'dbname': (get('base_db_name') or 'shyni').strip() or 'shyni',
-            'user': user, 'password': get('base_db_password') or ''}
+            'user': user,
+            # 비밀번호는 암호화 저장 대상이라 읽을 때 복호화한다
+            'password': secret_store.decrypt_value(
+                get('base_db_password')) or ''}
 
 
 def params_fingerprint(params):

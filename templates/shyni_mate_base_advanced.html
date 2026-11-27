@@ -56,7 +56,7 @@
   {{ macros.setting_input_text('base_db_port', '포트', value=arg['base_db_port'], desc=['기본값 15432', '중계가 듣고 있는 포트입니다.']) }}
   {{ macros.setting_input_text('base_db_name', '데이터베이스 이름', value=arg['base_db_name'], desc=['보통 shyni 입니다.']) }}
   {{ macros.setting_input_text('base_db_user', '계정', value=arg['base_db_user'], desc=['읽기 전용 계정을 적어 주세요. 예: shyni_ro']) }}
-  {{ macros.setting_input_text('base_db_password', '비밀번호', value=arg['base_db_password'], type='password', desc=['읽기 전용 계정의 비밀번호입니다. 이 플러그인 안에만 저장됩니다.']) }}
+  {{ macros.setting_input_text('base_db_password', '비밀번호', value=arg['base_db_password'], type='password', desc=['읽기 전용 계정의 비밀번호입니다. 이 플러그인 안에만 저장됩니다.', '암호화해서 저장합니다.']) }}
   {{ macros.setting_buttons([['db_test_btn', '연결 테스트']], left='연결 테스트', desc=['버튼을 누르면 입력하신 중계 주소와 포트, 계정으로 데이터베이스에 접근할 수 있는지, 저장하시기 전에 미리 확인해 보실 수 있습니다.', '성공하면 전체 미디어 수가 보입니다. 설정을 저장하시면 그때부터 데이터베이스 정보를 함께 활용합니다.'] ) }}
   <div id="db_state_line" style="font-size:13px; margin-top:6px; {% if arg['db_ok'] %}color:#2f855a{% else %}color:#c05621{% endif %}">
     {% if arg['db_ok'] %}연결 테스트에 성공하여, 데이터베이스 정보를 활용합니다.{% else %}아직 연결 테스트를 통과하지 못해 데이터베이스 정보를 활용하지 않습니다.{% endif %}

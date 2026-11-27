@@ -76,7 +76,10 @@ class ModuleStatus(PluginModuleBase):
         if not server_data:
             return None
         try:
-            token = P.ModelSetting.get('base_ghcr_token')
+            # GHCR 토큰은 암호화 저장 대상이라 읽을 때 복호화한다
+            from . import secret_store
+            token = secret_store.decrypt_value(
+                P.ModelSetting.get('base_ghcr_token'))
             latest = get_ghcr_latest(token) if token else None
             logger.debug(f'[Status] GHCR token: '
                          f'{"yes len=" + str(len(token)) if token else "no"}, '

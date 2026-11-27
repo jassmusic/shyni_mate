@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 
 import requests
@@ -12,6 +13,40 @@ from .version_info import (RUNNING_VERSION, get_github_version,
 logger = P.logger
 
 
+def _backup_db_once_for_encryption():
+    """비밀 설정값 암호화에 앞서 mate DB를 한 번만 백업한다.
+
+    백업 이름은 shyni_mate.db.bak-pre-0.9.9m이고, 이미 있으면 덮지
+    않는다. sqlite3 backup API로 복사해 WAL 상태에서도 일관된
+    복사본이 되게 한다. 실패해도 예외를 밖으로 내지 않는다 — 호출자가
+    로그를 보고 판단한다. 백업을 만들었거나 이미 있으면 True.
+    """
+    try:
+        from . import secret_store
+        src = secret_store.db_path()
+        dst = src + '.bak-pre-0.9.9m'
+        if os.path.exists(dst):
+            return True
+        if not os.path.exists(src):
+            return False
+        import sqlite3
+        src_conn = sqlite3.connect(f'file:{src}?mode=ro', uri=True)
+        try:
+            dst_conn = sqlite3.connect(dst)
+            try:
+                with dst_conn:
+                    src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
+        finally:
+            src_conn.close()
+        logger.info('[Base] 비밀 설정값 암호화에 앞서 mate DB를 백업했습니다.')
+        return True
+    except Exception as e:
+        logger.error(f'[Base] mate DB 백업에 실패했습니다: {e}')
+        return False
+
+
 class ModuleBase(PluginModuleBase):
 
     def __init__(self, P):
@@ -21,7 +56,7 @@ class ModuleBase(PluginModuleBase):
             f'{self.name}_shyni_url' : '',
             f'{self.name}_shyni_token' : '',
             # 관리자 계정 — 관리자 API용 세션 토큰 발급에 쓴다 (Step2·3).
-            # v1.0.0 정식 배포부터는 비밀번호·토큰을 암호화해서 저장한다.
+            # 비밀번호·세션 토큰은 암호화해서 저장한다 (secret_store).
             f'{self.name}_shyni_admin_id' : '',
             f'{self.name}_shyni_admin_pw' : '',
             f'{self.name}_shyni_session_token' : '',
@@ -63,6 +98,9 @@ class ModuleBase(PluginModuleBase):
 
 
     def plugin_load(self):
+        # 비밀 설정값 암호화 마이그레이션 — 평문으로 저장된 대상 키를
+        # 암호문으로 되쓴다 (멱등, secret_store 참고).
+        self._migrate_secret_settings()
         # mate DB를 WAL 모드로 — 쓰기 몰림 때 웹 읽기가 'database is locked'로
         # 실패하고 페이지가 버벅거리는 것을 막는다 (저널 모드는 DB 파일에 영구 저장).
         try:
@@ -86,8 +124,78 @@ class ModuleBase(PluginModuleBase):
             pass
 
 
+    def _migrate_secret_settings(self):
+        """평문으로 저장된 비밀 설정값을 암호문으로 되쓴다 (멱등).
+
+        대상 키 중 평문이 있으면 먼저 mate DB를 백업하고(1회만) 나서
+        암호화한다. 이미 암호문이거나 비어 있는 키는 건드리지 않아,
+        몇 번을 다시 실행해도 결과가 같다. 백업에 실패하면 암호화하지
+        않는다 — 되돌릴 복사본 없이 값을 바꾸지 않기 위해서다.
+        """
+        try:
+            from . import secret_store
+            plain_keys = []
+            for key in sorted(secret_store.SECRET_KEYS):
+                value = P.ModelSetting.get(key)
+                if value and not secret_store.is_encrypted(value):
+                    plain_keys.append(key)
+            if not plain_keys:
+                return
+            if not _backup_db_once_for_encryption():
+                logger.error('[Base] mate DB 백업을 만들지 못해 비밀 설정값 '
+                             '암호화를 건너뜁니다.')
+                return
+            done = 0
+            for key in plain_keys:
+                value = P.ModelSetting.get(key)
+                encrypted = secret_store.encrypt_value(value)
+                if secret_store.is_encrypted(encrypted):
+                    P.ModelSetting.set(key, encrypted)
+                    done += 1
+                else:
+                    logger.error(f'[Base] 비밀 설정값 암호화에 실패했습니다: {key}')
+            if done:
+                logger.info(f'[Base] 비밀 설정값 {done}개를 암호화해서 저장했습니다.')
+        except Exception as e:
+            logger.error(f'Exception:{str(e)}')
+            logger.error(traceback.format_exc())
+
+
+    def setting_save_after(self, change_list):
+        """설정 저장 직후 — 평문으로 저장된 비밀 설정값을 암호문으로 되쓴다.
+
+        프레임워크의 설정 저장은 폼 값을 그대로 DB에 넣으므로, 저장 후크에서
+        대상 키만 골라 암호화한다. 화면에는 복호화된 값을 보여 주기 때문에,
+        사용자가 다른 항목만 바꿔 저장해도 대상 키가 바뀐 것으로 잡혀
+        change_list에 들어올 수 있다 — 그 경우에도 여기서 암호화된다.
+        """
+        try:
+            from . import secret_store
+            for key in (change_list or []):
+                if not secret_store.is_secret_key(key):
+                    continue
+                value = P.ModelSetting.get(key)
+                if value and not secret_store.is_encrypted(value):
+                    encrypted = secret_store.encrypt_value(value)
+                    if secret_store.is_encrypted(encrypted):
+                        P.ModelSetting.set(key, encrypted)
+        except Exception as e:
+            logger.error(f'Exception:{str(e)}')
+            logger.error(traceback.format_exc())
+
+
     def process_menu(self, sub, req):
         arg = P.ModelSetting.to_dict()
+        # 비밀 설정값은 DB에 암호문으로 저장돼 있다 — 설정 화면에는
+        # 복호화된 실제 값을 보여 준다 (사용자가 값을 확인할 수 있어야
+        # 한다는 확정 요건). 저장은 setting_save_after가 다시 암호화한다.
+        try:
+            from . import secret_store
+            for key in secret_store.SECRET_KEYS:
+                if arg.get(key):
+                    arg[key] = secret_store.decrypt_value(arg[key])
+        except Exception:
+            pass
         if sub == 'setting':
             # 현재 버전(실행 중)은 기동 시 한 번 읽은 값이다.
             # 새 버전은 GitHub에서만 확인한다 (디스크는 매번 읽지 않는다).

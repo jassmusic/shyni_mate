@@ -36,7 +36,7 @@ CACHE_KEY = 'status_db_stats_cache'
 LAST_ERROR_KEY = 'status_db_stats_last_error'
 LIST_STATE_KEY = 'status_list_state'
 LIST_CACHE_KEY = 'status_list_cache'
-WATCH_INTERVAL = 5
+WATCH_INTERVAL = 10
 REQUEST_EXPIRE = 15 * 60
 # 계산 중(busy)인 채로 이 시간(초)이 지나면 중단된 것으로 본다 — 정상 계산은
 # 2분을 넘기지 않는다. 계산 도중 ff가 재시작되면 busy가 영원히 남아 이후

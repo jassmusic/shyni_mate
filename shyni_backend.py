@@ -19,8 +19,11 @@ class ShyniBackend:
     @staticmethod
     def get_config():
         # 연결 정보는 기본 설정(base_shyni_*)에서 읽는다.
+        # 토큰은 암호화 저장 대상이라 읽을 때 복호화한다 (secret_store).
+        from . import secret_store
         url = (P.ModelSetting.get('base_shyni_url') or '').strip().rstrip('/')
-        token = (P.ModelSetting.get('base_shyni_token') or '').strip()
+        token = (secret_store.decrypt_value(
+            P.ModelSetting.get('base_shyni_token')) or '').strip()
         return url, token
 
     @staticmethod

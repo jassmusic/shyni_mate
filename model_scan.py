@@ -153,6 +153,15 @@ class ModelScanItem(ModelBase):
 
 
     @classmethod
+    def count_by_status(cls, status):
+        """상태별 건수만 센다 — 전건 로딩 전에 빈 큐인지 확인할 때 쓴다."""
+        with F.app.app_context():
+            return db.session.query(cls).filter(
+                cls.status == status,
+            ).count()
+
+
+    @classmethod
     def set_status_incompleted_to_ready(cls):
         # 대량 UPDATE는 fetch 없이 한 번의 SQL로 한다 — fetch는 미완료
         # 항목 전부를 세션에 올린 뒤 갱신해 쓰기 잠금을 오래 잡고, 그 사이

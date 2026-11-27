@@ -42,7 +42,7 @@ logger = P.logger
 
 PLAY_QUEUE_KEY = 'webhook_play_queue'
 LIB_BUFFER_KEY = 'webhook_library_buffer'
-WATCH_INTERVAL = 2
+WATCH_INTERVAL = 5
 MAX_PLAY_QUEUE = 100
 MAX_LIB_TRACKS = 2000
 MAX_THUMB_BYTES = 1024 * 1024

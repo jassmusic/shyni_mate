@@ -42,7 +42,7 @@ from .shyni_backend import ShyniBackend
 logger = P.logger
 
 STATE_KEY = 'trash_sel_state'
-WATCH_INTERVAL = 2
+WATCH_INTERVAL = 10
 REQUEST_EXPIRE = 15 * 60
 # 실행 중(busy)인 채로 이 시간이 지나면 중단된 것으로 본다 — 실행은 이
 # 워커의 감시 루프가 동기적으로 수행하므로, 루프가 비어 있는데 busy가

@@ -193,14 +193,27 @@ class Task:
 
     @staticmethod
     def filecheck_thread_function():
+        # 빈 큐가 이어진 횟수 — 수면 구간에서 주기를 늘리는 데 쓴다.
+        empty_streak = 0
         while True:
             cycle_started = time.time()
+            cycle_idle = False
             try:
                 Task.save_summary_cache()
-                items = ModelScanItem.get_list_by_status('READY')
+                # READY 건수를 먼저 센다 — 0건이면 전건 로딩(ORM 객체 생성)을
+                # 건너뛴다. 실행 중 항목의 확정 폴링은 이 아래에서 그대로
+                # 이어지므로, 빈 큐 최적화가 확정 판정을 바꾸지 않는다.
+                ready_count = ModelScanItem.count_by_status('READY')
+                items = (ModelScanItem.get_list_by_status('READY')
+                         if ready_count > 0 else [])
                 max_scan_count = max(P.ModelSetting.get_int('scan_max_scan_count') or 2, 1)
                 running = Task.running_shyni_count()
                 assembling = Task.assembling_shyni_count()
+                # 정말 한가한 주기인지 — 실행 중 항목이 있으면 확정 폴링이
+                # 늦어지면 안 되므로, READY도 실행 중도 없을 때만 한가한
+                # 것으로 보고 수면 주기를 늘린다.
+                cycle_idle = (ready_count == 0 and running == 0
+                              and assembling == 0)
                 pending_groups = Task.running_probe_groups()
                 # 디스크 양보 판단은 주기당 한 번만 한다 — 켜져 있을 때만 읽는다
                 io_pressure = (Task._io_pressure_full_avg10()
@@ -348,5 +361,14 @@ class Task:
                 interval = max(P.ModelSetting.get_int(f"{name}_filecheck_thread_interval") or 60, 5)
             except Exception:
                 interval = 60
+            # 빈 큐 완화 — 한가한 주기가 이어지면 수면을 기본 주기의
+            # 배수로 늘려 최대 5분까지만 쉰다. 처리할 항목이나 실행 중
+            # 항목이 보이면 다음 수면부터 바로 기본 주기로 돌아온다.
+            if cycle_idle:
+                empty_streak += 1
+            else:
+                empty_streak = 0
+            if empty_streak > 0 and interval < 300:
+                interval = min(interval * (empty_streak + 1), 300)
             for i in range(interval):
                 time.sleep(1)
