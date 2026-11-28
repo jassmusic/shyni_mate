@@ -471,6 +471,82 @@ def friendly_scan_error(error, library_name=None):
     return out
 
 
+def is_collect_timeout_error(error):
+    """스캔 실패 원문이 수집 중 응답 대기시간 초과인지 판정한다."""
+    return bool(_SCAN_TIMEOUT_RE.search((error or '').strip()))
+
+
+def _epoch_from_value(value):
+    """ISO 문자열·datetime·숫자를 epoch 초로 바꾼다. 실패하면 None."""
+    from datetime import datetime, timezone
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def stuck_collect_state(status_info, started_epoch, finished_epoch):
+    """남은 스캔 상태가 실패한 job의 수집 잔재인지 판정한다 (순수 함수).
+
+    수집 타임아웃으로 job이 실패하면 shyni job은 failed로 끝나는데
+    라이브러리 스캔 상태는 '수집 중(collecting/collect)'에 멈춰 남는다
+    (2026-11-28 실측 — 영화·국내 모음). 그 잔재는 마지막 갱신 시각(ts)이
+    실패한 job이 살아 있던 구간 안에 있다. 새 스캔이 시작되면 상태가
+    새 ts로 다시 쓰이므로, ts가 job 종료 뒤면 남의 스캔이라 건드리지
+    않는다."""
+    if not isinstance(status_info, dict):
+        return False
+    if status_info.get('status') != 'collecting':
+        return False
+    if status_info.get('stage') != 'collect':
+        return False
+    ts = status_info.get('ts')
+    if not isinstance(ts, (int, float)):
+        return False
+    if started_epoch is not None and ts < started_epoch - 5:
+        return False
+    if finished_epoch is not None and ts > finished_epoch + 5:
+        return False
+    return True
+
+
+def clear_stuck_collect_state(section_key, job=None):
+    """수집 타임아웃 실패 뒤 남은 '수집 중' 상태를 취소 호출로 정리한다.
+
+    상태가 실패한 job의 잔재일 때만 api_cancel_scan을 한 번 건다 —
+    사용자가 shyni 웹에서 직접 취소하는 것과 같은 호출이다. 취소
+    표시는 다음 스캔 시작 때 shyni가 스스로 지우므로(scanner 시작
+    경로가 _scan_cancel을 discard) 다음 스캔에 영향이 없다.
+    정리했으면 True, 대상이 아니거나 실패하면 False."""
+    try:
+        lib_key = int(section_key)
+    except Exception:
+        return False
+    job = job or {}
+    started = _epoch_from_value(job.get('started_at'))
+    finished = _epoch_from_value(job.get('finished_at'))
+    status_info = api_scan_status(lib_key)
+    if not stuck_collect_state(status_info, started, finished):
+        return False
+    res = api_cancel_scan(lib_key)
+    return bool(res is not None and 200 <= res.status_code < 300)
+
+
 def api_item_info(library_id, item_id):
     """GET /libraries/{id}/media_info/item/{item_id} — 항목 정보.
     실패하면 None. 반환: {"item": {항목 행 + parent_title·parent_type·

@@ -2184,6 +2184,25 @@ class TaskPeriodic:
         deadline = time.time() + timeout_sec
         last_ok = None
         poll_count = 0
+
+        def _clear_stuck(job):
+            # 수집 타임아웃 실패면 shyni에 '수집 중'으로 남은 상태를
+            # 정리한다 (0.9.9n). 정리 실패가 실패 확정을 막지 않게
+            # 예외는 여기서 삼킨다.
+            if not section_key:
+                return
+            try:
+                from . import shyni_admin
+                if not shyni_admin.is_collect_timeout_error(
+                        (job or {}).get('error')):
+                    return
+                if shyni_admin.clear_stuck_collect_state(section_key, job):
+                    logger.info(
+                        f'[주기적 스캔] 수집 타임아웃으로 남은 shyni 스캔 '
+                        f'표시를 정리했습니다 (섹션 {section_key}, job {job_id})')
+            except Exception as e:
+                logger.warning(f'[주기적 스캔] 남은 스캔 표시 정리 실패: {e}')
+
         while True:
             if time.time() >= deadline:
                 # 기한 도달 — job을 한 번 더 조회해 연장 여부를 정한다.
@@ -2200,6 +2219,7 @@ class TaskPeriodic:
                                 'stats': job.get('stats') or {},
                                 'duration': int(time.time() - t0)}
                     if outcome == 'failed':
+                        _clear_stuck(job)
                         return {'status': 'failed', 'message': msg,
                                 'job_id': job_id,
                                 'stats': job.get('stats') or {},
@@ -2244,6 +2264,7 @@ class TaskPeriodic:
                         cres['reason'] == 'finished_first'
                         and cjob.get('status') == 'failed'):
                     from . import shyni_admin
+                    _clear_stuck(cjob)
                     return {'status': 'failed',
                             'message': ('스캔 실패: ' + shyni_admin.friendly_scan_error(
                                 cjob.get('error') or '')),
@@ -2281,6 +2302,7 @@ class TaskPeriodic:
                         'stats': (job or {}).get('stats') or {},
                         'duration': int(time.time() - t0)}
             if outcome == 'failed':
+                _clear_stuck(job)
                 return {'status': 'failed', 'message': msg,
                         'job_id': job_id,
                         'stats': (job or {}).get('stats') or {},

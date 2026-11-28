@@ -1047,6 +1047,15 @@ class ModuleStatus(PluginModuleBase):
                                 scan_duration=cls._slot_seconds(
                                     scan.get('started_at'), scan.get('finished_at')),
                                 pre_max_id=scan.get('pre_max_id'))
+                            # 수집 타임아웃 실패면 shyni에 '수집 중'으로 남은
+                            # 상태를 정리한다 (0.9.9n, 주기적 스캔과 동일).
+                            try:
+                                if shyni_admin.is_collect_timeout_error(
+                                        job.get('error') or ''):
+                                    if shyni_admin.clear_stuck_collect_state(key, job):
+                                        logger.info(f'[현황] 수집 타임아웃으로 남은 shyni 스캔 표시를 정리했습니다: 섹션 {key}')
+                            except Exception as e:
+                                logger.warning(f'[현황] 남은 스캔 표시 정리 실패: {e}')
                         elif job.get('status') == 'cancelled':
                             # Step5-1 — 관리자 API·shyni 웹에서 취소된 스캔은
                             # job이 'cancelled'로 끝난다. 슬롯도 취소됨으로
