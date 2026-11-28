@@ -36,7 +36,6 @@
 {{ macros.m_tab_content_end() }}
 
 {{ macros.m_tab_content_start('global', false) }}
-  <div style="font-size:13px; color:#555; margin:2px 0 12px 0">여기 있는 항목은 스캔 · 주기적 스캔 · 휴지통 스캔에 함께 적용됩니다.</div>
   {{ macros.setting_input_int('scan_max_library_scan_count', '라이브러리 동시 스캔 수', min=1, max=20, value=arg['scan_max_library_scan_count'], desc=['대시보드 · 주기적 스캔 · 휴지통 스캔은 이 개수까지만 동시에 진행하며,', '동일한 라이브러리는 한 번에 하나만 스캔하고, 스캔 수 초과시 시작하지 않고 취소합니다.', '스캔 큐(폴더 단위)는 스캔 메뉴의 설정에서 동시 스캔 수로 별도로 제한됩니다.']) }}
   {{ macros.m_hr() }}
   {{ macros.setting_input_int('scan_max_wait_time', '파일 대기 시간', value=arg['scan_max_wait_time'], desc=['기본값 5분 · 단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.', '스캔 · 휴지통 스캔에서 경로를 보낼 때만 전달되고, 주기적 스캔은 shyni 기본값으로 동작합니다.']) }}
