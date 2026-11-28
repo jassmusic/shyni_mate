@@ -391,6 +391,26 @@ def api_library_detail(library_id):
     return admin_get(f'/libraries/{int(library_id)}')
 
 
+def api_library_scan_timeouts():
+    """GET /libraries — 라이브러리별 파일 목록 응답 대기시간(scan_timeout_sec).
+    성공하면 [{'name': 이름, 'sec': 초}] 목록, 실패하면 None.
+    (shyni 소스 /app/app/api/library_management.py 실측: 목록 응답에
+    scan_timeout_sec가 라이브러리마다 들어 있다. 응답의 id는 View ID
+    기준이라 물리 섹션 ID와 달라, 라이브러리 구분은 이름으로 한다.)"""
+    data = admin_get('/libraries')
+    if not isinstance(data, list):
+        return None
+    items = []
+    for lib in data:
+        if not isinstance(lib, dict):
+            continue
+        sec = lib.get('scan_timeout_sec')
+        if sec is None:
+            continue
+        items.append({'name': lib.get('name') or '', 'sec': sec})
+    return items or None
+
+
 def api_item_info(library_id, item_id):
     """GET /libraries/{id}/media_info/item/{item_id} — 항목 정보.
     실패하면 None. 반환: {"item": {항목 행 + parent_title·parent_type·

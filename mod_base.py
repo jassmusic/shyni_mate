@@ -269,6 +269,8 @@ class ModuleBase(PluginModuleBase):
                 ret = {'ret': 'warning', 'msg': msg}
         if command == 'db_test':
             return jsonify(self._db_test(arg1, arg2, arg3))
+        if command == 'scan_timeout_info':
+            return jsonify(self._scan_timeout_info())
         return jsonify(ret)
 
 
@@ -316,3 +318,16 @@ class ModuleBase(PluginModuleBase):
                           '에피소드·트랙까지 읽어오지 않고, 미디어 하나하나만 읽어 온 수입니다.<br>'
                           '대시보드에서 라이브러리별 미디어 수·항목 수·메타 없음 수를 확인할 수 있습니다.<br>'
                           '설정을 저장해 두시면, 설정을 바꾸기 전까지 이 연결 정보를 활용합니다.')}
+
+
+    def _scan_timeout_info(self):
+        """스캔 전역 설정 탭의 '파일 목록 응답 대기시간' 표시용 조회.
+        shyni 라이브러리별 값을 관리자 API로 읽어 돌려준다 (읽기 전용).
+        관리자 계정이 없거나 조회에 실패하면 fail."""
+        from . import shyni_admin
+        if not shyni_admin.admin_available():
+            return {'ret': 'fail'}
+        items = shyni_admin.api_library_scan_timeouts()
+        if not items:
+            return {'ret': 'fail'}
+        return {'ret': 'success', 'items': items}
