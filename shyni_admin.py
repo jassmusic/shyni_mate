@@ -11,6 +11,9 @@
   TOTP 켜진 계정은 {"require_totp": true, "challenge_token"}을 준다.
 - 관리자 API는 Authorization: Bearer <token> 헤더로 부른다.
 """
+import re
+import time
+
 import requests
 
 from .setup import *
@@ -409,6 +412,63 @@ def api_library_scan_timeouts():
             continue
         items.append({'name': lib.get('name') or '', 'sec': sec})
     return items or None
+
+
+# ── 스캔 실패 문구 정리 ─────────────────────────────────────────────
+_SCAN_TIMEOUT_RE = re.compile(
+    r'파일 목록 조회가 ([0-9]+(?:\.[0-9]+)?)초 동안 응답하지 않습니다'
+    r'(?: \(수집 ([0-9,]+)개\))?(?:: (.+))?$')
+_timeout_cache = {'at': 0.0, 'items': None}
+
+
+def _scan_timeouts_cached():
+    """라이브러리별 대기시간 목록을 5분간 재사용한다 (실패 문구 정리용)."""
+    now = time.monotonic()
+    if (_timeout_cache['items'] is not None
+            and now - _timeout_cache['at'] < 300):
+        return _timeout_cache['items']
+    items = api_library_scan_timeouts()
+    if items is not None:
+        _timeout_cache['items'] = items
+        _timeout_cache['at'] = now
+    return items
+
+
+def friendly_scan_error(error, library_name=None):
+    """shyni 스캔 실패 원문을 표시용 문구로 정리한다.
+
+    수집 중 응답 대기시간 초과(파일 목록 조회가 N초 동안 응답하지
+    않습니다)는 '파일 목록 조회가 설정된 응답 대기시간 N초를
+    초과했습니다'로 바꾸고, 수집 개수·경로는 그대로 붙인다. N은
+    library_name으로 라이브러리 설정값을 확인해 쓰고, 확인이 안 되면
+    원문에 찍힌 실제 적용값을 쓴다. 해당하지 않는 오류는 원문 그대로
+    돌려준다. library_name이 없으면 관리자 API를 부르지 않는다."""
+    text = (error or '').strip()
+    m = _SCAN_TIMEOUT_RE.search(text)
+    if not m:
+        return text
+    sec = None
+    if library_name:
+        items = _scan_timeouts_cached() or []
+        for it in items:
+            if it.get('name') == library_name:
+                sec = it.get('sec')
+                break
+        if sec is None:
+            for it in items:
+                name = it.get('name') or ''
+                if name and (library_name in name or name in library_name):
+                    sec = it.get('sec')
+                    break
+    if sec is None:
+        raw = float(m.group(1))
+        sec = int(raw) if raw == int(raw) else raw
+    out = f'파일 목록 조회가 설정된 응답 대기시간 {sec}초를 초과했습니다'
+    if m.group(2):
+        out += f' (수집 {m.group(2)}개)'
+    if m.group(3):
+        out += f': {m.group(3)}'
+    return out
 
 
 def api_item_info(library_id, item_id):

@@ -210,7 +210,9 @@ def _scan_poll_outcome(status_code, job):
     if status == 'completed':
         return 'done', '스캔이 완료됐습니다.'
     if status == 'failed':
-        return 'failed', f"스캔 실패: {(job or {}).get('error') or ''}"
+        from . import shyni_admin
+        return 'failed', ('스캔 실패: ' + shyni_admin.friendly_scan_error(
+            (job or {}).get('error') or ''))
     if status == 'cancelled':
         return 'cancelled', '스캔이 취소됐습니다.'
     return 'wait', ''
@@ -2241,8 +2243,10 @@ class TaskPeriodic:
                 if cres['reason'] == 'already_failed' or (
                         cres['reason'] == 'finished_first'
                         and cjob.get('status') == 'failed'):
+                    from . import shyni_admin
                     return {'status': 'failed',
-                            'message': f"스캔 실패: {cjob.get('error') or ''}",
+                            'message': ('스캔 실패: ' + shyni_admin.friendly_scan_error(
+                                cjob.get('error') or '')),
                             'job_id': job_id, 'stats': cjob.get('stats') or {},
                             'duration': int(time.time() - t0)}
                 return {'status': 'cancelled',

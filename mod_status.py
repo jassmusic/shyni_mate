@@ -1037,9 +1037,11 @@ class ModuleStatus(PluginModuleBase):
                             logger.error(f"[현황] 스캔 실패: 섹션 {key} job {scan['job']} — {scan['error']}")
                             changed = True
                             # 실패한 스캔도 부분 통계를 이력에 남긴다 (주기적 스캔과 동일).
+                            from . import shyni_admin
                             cls._dashboard_row_finish(
                                 scan.get('history_row_id'), 'failed',
-                                f"스캔 실패: {scan.get('error') or ''}",
+                                '스캔 실패: ' + shyni_admin.friendly_scan_error(
+                                    scan.get('error') or ''),
                                 job=job, job_id=scan.get('job'),
                                 vfs_duration=vfs_secs,
                                 scan_duration=cls._slot_seconds(

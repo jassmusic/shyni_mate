@@ -40,9 +40,8 @@
   {{ macros.setting_input_int('scan_max_library_scan_count', '라이브러리 동시 스캔 수', min=1, max=20, value=arg['scan_max_library_scan_count'], desc=['대시보드 · 주기적 스캔 · 휴지통 스캔은 이 개수까지만 동시에 진행하며,', '동일한 라이브러리는 한 번에 하나만 스캔하고, 스캔 수 초과시 시작하지 않고 취소합니다.', '스캔 큐(폴더 단위)는 스캔 메뉴의 설정에서 동시 스캔 수로 별도로 제한됩니다.']) }}
   {{ macros.setting_input_int('scan_max_wait_time', '파일 대기 시간', value=arg['scan_max_wait_time'], desc=['기본값 5분 · 단위: 분', '파일이 아직 마운트에 보이지 않을 때, shyni 서버가 이 시간만큼 기다리도록 전달하는 값입니다.', '스캔 · 휴지통 스캔에서 경로를 보낼 때만 전달되고, 주기적 스캔은 shyni 기본값으로 동작합니다.']) }}
   {{ macros.m_hr() }}
-  {{ macros.info_text('scan_timeout_summary', '파일 목록 응답 대기시간 (scan timeout)', '불러오는 중…', desc=['스캔 수집 중 파일 목록 조회가 응답하기를 기다리는 시간입니다.', 'shyni 라이브러리 설정의 TIMEOUT 값이며,', '환경변수 SHYNI_SCAN_WALK_IDLE_TIMEOUT_SEC는 라이브러리에 값이 없을 때만 적용됩니다.']) }}
+  {{ macros.info_text('scan_timeout_summary', '파일 목록 응답 대기시간 (scan timeout)', '현재 라이브러리별 설정값', desc=['스캔 수집 중 파일 목록 조회가 응답하기를 기다리는 시간입니다.', 'shyni 라이브러리 설정의 TIMEOUT 값이며,', '환경변수 SHYNI_SCAN_WALK_IDLE_TIMEOUT_SEC는 라이브러리에 값이 없을 때만 적용됩니다.']) }}
   <div style="margin:-4px 0 12px 0">
-  <div id="scan_timeout_toggle" style="font-size:13px; color:#337ab7; cursor:pointer; margin:0 0 8px 0; display:none">라이브러리별 설정값 <span id="scan_timeout_arrow">▸ 펼침</span></div>
   <div id="scan_timeout_detail" style="display:none"></div>
   </div>
   {{ macros.m_hr() }}
@@ -145,34 +144,29 @@ $(document).ready(function(){
     $('#vfs_rule_arrow').text(open ? '▸ 펼침' : '▾ 접기');
   });
 
-  // 파일 목록 응답 대기시간 (scan timeout) — shyni 라이브러리별 값 표시
-  $('#scan_timeout_toggle').click(function(){
-    var $detail = $('#scan_timeout_detail');
-    var open = $detail.is(':visible');
-    $detail.toggle();
-    $('#scan_timeout_arrow').text(open ? '▸ 펼침' : '▾ 접기');
-  });
+  // 파일 목록 응답 대기시간 (scan timeout) — '현재 라이브러리별 설정값'을
+  // 누르면 shyni 라이브러리별 값을 펼쳐 보여 준다 (요약 표시는 하지 않는다).
   globalSendCommand('scan_timeout_info', null, null, null, function(ret){
     var $sum = $('#scan_timeout_summary');
     if (!ret || ret.ret !== 'success' || !ret.items || !ret.items.length) {
       $sum.text('확인 불가');
       return;
     }
-    var items = ret.items;
-    var first = items[0].sec;
-    var uniform = true;
-    for (var i = 0; i < items.length; i++) {
-      if (items[i].sec !== first) { uniform = false; break; }
-    }
-    $sum.text(uniform ? ('전 라이브러리 ' + first + '초') : '라이브러리마다 다릅니다');
     var $detail = $('#scan_timeout_detail');
-    $.each(items, function(_, it){
+    $.each(ret.items, function(_, it){
       var $row = $('<div style="display:flex; justify-content:space-between; font-size:14px; padding:2px 0"></div>');
       $row.append($('<span></span>').text(it.name));
       $row.append($('<span></span>').text(it.sec + '초'));
       $detail.append($row);
     });
-    $('#scan_timeout_toggle').show();
+    var $arrow = $('<span style="font-size:13px; color:#337ab7; margin-left:6px">▸ 펼침</span>');
+    $sum.after($arrow);
+    $sum.parent().css('cursor', 'pointer');
+    $sum.parent().click(function(){
+      var open = $detail.is(':visible');
+      $detail.toggle();
+      $arrow.text(open ? '▸ 펼침' : '▾ 접기');
+    });
   });
 });
 </script>

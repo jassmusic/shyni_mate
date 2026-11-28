@@ -1501,7 +1501,10 @@ class TaskTrash:
                                     break
                                 if w['result'] != 'done':
                                     scan_failed_folders += 1
-                                    job_err = ((w.get('job') or {}).get('error') or '')
+                                    from . import shyni_admin
+                                    job_err = shyni_admin.friendly_scan_error(
+                                        ((w.get('job') or {}).get('error') or ''),
+                                        library_name=title)
                                     scan_results[folder] = {
                                         'ok': False,
                                         'error': (job_err[:200] if job_err
