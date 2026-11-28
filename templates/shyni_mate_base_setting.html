@@ -157,8 +157,8 @@ $(document).ready(function(){
     }
     var $detail = $('#scan_timeout_detail');
     $.each(ret.items, function(_, it){
-      var $row = $('<div style="display:flex; justify-content:space-between; font-size:14px; padding:2px 0"></div>');
-      $row.append($('<span></span>').text(it.name));
+      var $row = $('<div style="display:flex; font-size:14px; padding:2px 0"></div>');
+      $row.append($('<span style="min-width:210px"></span>').text(it.name));
       $row.append($('<span></span>').text(it.sec + '초'));
       $detail.append($row);
     });
